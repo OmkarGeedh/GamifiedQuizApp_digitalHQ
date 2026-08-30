@@ -1,0 +1,10 @@
+.git
+.gitignore
+.env
+.air.toml
+tmp
+bin
+.gemini
+.vscode
+.DS_Store
+*.log

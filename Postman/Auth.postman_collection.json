@@ -1,0 +1,699 @@
+{
+	"info": {
+		"_postman_id": "a1b2c3d4-auth-4001-9000-000000000001",
+		"name": "Gamified Quiz App - Auth API",
+		"description": "Postman Collection for Client Authentication, Registration, 2FA/OTP login, Session Management, and Password Recovery in Gamified Quiz App.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "1. Registration",
+			"item": [
+				{
+					"name": "Register Validate Basic",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Accept",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"username\": \"quizmaster\",\n  \"email\": \"player@example.com\",\n  \"phone\": \"+1-555-0199\",\n  \"password\": \"secretpassword123\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/register/validate-basic",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"auth",
+								"register",
+								"validate-basic"
+							]
+						},
+						"description": "Registers a new client with username, email, phone (optional), and bcrypt hashed password."
+					},
+					"response": []
+				},
+				{
+					"name": "Check Email Availability",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Accept",
+								"value": "application/json"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/auth/register/email-check?email=player@example.com",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"auth",
+								"register",
+								"email-check"
+							],
+							"query": [
+								{
+									"key": "email",
+									"value": "player@example.com"
+								}
+							]
+						},
+						"description": "Checks if an email is already registered."
+					},
+					"response": []
+				},
+				{
+					"name": "Request Email Verification OTP",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Accept",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"player@example.com\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/register/email-request",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"auth",
+								"register",
+								"email-request"
+							]
+						},
+						"description": "Generates a 6-digit registration OTP stored in Redis and logged on the server."
+					},
+					"response": []
+				},
+				{
+					"name": "Verify Registration Email OTP",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Accept",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"player@example.com\",\n  \"otp\": \"{{otp}}\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/register/email-verify",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"auth",
+								"register",
+								"email-verify"
+							]
+						},
+						"description": "Verifies the registration email OTP against Redis."
+					},
+					"response": []
+				},
+				{
+					"name": "Request Phone Verification OTP",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Accept",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"phone\": \"+1-555-0199\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/register/phone-request",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"auth",
+								"register",
+								"phone-request"
+							]
+						},
+						"description": "Generates a phone verification OTP stored in Redis."
+					},
+					"response": []
+				},
+				{
+					"name": "Verify Phone OTP",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Accept",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"phone\": \"+1-555-0199\",\n  \"otp\": \"{{otp}}\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/register/phone-verify",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"auth",
+								"register",
+								"phone-verify"
+							]
+						},
+						"description": "Verifies the phone registration OTP."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "2. Login & 2FA OTP",
+			"item": [
+				{
+					"name": "Login - Generate OTP",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"var jsonData = pm.response.json();",
+									"if (jsonData.success && jsonData.data && jsonData.data.otp) {",
+									"    pm.environment.set(\"otp\", jsonData.data.otp);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Accept",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"player@example.com\",\n  \"password\": \"secretpassword123\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/login/otp",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"auth",
+								"login",
+								"otp"
+							]
+						},
+						"description": "Verifies password and generates a 6-digit OTP stored in Redis with 1-min TTL (Rate limit: 5 req / 10 min, 30s cooldown)."
+					},
+					"response": []
+				},
+				{
+					"name": "Login - Resend OTP",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Accept",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"player@example.com\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/login/otp/resend",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"auth",
+								"login",
+								"otp",
+								"resend"
+							]
+						},
+						"description": "Resends a fresh OTP after the 30-second cooldown period."
+					},
+					"response": []
+				},
+				{
+					"name": "Login - Verify OTP (Issues JWT)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"var jsonData = pm.response.json();",
+									"if (jsonData.success && jsonData.data) {",
+									"    if (jsonData.data.accessToken) {",
+									"        pm.environment.set(\"accessToken\", jsonData.data.accessToken);",
+									"    }",
+									"    if (jsonData.data.refreshToken) {",
+									"        pm.environment.set(\"refreshToken\", jsonData.data.refreshToken);",
+									"    }",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Accept",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"player@example.com\",\n  \"otp\": \"{{otp}}\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/login/verify-otp",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"auth",
+								"login",
+								"verify-otp"
+							]
+						},
+						"description": "Validates the OTP with constant-time check. On success, returns JWT Access Token (with unique JTI), sets HTTP-only cookies, and saves Refresh Token to DB."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "3. Session & Tokens",
+			"item": [
+				{
+					"name": "Get Client Session",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{accessToken}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [
+							{
+								"key": "Accept",
+								"value": "application/json"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/session",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"session"
+							]
+						},
+						"description": "Retrieves the safe session profile of the authenticated client."
+					},
+					"response": []
+				},
+				{
+					"name": "Verify Session Active",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{accessToken}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [
+							{
+								"key": "Accept",
+								"value": "application/json"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/verify-session",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"verify-session"
+							]
+						},
+						"description": "Checks if the client session is currently active and valid."
+					},
+					"response": []
+				},
+				{
+					"name": "Refresh Access Token",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"var jsonData = pm.response.json();",
+									"if (jsonData.success && jsonData.data && jsonData.data.accessToken) {",
+									"    pm.environment.set(\"accessToken\", jsonData.data.accessToken);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Accept",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"refreshToken\": \"{{refreshToken}}\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/refresh",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"auth",
+								"refresh"
+							]
+						},
+						"description": "Issues a new JWT Access Token using the valid Refresh Token from payload or cookie."
+					},
+					"response": []
+				},
+				{
+					"name": "Logout Client",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{accessToken}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Accept",
+								"value": "application/json"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/auth/logout",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"auth",
+								"logout"
+							]
+						},
+						"description": "Revokes active session, adds Access Token JTI to Redis blacklist, clears DB refresh token, and removes cookies."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "4. Password Management",
+			"item": [
+				{
+					"name": "Change Password - Request OTP",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{accessToken}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Accept",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"oldPassword\": \"secretpassword123\",\n  \"newPassword\": \"newsecretpassword456\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/change-password-request",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"change-password-request"
+							]
+						},
+						"description": "Validates old credentials and stashes new password & verification OTP in Redis."
+					},
+					"response": []
+				},
+				{
+					"name": "Change Password - Verify OTP",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{accessToken}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Accept",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"otp\": \"{{otp}}\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/change-password-verify",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"change-password-verify"
+							]
+						},
+						"description": "Verifies OTP from Redis stash, hashes new password with bcrypt, and updates database record."
+					},
+					"response": []
+				},
+				{
+					"name": "Forgot Password - Request Reset Token",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"var jsonData = pm.response.json();",
+									"if (jsonData.success && jsonData.data && jsonData.data.token) {",
+									"    pm.environment.set(\"resetToken\", jsonData.data.token);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Accept",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"player@example.com\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/forgot-password",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"auth",
+								"forgot-password"
+							]
+						},
+						"description": "Generates a secure 64-char password reset token stored in Redis with 15-minute expiration."
+					},
+					"response": []
+				},
+				{
+					"name": "Forgot Password - Validate Token",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Accept",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"token\": \"{{resetToken}}\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/forgot-password/verify",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"auth",
+								"forgot-password",
+								"verify"
+							]
+						},
+						"description": "Checks whether the provided password reset token is active in Redis."
+					},
+					"response": []
+				},
+				{
+					"name": "Forgot Password - Reset Password",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Accept",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"token\": \"{{resetToken}}\",\n  \"newPassword\": \"completelyNewPassword789\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/forgot-password/reset",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"auth",
+								"forgot-password",
+								"reset"
+							]
+						},
+						"description": "Consumes the reset token, updates the client password in PostgreSQL, and removes the Redis token."
+					},
+					"response": []
+				}
+			]
+		}
+	]
+}

@@ -1,0 +1,492 @@
+package handler
+
+import (
+	"fmt"
+	"net/http"
+	"os"
+
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/auth/client/dto"
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/auth/client/services"
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/config"
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/middleware"
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/utils/response"
+	"github.com/gin-gonic/gin"
+)
+
+func getCookieConfig() (isProduction bool, domain string) {
+	if config.AppConfig != nil {
+		env := config.AppConfig.Server.Env
+		isProduction = env == "production" || env == "staging" || os.Getenv("ENV") == "production" || os.Getenv("APP_ENV") == "production"
+		domain = config.AppConfig.Server.CookieDomain
+	} else {
+		env := os.Getenv("ENV")
+		if env == "" {
+			env = os.Getenv("APP_ENV")
+		}
+		isProduction = env == "production" || env == "staging"
+		domain = os.Getenv("COOKIE_DOMAIN")
+	}
+	return isProduction, domain
+}
+
+func setClientAuthCookies(c *gin.Context, accessStr, refreshStr string) {
+	isProduction, domain := getCookieConfig()
+
+	accessExpirySeconds := 30 * 24 * 60 * 60  // 30 days
+	if config.AppConfig != nil && config.AppConfig.Server.JWTAccessTokenExpiry > 0 {
+		accessExpirySeconds = int(config.AppConfig.Server.JWTAccessTokenExpiry.Seconds())
+	}
+	refreshExpirySeconds := 180 * 24 * 60 * 60 // 180 days / 6 months
+	if config.AppConfig != nil && config.AppConfig.Server.JWTRefreshTokenExpiry > 0 {
+		refreshExpirySeconds = int(config.AppConfig.Server.JWTRefreshTokenExpiry.Seconds())
+	}
+
+	c.SetSameSite(http.SameSiteLaxMode)
+	// Set HTTP-Only, Secure (in prod), SameSite=Lax cookies
+	c.SetCookie("clientAccessToken", accessStr, accessExpirySeconds, "/", domain, isProduction, true)
+	c.SetCookie("clientRefreshToken", refreshStr, refreshExpirySeconds, "/", domain, isProduction, true)
+}
+
+func clearClientAuthCookies(c *gin.Context) {
+	middleware.ClearClientAuthCookies(c)
+}
+
+func LoginGenOTPHandler(c *gin.Context) {
+	var req dto.LoginGenOTPRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, http.StatusBadRequest, fmt.Sprintf("Invalid input: %s", err.Error()))
+		return
+	}
+	if err := req.Validate(); err != nil {
+		response.Error(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	res, status, err := services.LoginGenOTPService(c.Request.Context(), &req)
+	if err != nil {
+		response.Error(c, status, err.Error())
+		return
+	}
+
+	response.Success(c, status, "Proceed to OTP verification", res)
+}
+
+func LoginResendOTPHandler(c *gin.Context) {
+	var req dto.LoginResendOTPRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, http.StatusBadRequest, fmt.Sprintf("Invalid input: %s", err.Error()))
+		return
+	}
+	if err := req.Validate(); err != nil {
+		response.Error(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	res, status, err := services.LoginResendOTPService(c.Request.Context(), &req)
+	if err != nil {
+		response.Error(c, status, err.Error())
+		return
+	}
+
+	response.Success(c, status, "OTP has been resent successfully", res)
+}
+
+func LoginOTPVerifyHandler(c *gin.Context) {
+	var req dto.LoginOTPVerifyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, http.StatusBadRequest, fmt.Sprintf("Invalid input: %s", err.Error()))
+		return
+	}
+	if err := req.Validate(); err != nil {
+		response.Error(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	accessStr, refreshStr, status, err := services.LoginOTPVerifyService(c.Request.Context(), &req)
+	if err != nil {
+		response.Error(c, status, err.Error())
+		return
+	}
+
+	// Set HTTP-only secure cookies for tokens
+	setClientAuthCookies(c, accessStr, refreshStr)
+
+	response.Success(c, status, "Client logged in successfully", gin.H{
+		"message":      "Authentication successful. Auth tokens stored in cookies.",
+		"accessToken":  accessStr,
+		"refreshToken": refreshStr,
+	})
+}
+
+func LogoutClientHandler(c *gin.Context) {
+	clientIDVal, exists := c.Get("client_id")
+	if !exists {
+		response.Error(c, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	clientID, ok := clientIDVal.(int)
+	if !ok {
+		response.Error(c, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	var jti string
+	if jtiVal, exists := c.Get("jti"); exists {
+		jti, _ = jtiVal.(string)
+	}
+
+	var exp int64
+	if expVal, exists := c.Get("exp"); exists {
+		if expFloat, ok := expVal.(float64); ok {
+			exp = int64(expFloat)
+		}
+	}
+
+	status, err := services.LogoutClientService(c.Request.Context(), clientID, jti, exp)
+	if err != nil {
+		response.Error(c, status, err.Error())
+		return
+	}
+
+	clearClientAuthCookies(c)
+
+	response.Success(c, status, "Client logged out successfully", gin.H{
+		"message": "Logged out successfully and cookies cleared.",
+	})
+}
+
+func ClientRefreshTokenHandler(c *gin.Context) {
+	refreshStr, _ := c.Cookie("clientRefreshToken")
+	if refreshStr == "" {
+		var bodyReq struct {
+			RefreshToken string `json:"refreshToken"`
+		}
+		if err := c.ShouldBindJSON(&bodyReq); err == nil {
+			refreshStr = bodyReq.RefreshToken
+		}
+	}
+
+	if refreshStr == "" {
+		response.Error(c, http.StatusBadRequest, "No refresh token found in cookies or request body")
+		return
+	}
+
+	newAccessStr, status, err := services.RefreshTokenService(c.Request.Context(), refreshStr)
+	if err != nil {
+		clearClientAuthCookies(c)
+		response.Error(c, status, err.Error())
+		return
+	}
+
+	isProduction, domain := getCookieConfig()
+	accessExpirySeconds := 30 * 24 * 60 * 60 // 30 days
+	if config.AppConfig != nil && config.AppConfig.Server.JWTAccessTokenExpiry > 0 {
+		accessExpirySeconds = int(config.AppConfig.Server.JWTAccessTokenExpiry.Seconds())
+	}
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie("clientAccessToken", newAccessStr, accessExpirySeconds, "/", domain, isProduction, true)
+
+	response.Success(c, status, "Token refreshed successfully", gin.H{
+		"message":     "Access token refreshed and updated in cookie.",
+		"accessToken": newAccessStr,
+	})
+}
+
+func ClientVerifySessionHandler(c *gin.Context) {
+	clientIDVal, exists := c.Get("client_id")
+	if !exists {
+		response.Error(c, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	clientID, ok := clientIDVal.(int)
+	if !ok {
+		response.Error(c, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	res, status, err := services.ClientVerifySessionService(c.Request.Context(), clientID)
+	if err != nil {
+		response.Error(c, status, err.Error())
+		return
+	}
+
+	msg := "Client fetched successfully"
+	if !res.Active {
+		msg = "Client not found"
+	}
+
+	response.Success(c, status, msg, res)
+}
+
+func ClientSessionHandler(c *gin.Context) {
+	clientIDVal, exists := c.Get("client_id")
+	if !exists {
+		response.Error(c, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	clientID, ok := clientIDVal.(int)
+	if !ok {
+		response.Error(c, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	res, status, err := services.ClientSessionService(c.Request.Context(), clientID)
+	if err != nil {
+		response.Error(c, status, err.Error())
+		return
+	}
+
+	response.Success(c, status, "Client fetched successfully", res)
+}
+
+func ChangePasswordRequestHandler(c *gin.Context) {
+	clientIDVal, exists := c.Get("client_id")
+	if !exists {
+		response.Error(c, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	clientID, ok := clientIDVal.(int)
+	if !ok {
+		response.Error(c, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	var input dto.ChangePasswordRequest
+	if err := c.ShouldBindJSON(&input); err != nil {
+		response.Error(c, http.StatusBadRequest, fmt.Sprintf("Invalid input: %s", err.Error()))
+		return
+	}
+	if err := input.Validate(); err != nil {
+		response.Error(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	otp, status, err := services.ChangePasswordRequestService(c.Request.Context(), clientID, &input)
+	if err != nil {
+		response.Error(c, status, err.Error())
+		return
+	}
+
+	response.Success(c, status, "OTP generated successfully. Verify to confirm password change.", gin.H{
+		"message": "OTP generated successfully. Verify to confirm password change.",
+		"otp":     otp,
+	})
+}
+
+func ChangePasswordVerifyHandler(c *gin.Context) {
+	clientIDVal, exists := c.Get("client_id")
+	if !exists {
+		response.Error(c, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	clientID, ok := clientIDVal.(int)
+	if !ok {
+		response.Error(c, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	var input dto.ChangePasswordVerifyRequest
+	if err := c.ShouldBindJSON(&input); err != nil {
+		response.Error(c, http.StatusBadRequest, fmt.Sprintf("Invalid input: %s", err.Error()))
+		return
+	}
+	if err := input.Validate(); err != nil {
+		response.Error(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	status, err := services.ChangePasswordVerifyService(c.Request.Context(), clientID, &input)
+	if err != nil {
+		response.Error(c, status, err.Error())
+		return
+	}
+
+	response.Success(c, status, "Password updated successfully", gin.H{})
+}
+
+func RegisterValidateBasicHandler(c *gin.Context) {
+	var input dto.RegisterValidateBasicRequest
+	if err := c.ShouldBindJSON(&input); err != nil {
+		response.Error(c, http.StatusBadRequest, fmt.Sprintf("Invalid input: %s", err.Error()))
+		return
+	}
+	if err := input.Validate(); err != nil {
+		response.Error(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	status, err := services.RegisterValidateBasicService(c.Request.Context(), &input)
+	if err != nil {
+		response.Error(c, status, err.Error())
+		return
+	}
+
+	response.Success(c, status, "Client registered successfully", gin.H{})
+}
+
+func CheckEmailVerifyHandler(c *gin.Context) {
+	email := c.Query("email")
+	if email == "" {
+		response.Error(c, http.StatusBadRequest, "email query parameter is required")
+		return
+	}
+
+	exists, status, err := services.CheckEmailVerifyService(c.Request.Context(), email)
+	if err != nil {
+		response.Error(c, status, err.Error())
+		return
+	}
+
+	response.Success(c, status, "Email checked successfully", gin.H{
+		"exists": exists,
+	})
+}
+
+func RegisterEmailRequestHandler(c *gin.Context) {
+	var req dto.RegisterEmailRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, http.StatusBadRequest, fmt.Sprintf("Invalid input: %s", err.Error()))
+		return
+	}
+	if err := req.Validate(); err != nil {
+		response.Error(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	otp, status, err := services.RegisterEmailRequestService(c.Request.Context(), &req)
+	if err != nil {
+		response.Error(c, status, err.Error())
+		return
+	}
+
+	response.Success(c, status, "Registration email OTP sent successfully", gin.H{
+		"message": "Registration email OTP sent successfully",
+		"otp":     otp,
+	})
+}
+
+func RegisterEmailVerifyHandler(c *gin.Context) {
+	var req dto.RegisterEmailVerifyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, http.StatusBadRequest, fmt.Sprintf("Invalid input: %s", err.Error()))
+		return
+	}
+	if err := req.Validate(); err != nil {
+		response.Error(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	status, err := services.RegisterEmailVerifyService(c.Request.Context(), &req)
+	if err != nil {
+		response.Error(c, status, err.Error())
+		return
+	}
+
+	response.Success(c, status, "Email verified successfully", gin.H{})
+}
+
+func RegisterPhoneOtpRequestHandler(c *gin.Context) {
+	var req dto.RegisterPhoneRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, http.StatusBadRequest, fmt.Sprintf("Invalid input: %s", err.Error()))
+		return
+	}
+	if err := req.Validate(); err != nil {
+		response.Error(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	otp, status, err := services.RegisterPhoneOtpRequestService(c.Request.Context(), &req)
+	if err != nil {
+		response.Error(c, status, err.Error())
+		return
+	}
+
+	response.Success(c, status, "Registration phone OTP sent successfully", gin.H{
+		"message": "Registration phone OTP sent successfully",
+		"otp":     otp,
+	})
+}
+
+func RegisterPhoneOtpVerifyHandler(c *gin.Context) {
+	var req dto.RegisterPhoneVerifyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, http.StatusBadRequest, fmt.Sprintf("Invalid input: %s", err.Error()))
+		return
+	}
+	if err := req.Validate(); err != nil {
+		response.Error(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	status, err := services.RegisterPhoneOtpVerifyService(c.Request.Context(), &req)
+	if err != nil {
+		response.Error(c, status, err.Error())
+		return
+	}
+
+	response.Success(c, status, "Phone verified successfully", gin.H{})
+}
+
+func ForgotPasswordRequestHandler(c *gin.Context) {
+	var req dto.ForgotPasswordRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, http.StatusBadRequest, fmt.Sprintf("Invalid input: %s", err.Error()))
+		return
+	}
+	if err := req.Validate(); err != nil {
+		response.Error(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	token, status, err := services.ForgotPasswordRequestService(c.Request.Context(), &req)
+	if err != nil {
+		response.Error(c, status, err.Error())
+		return
+	}
+
+	response.Success(c, status, "Password reset token/link generated successfully", gin.H{
+		"message": "Password reset token/link generated successfully",
+		"token":   token,
+	})
+}
+
+func ForgotPasswordVerifyTokenHandler(c *gin.Context) {
+	var req dto.ForgotPasswordVerifyTokenRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, http.StatusBadRequest, fmt.Sprintf("Invalid input: %s", err.Error()))
+		return
+	}
+	if err := req.Validate(); err != nil {
+		response.Error(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	status, err := services.ForgotPasswordVerifyTokenService(c.Request.Context(), &req)
+	if err != nil {
+		response.Error(c, status, err.Error())
+		return
+	}
+
+	response.Success(c, status, "Reset token is valid", gin.H{})
+}
+
+func ResetPasswordVerifyHandler(c *gin.Context) {
+	var req dto.ResetPasswordVerifyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, http.StatusBadRequest, fmt.Sprintf("Invalid input: %s", err.Error()))
+		return
+	}
+	if err := req.Validate(); err != nil {
+		response.Error(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	status, err := services.ResetPasswordVerifyService(c.Request.Context(), &req)
+	if err != nil {
+		response.Error(c, status, err.Error())
+		return
+	}
+
+	response.Success(c, status, "Password has been reset successfully", gin.H{})
+}

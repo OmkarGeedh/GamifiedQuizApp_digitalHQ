@@ -1,0 +1,105 @@
+{
+	"info": {
+		"_postman_id": "b2c3d4e5-prof-4002-9000-000000000002",
+		"name": "Gamified Quiz App - Profile API",
+		"description": "Postman Collection for Client Profile, Gamification Stats (Gems, Coins, Level, XP, Weekly Rank), and 7-Day Streak Tracking in Gamified Quiz App.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"auth": {
+		"type": "bearer",
+		"bearer": [
+			{
+				"key": "token",
+				"value": "{{accessToken}}",
+				"type": "string"
+			}
+		]
+	},
+	"item": [
+		{
+			"name": "Get Client Profile (Stats & Streaks)",
+			"request": {
+				"method": "GET",
+				"header": [
+					{
+						"key": "Accept",
+						"value": "application/json"
+					}
+				],
+				"url": {
+					"raw": "{{baseUrl}}/profile",
+					"host": [
+						"{{baseUrl}}"
+					],
+					"path": [
+						"profile"
+					]
+				},
+				"description": "Fetches the full client profile including UUID, Name, Email, Phone, Gems, Coins, Level, Experience, Next Level XP, Weekly Rank, and 7-Day Streak History. Automatically creates a starter profile on first access."
+			},
+			"response": []
+		},
+		{
+			"name": "Create / Setup Profile",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					},
+					{
+						"key": "Accept",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"name\": \"Pro Quiz Champion\",\n  \"phone\": \"+1-555-0199\",\n  \"avatarUrl\": \"https://images.unsplash.com/photo-1535713875002-d1d0cf377fde\"\n}"
+				},
+				"url": {
+					"raw": "{{baseUrl}}/profile",
+					"host": [
+						"{{baseUrl}}"
+					],
+					"path": [
+						"profile"
+					]
+				},
+				"description": "Explicitly initializes the client profile. Returns 409 Conflict if profile is already initialized."
+			},
+			"response": []
+		},
+		{
+			"name": "Update Profile",
+			"request": {
+				"method": "PUT",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					},
+					{
+						"key": "Accept",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"name\": \"Elite Trivia Master\",\n  \"phone\": \"+1-555-0244\",\n  \"avatarUrl\": \"https://images.unsplash.com/photo-1570295999919-56ceb5ecca61\"\n}"
+				},
+				"url": {
+					"raw": "{{baseUrl}}/profile",
+					"host": [
+						"{{baseUrl}}"
+					],
+					"path": [
+						"profile"
+					]
+				},
+				"description": "Updates editable profile fields (display name, phone number, and avatar URL)."
+			},
+			"response": []
+		}
+	]
+}

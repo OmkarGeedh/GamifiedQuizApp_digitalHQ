@@ -1,1 +1,0 @@
-# GamifiedQuizApp_digitalHQ
