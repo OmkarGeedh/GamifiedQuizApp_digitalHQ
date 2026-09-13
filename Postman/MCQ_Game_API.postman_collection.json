@@ -1,0 +1,499 @@
+{
+	"info": {
+		"_postman_id": "d4e5f6a7-mcq-4005-9000-000000000005",
+		"name": "Gamified Quiz App - MCQ Game API",
+		"description": "Postman Collection for Solo Player MCQ Game features: Questions fetch, Session lifecycle (create/complete/abandon), Answer evaluation with combos/speed bonuses, 50:50 power-up, history, and Sudden Death WebSocket real-time engine.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"auth": {
+		"type": "bearer",
+		"bearer": [
+			{
+				"key": "token",
+				"value": "{{accessToken}}",
+				"type": "string"
+			}
+		]
+	},
+	"item": [
+		{
+			"name": "1. Fetch Questions by Topic",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test(\"Status code is 200\", function () {",
+							"    pm.response.to.have.status(200);",
+							"});",
+							"pm.test(\"Questions returned successfully\", function () {",
+							"    var jsonData = pm.response.json();",
+							"    pm.expect(jsonData.success).to.be.true;",
+							"    pm.expect(jsonData.data.questions).to.be.an(\"array\");",
+							"    pm.expect(jsonData.data.questions.length).to.be.above(0);",
+							"    var q = jsonData.data.questions[0];",
+							"    pm.expect(q).to.have.property(\"question\");",
+							"    pm.expect(q).to.have.property(\"prompt\");",
+							"    pm.expect(q).to.have.property(\"options\");",
+							"    pm.expect(q.options.length).to.eql(4);",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "GET",
+				"header": [
+					{
+						"key": "Accept",
+						"value": "application/json"
+					}
+				],
+				"url": {
+					"raw": "{{baseUrl}}/api/v1/topics/{{topic}}/questions?limit=10",
+					"host": [
+						"{{baseUrl}}"
+					],
+					"path": [
+						"api",
+						"v1",
+						"topics",
+						"{{topic}}",
+						"questions"
+					],
+					"query": [
+						{
+							"key": "limit",
+							"value": "10"
+						}
+					]
+				},
+				"description": "Fetches randomized MCQ questions for a topic. Options use standardized keys: option: 'a', 'b', 'c', 'd'."
+			},
+			"response": []
+		},
+		{
+			"name": "2. Create Quiz Session",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test(\"Status code is 201 Created\", function () {",
+							"    pm.response.to.have.status(201);",
+							"});",
+							"var jsonData = pm.response.json();",
+							"pm.test(\"Session created with questions\", function () {",
+							"    pm.expect(jsonData.success).to.be.true;",
+							"    pm.expect(jsonData.data.session).to.be.a(\"string\");",
+							"    pm.expect(jsonData.data.questions.length).to.be.above(0);",
+							"});",
+							"if (jsonData.success && jsonData.data && jsonData.data.session) {",
+							"    pm.environment.set(\"sessionId\", jsonData.data.session);",
+							"    if (jsonData.data.questions && jsonData.data.questions.length > 0) {",
+							"        pm.environment.set(\"currentQuestion\", jsonData.data.questions[0].question);",
+							"    }",
+							"}"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					},
+					{
+						"key": "Accept",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"topic\": \"{{topic}}\",\n  \"question_count\": 10\n}"
+				},
+				"url": {
+					"raw": "{{baseUrl}}/api/v1/quiz/sessions/create",
+					"host": [
+						"{{baseUrl}}"
+					],
+					"path": [
+						"api",
+						"v1",
+						"quiz",
+						"sessions",
+						"create"
+					]
+				},
+				"description": "Creates a new solo quiz session. Automatically captures sessionId and currentQuestion into environment."
+			},
+			"response": []
+		},
+		{
+			"name": "3. Apply 50:50 Power-Up",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test(\"Status code is 200\", function () {",
+							"    pm.response.to.have.status(200);",
+							"});",
+							"var jsonData = pm.response.json();",
+							"pm.test(\"Returns exactly 2 hidden options\", function () {",
+							"    pm.expect(jsonData.success).to.be.true;",
+							"    pm.expect(jsonData.data.hidden_options).to.be.an(\"array\");",
+							"    pm.expect(jsonData.data.hidden_options.length).to.eql(2);",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					},
+					{
+						"key": "Accept",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"session\": \"{{sessionId}}\",\n  \"question\": \"{{currentQuestion}}\"\n}"
+				},
+				"url": {
+					"raw": "{{baseUrl}}/api/v1/quiz/power-ups/fifty-fifty",
+					"host": [
+						"{{baseUrl}}"
+					],
+					"path": [
+						"api",
+						"v1",
+						"quiz",
+						"power-ups",
+						"fifty-fifty"
+					]
+				},
+				"description": "Applies 50:50 power-up to hide 2 wrong options for the current question."
+			},
+			"response": []
+		},
+		{
+			"name": "4. Evaluate Answer (Submit Option)",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test(\"Status code is 200\", function () {",
+							"    pm.response.to.have.status(200);",
+							"});",
+							"var jsonData = pm.response.json();",
+							"pm.test(\"Answer evaluated with scoring\", function () {",
+							"    pm.expect(jsonData.success).to.be.true;",
+							"    pm.expect(jsonData.data).to.have.property(\"is_correct\");",
+							"    pm.expect(jsonData.data).to.have.property(\"points_earned\");",
+							"    pm.expect(jsonData.data).to.have.property(\"coins_earned\");",
+							"    pm.expect(jsonData.data).to.have.property(\"combo_streak\");",
+							"    pm.expect(jsonData.data).to.have.property(\"total_score\");",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					},
+					{
+						"key": "Accept",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"session\": \"{{sessionId}}\",\n  \"question\": \"{{currentQuestion}}\",\n  \"option\": \"a\",\n  \"time_taken_ms\": 3200\n}"
+				},
+				"url": {
+					"raw": "{{baseUrl}}/api/v1/quiz/answers/evaluate",
+					"host": [
+						"{{baseUrl}}"
+					],
+					"path": [
+						"api",
+						"v1",
+						"quiz",
+						"answers",
+						"evaluate"
+					]
+				},
+				"description": "Submits player's answer (option: 'a', 'b', 'c', or 'd'). Computes combo streaks, speed multipliers, points and coins earned."
+			},
+			"response": []
+		},
+		{
+			"name": "5. Evaluate Answer (Skip Question)",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test(\"Status code is 200\", function () {",
+							"    pm.response.to.have.status(200);",
+							"});",
+							"var jsonData = pm.response.json();",
+							"pm.test(\"Skip evaluated without scoring penalty\", function () {",
+							"    pm.expect(jsonData.success).to.be.true;",
+							"    pm.expect(jsonData.data.is_skipped).to.be.true;",
+							"    pm.expect(jsonData.data.points_earned).to.eql(0);",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					},
+					{
+						"key": "Accept",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"session\": \"{{sessionId}}\",\n  \"question\": \"{{currentQuestion}}\",\n  \"option\": \"skip\",\n  \"time_taken_ms\": 1500\n}"
+				},
+				"url": {
+					"raw": "{{baseUrl}}/api/v1/quiz/answers/evaluate",
+					"host": [
+						"{{baseUrl}}"
+					],
+					"path": [
+						"api",
+						"v1",
+						"quiz",
+						"answers",
+						"evaluate"
+					]
+				},
+				"description": "Skips question using skip power-up ('option': 'skip')."
+			},
+			"response": []
+		},
+		{
+			"name": "6. Complete Session & Claim Rewards",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test(\"Status code is 200\", function () {",
+							"    pm.response.to.have.status(200);",
+							"});",
+							"var jsonData = pm.response.json();",
+							"pm.test(\"Session completed with reward calculations\", function () {",
+							"    pm.expect(jsonData.success).to.be.true;",
+							"    pm.expect(jsonData.data).to.have.property(\"coins_awarded\");",
+							"    pm.expect(jsonData.data).to.have.property(\"xp_awarded\");",
+							"    pm.expect(jsonData.data).to.have.property(\"level\");",
+							"    pm.expect(jsonData.data).to.have.property(\"streak\");",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					},
+					{
+						"key": "Accept",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"session\": \"{{sessionId}}\"\n}"
+				},
+				"url": {
+					"raw": "{{baseUrl}}/api/v1/quiz/sessions/complete",
+					"host": [
+						"{{baseUrl}}"
+					],
+					"path": [
+						"api",
+						"v1",
+						"quiz",
+						"sessions",
+						"complete"
+					]
+				},
+				"description": "Finalizes quiz session atomically, adds entries to wallet_ledger (coins, XP, gems), updates client_profiles balances, and records daily streak."
+			},
+			"response": []
+		},
+		{
+			"name": "7. Abandon Session",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test(\"Status code is 200\", function () {",
+							"    pm.response.to.have.status(200);",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					},
+					{
+						"key": "Accept",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"session\": \"{{sessionId}}\"\n}"
+				},
+				"url": {
+					"raw": "{{baseUrl}}/api/v1/quiz/sessions/abandon",
+					"host": [
+						"{{baseUrl}}"
+					],
+					"path": [
+						"api",
+						"v1",
+						"quiz",
+						"sessions",
+						"abandon"
+					]
+				},
+				"description": "Marks an active session as abandoned."
+			},
+			"response": []
+		},
+		{
+			"name": "8. Game History (Paginated)",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test(\"Status code is 200\", function () {",
+							"    pm.response.to.have.status(200);",
+							"});",
+							"var jsonData = pm.response.json();",
+							"pm.test(\"History returned with pagination\", function () {",
+							"    pm.expect(jsonData.success).to.be.true;",
+							"    pm.expect(jsonData.data).to.have.property(\"sessions\");",
+							"    pm.expect(jsonData.data).to.have.property(\"total\");",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "GET",
+				"header": [
+					{
+						"key": "Accept",
+						"value": "application/json"
+					}
+				],
+				"url": {
+					"raw": "{{baseUrl}}/api/v1/quiz/history?limit=10&offset=0",
+					"host": [
+						"{{baseUrl}}"
+					],
+					"path": [
+						"api",
+						"v1",
+						"quiz",
+						"history"
+					],
+					"query": [
+						{
+							"key": "limit",
+							"value": "10"
+						},
+						{
+							"key": "offset",
+							"value": "0"
+						}
+					]
+				},
+				"description": "Retrieves the authenticated player's past quiz sessions."
+			},
+			"response": []
+		},
+		{
+			"name": "9. Sudden Death Live Game (WebSocket)",
+			"request": {
+				"method": "GET",
+				"header": [
+					{
+						"key": "Upgrade",
+						"value": "websocket"
+					},
+					{
+						"key": "Connection",
+						"value": "Upgrade"
+					}
+				],
+				"url": {
+					"raw": "{{wsUrl}}/ws/game?session_id={{sessionId}}&token={{accessToken}}",
+					"host": [
+						"{{wsUrl}}"
+					],
+					"path": [
+						"ws",
+						"game"
+					],
+					"query": [
+						{
+							"key": "session_id",
+							"value": "{{sessionId}}"
+						},
+						{
+							"key": "token",
+							"value": "{{accessToken}}"
+						}
+					]
+				},
+				"description": "Real-time WebSocket endpoint for Sudden Death MCQ gameplay with 15s per-question timer, server-authoritative evaluation, and automatic transitions."
+			},
+			"response": []
+		}
+	]
+}

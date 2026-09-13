@@ -44,9 +44,12 @@ func ClientAuthMiddleware(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
 		if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
 			tokenStr = strings.TrimSpace(authHeader[7:])
-		} else {
+		} else if authHeader != "" {
 			tokenStr = authHeader
 		}
+	}
+	if tokenStr == "" {
+		tokenStr = c.Query("token")
 	}
 
 	if tokenStr == "" {
