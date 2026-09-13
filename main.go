@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -22,55 +21,29 @@ func main() {
 	}
 
 	// 2. Initialize PostgreSQL connection with GORM
-	databaseURL := os.Getenv("DATABASE_URL")
-	if databaseURL == "" {
-		host := os.Getenv("POSTGRES_HOST")
-		if host == "" {
-			host = "localhost"
-		}
-		port := os.Getenv("POSTGRES_PORT")
-		if port == "" {
-			port = "5432"
-		}
-		user := os.Getenv("POSTGRES_USER")
-		password := os.Getenv("POSTGRES_PASSWORD")
-		dbname := os.Getenv("POSTGRES_DB")
-		databaseURL = fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, password, host, port, dbname)
-	}
-
+	databaseURL := config.AppConfig.Database.ConnectionString()
 	pgDB, err := db.Connect(databaseURL)
 	if err != nil {
-		log.Printf("Warning: Database connection failed: %v\n", err)
-	} else {
-		config.DB = pgDB
-		if sqlDB, err := pgDB.DB(); err == nil {
-			defer sqlDB.Close()
-		}
+		log.Fatalf("Fatal: Database connection failed: %v\n", err)
+	}
+	config.DB = pgDB
+	if sqlDB, err := pgDB.DB(); err == nil {
+		defer sqlDB.Close()
+	}
 
-		// Run AutoMigrate for all models
-		if err := db.AutoMigrate(pgDB); err != nil {
-			log.Printf("Warning: Database AutoMigrate failed: %v\n", err)
-		}
+	// Run AutoMigrate for all models
+	if err := db.AutoMigrate(pgDB); err != nil {
+		log.Printf("Warning: Database AutoMigrate failed: %v\n", err)
 	}
 
 	// 3. Initialize Redis connection
-	redisAddr := os.Getenv("REDIS_ADDR")
-	if redisAddr == "" {
-		redisHost := os.Getenv("REDIS_HOST")
-		if redisHost == "" {
-			redisHost = "localhost"
-		}
-		redisPort := os.Getenv("REDIS_PORT")
-		if redisPort == "" {
-			redisPort = "6379"
-		}
-		redisAddr = fmt.Sprintf("%s:%s", redisHost, redisPort)
-	}
-	redisPassword := os.Getenv("REDIS_PASSWORD")
+	redisAddr := config.AppConfig.Redis.Endpoint()
+	redisPassword := config.AppConfig.Redis.Password
+	redisDB := config.AppConfig.Redis.DB
 
-	redisClient, err := db.ConnectRedis(redisAddr, redisPassword, 0)
+	redisClient, err := db.ConnectRedis(redisAddr, redisPassword, redisDB)
 	if err != nil {
-		log.Printf("Warning: Redis connection failed: %v\n", err)
+		log.Printf("Warning: Redis connection failed: %v (falling back to memory-only where applicable)\n", err)
 	} else {
 		config.RedisClient = redisClient
 		defer redisClient.Close()

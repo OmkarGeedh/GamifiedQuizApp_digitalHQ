@@ -65,6 +65,7 @@ type LoginSuccessResponse struct {
 	RefreshToken string `json:"refreshToken"`
 	TokenType    string `json:"tokenType"`
 	ExpiresIn    int    `json:"expiresIn"`
+	Message      string `json:"message,omitempty"`
 }
 
 // -----------------------------------------------------------------------------

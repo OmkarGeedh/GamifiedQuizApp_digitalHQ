@@ -7,6 +7,7 @@ import (
 	"time"
 
 	authModels "github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/auth/client/models"
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/config"
 	profileModels "github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/profile/models"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
@@ -70,6 +71,9 @@ func Seed(db *gorm.DB) error {
 	err := db.WithContext(ctx).Where("email = ?", "player@example.com").First(&existing).Error
 	if err != nil && err == gorm.ErrRecordNotFound {
 		passwordSecret := "super_secret_pepper_salt"
+		if config.AppConfig != nil && config.AppConfig.Server.PasswordSecret != "" {
+			passwordSecret = config.AppConfig.Server.PasswordSecret
+		}
 		hashed, err := bcrypt.GenerateFromPassword([]byte("secretpassword123"+passwordSecret), 12)
 		if err != nil {
 			return fmt.Errorf("failed to hash seed password: %w", err)

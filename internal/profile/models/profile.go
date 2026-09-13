@@ -17,7 +17,7 @@ type Profile struct {
 	CurrentStreak  int       `gorm:"column:current_streak;not null;default:1" json:"current_streak"`
 	HighestStreak  int       `gorm:"column:highest_streak;not null;default:1" json:"highest_streak"`
 	LastActiveDate time.Time `gorm:"column:last_active_date;type:date" json:"last_active_date"`
-	WeeklyScore    int       `gorm:"column:weekly_score;not null;default:0" json:"weekly_score"`
+	WeeklyScore    int       `gorm:"column:weekly_score;not null;default:0;index:idx_weekly_score" json:"weekly_score"`
 	CreatedAt      time.Time `gorm:"column:created_at;autoCreateTime" json:"created_at"`
 	UpdatedAt      time.Time `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
 }

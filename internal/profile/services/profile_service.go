@@ -184,7 +184,7 @@ func CreateMyProfile(ctx context.Context, clientID int, req *dto.CreateProfileRe
 	}
 
 	if req.Phone != nil {
-		_ = repository.UpdateClientPhone(ctx, clientID, req.Phone)
+		_ = clientRepo.UpdateClientPhone(ctx, clientID, req.Phone)
 	}
 
 	_ = repository.RecordDailyActivity(ctx, clientID, now.Format("2006-01-02"))
@@ -205,7 +205,7 @@ func UpdateMyProfile(ctx context.Context, clientID int, req *dto.UpdateProfileRe
 		profile.AvatarURL = *req.AvatarURL
 	}
 	if req.Phone != nil {
-		_ = repository.UpdateClientPhone(ctx, clientID, req.Phone)
+		_ = clientRepo.UpdateClientPhone(ctx, clientID, req.Phone)
 	}
 
 	if err := repository.UpdateProfile(ctx, profile); err != nil {

@@ -63,3 +63,11 @@ func CheckEmailExists(ctx context.Context, email string) (bool, error) {
 	}
 	return count > 0, nil
 }
+
+func UpdateClientPhone(ctx context.Context, id int, phone *string) error {
+	return GetDB().WithContext(ctx).
+		Model(&models.Client{}).
+		Where("id = ?", id).
+		Update("phone", phone).Error
+}
+

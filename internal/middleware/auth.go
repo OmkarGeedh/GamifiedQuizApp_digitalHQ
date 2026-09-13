@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/config"
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/utils"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/utils/response"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -20,37 +21,25 @@ type ClientClaims struct {
 	Phone    *string `gorm:"column:phone" db:"phone" json:"phone,omitempty"`
 }
 
-func getCookieConfig() (isProduction bool, domain string) {
-	if config.AppConfig != nil {
-		env := config.AppConfig.Server.Env
-		isProduction = env == "production" || env == "staging" || os.Getenv("ENV") == "production" || os.Getenv("APP_ENV") == "production"
-		domain = config.AppConfig.Server.CookieDomain
-	} else {
-		env := os.Getenv("ENV")
-		if env == "" {
-			env = os.Getenv("APP_ENV")
-		}
-		isProduction = env == "production" || env == "staging"
-		domain = os.Getenv("COOKIE_DOMAIN")
+// GetAuthenticatedClientID retrieves the authenticated client's ID from gin.Context
+func GetAuthenticatedClientID(c *gin.Context) (int, bool) {
+	val, exists := c.Get("client_id")
+	if !exists {
+		return 0, false
 	}
-	return isProduction, domain
+	id, ok := val.(int)
+	return id, ok
 }
 
+// ClearClientAuthCookies clears client JWT cookies
 func ClearClientAuthCookies(c *gin.Context) {
-	isProduction, domain := getCookieConfig()
-	c.SetSameSite(http.SameSiteLaxMode)
-	c.SetCookie("clientAccessToken", "", -1, "/", domain, isProduction, true)
-	c.SetCookie("clientRefreshToken", "", -1, "/", domain, isProduction, true)
+	utils.ClearClientAuthCookies(c)
 }
 
 // ClientAuthMiddleware verifies JWT from cookie or Authorization header for clients
 func ClientAuthMiddleware(c *gin.Context) {
 	// Try the client cookie first, then support bearer or raw Authorization tokens.
 	tokenStr, _ := c.Cookie("clientAccessToken")
-	tokenSource := "none"
-	if tokenStr != "" {
-		tokenSource = "cookie"
-	}
 	if tokenStr == "" {
 		authHeader := c.GetHeader("Authorization")
 		if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
@@ -58,11 +47,7 @@ func ClientAuthMiddleware(c *gin.Context) {
 		} else {
 			tokenStr = authHeader
 		}
-		if tokenStr != "" {
-			tokenSource = "authorization"
-		}
 	}
-	fmt.Printf("Client auth token source: %s, present: %t\n", tokenSource, tokenStr != "")
 
 	if tokenStr == "" {
 		// No token provided

@@ -2,9 +2,7 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"log"
-	"os"
 
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/config"
 	db "github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/database"
@@ -19,21 +17,7 @@ func main() {
 		log.Printf("Warning loading .env: %v\n", err)
 	}
 
-	databaseURL := os.Getenv("DATABASE_URL")
-	if databaseURL == "" {
-		host := os.Getenv("POSTGRES_HOST")
-		if host == "" {
-			host = "localhost"
-		}
-		port := os.Getenv("POSTGRES_PORT")
-		if port == "" {
-			port = "5432"
-		}
-		user := os.Getenv("POSTGRES_USER")
-		password := os.Getenv("POSTGRES_PASSWORD")
-		dbname := os.Getenv("POSTGRES_DB")
-		databaseURL = fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, password, host, port, dbname)
-	}
+	databaseURL := config.AppConfig.Database.ConnectionString()
 
 	pgDB, err := db.Connect(databaseURL)
 	if err != nil {

@@ -658,6 +658,7 @@ func RegisterEmailVerifyService(ctx context.Context, req *dto.RegisterEmailVerif
 
 	if config.RedisClient != nil {
 		_ = config.RedisClient.Del(ctx, "register-email-otp:"+req.Email).Err()
+		_ = config.RedisClient.Set(ctx, "register-verified:email:"+req.Email, "verified", 15*time.Minute).Err()
 	}
 
 	return http.StatusOK, nil
@@ -708,6 +709,7 @@ func RegisterPhoneOtpVerifyService(ctx context.Context, req *dto.RegisterPhoneVe
 
 	if config.RedisClient != nil {
 		_ = config.RedisClient.Del(ctx, "register-phone-otp:"+req.Phone).Err()
+		_ = config.RedisClient.Set(ctx, "register-verified:phone:"+req.Phone, "verified", 15*time.Minute).Err()
 	}
 
 	return http.StatusOK, nil
@@ -720,6 +722,16 @@ func RegisterValidateBasicService(ctx context.Context, req *dto.RegisterValidate
 	}
 	if exists {
 		return http.StatusConflict, errors.New("email already in use")
+	}
+
+	// In production, ensure email was verified via OTP
+	if config.RedisClient != nil {
+		isVerified, err := config.RedisClient.Exists(ctx, "register-verified:email:"+req.Email).Result()
+		if err == nil && isVerified == 0 {
+			if config.AppConfig != nil && config.AppConfig.Server.Env == "production" {
+				return http.StatusBadRequest, errors.New("email has not been verified. Please verify your email OTP first")
+			}
+		}
 	}
 
 	secret := ""
@@ -742,6 +754,11 @@ func RegisterValidateBasicService(ctx context.Context, req *dto.RegisterValidate
 
 	if err := repository.CreateClient(ctx, &newClient); err != nil {
 		return http.StatusInternalServerError, fmt.Errorf("failed to create client: %w", err)
+	}
+
+	// Clean up verified state token if present
+	if config.RedisClient != nil {
+		_ = config.RedisClient.Del(ctx, "register-verified:email:"+req.Email).Err()
 	}
 
 	return http.StatusCreated, nil

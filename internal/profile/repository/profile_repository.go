@@ -4,7 +4,6 @@ import (
 	"context"
 	"time"
 
-	clientModels "github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/auth/client/models"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/config"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/profile/dto"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/profile/models"
@@ -33,13 +32,6 @@ func CreateProfile(ctx context.Context, profile *models.Profile) error {
 
 func UpdateProfile(ctx context.Context, profile *models.Profile) error {
 	return GetDB().WithContext(ctx).Save(profile).Error
-}
-
-func UpdateClientPhone(ctx context.Context, clientID int, phone *string) error {
-	return GetDB().WithContext(ctx).
-		Model(&clientModels.Client{}).
-		Where("id = ?", clientID).
-		Update("phone", phone).Error
 }
 
 func RecordDailyActivity(ctx context.Context, clientID int, dateStr string) error {

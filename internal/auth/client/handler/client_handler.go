@@ -3,53 +3,15 @@ package handler
 import (
 	"fmt"
 	"net/http"
-	"os"
 
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/auth/client/dto"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/auth/client/services"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/config"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/middleware"
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/utils"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/utils/response"
 	"github.com/gin-gonic/gin"
 )
-
-func getCookieConfig() (isProduction bool, domain string) {
-	if config.AppConfig != nil {
-		env := config.AppConfig.Server.Env
-		isProduction = env == "production" || env == "staging" || os.Getenv("ENV") == "production" || os.Getenv("APP_ENV") == "production"
-		domain = config.AppConfig.Server.CookieDomain
-	} else {
-		env := os.Getenv("ENV")
-		if env == "" {
-			env = os.Getenv("APP_ENV")
-		}
-		isProduction = env == "production" || env == "staging"
-		domain = os.Getenv("COOKIE_DOMAIN")
-	}
-	return isProduction, domain
-}
-
-func setClientAuthCookies(c *gin.Context, accessStr, refreshStr string) {
-	isProduction, domain := getCookieConfig()
-
-	accessExpirySeconds := 30 * 24 * 60 * 60  // 30 days
-	if config.AppConfig != nil && config.AppConfig.Server.JWTAccessTokenExpiry > 0 {
-		accessExpirySeconds = int(config.AppConfig.Server.JWTAccessTokenExpiry.Seconds())
-	}
-	refreshExpirySeconds := 180 * 24 * 60 * 60 // 180 days / 6 months
-	if config.AppConfig != nil && config.AppConfig.Server.JWTRefreshTokenExpiry > 0 {
-		refreshExpirySeconds = int(config.AppConfig.Server.JWTRefreshTokenExpiry.Seconds())
-	}
-
-	c.SetSameSite(http.SameSiteLaxMode)
-	// Set HTTP-Only, Secure (in prod), SameSite=Lax cookies
-	c.SetCookie("clientAccessToken", accessStr, accessExpirySeconds, "/", domain, isProduction, true)
-	c.SetCookie("clientRefreshToken", refreshStr, refreshExpirySeconds, "/", domain, isProduction, true)
-}
-
-func clearClientAuthCookies(c *gin.Context) {
-	middleware.ClearClientAuthCookies(c)
-}
 
 func LoginGenOTPHandler(c *gin.Context) {
 	var req dto.LoginGenOTPRequest
@@ -109,22 +71,24 @@ func LoginOTPVerifyHandler(c *gin.Context) {
 	}
 
 	// Set HTTP-only secure cookies for tokens
-	setClientAuthCookies(c, accessStr, refreshStr)
+	utils.SetClientAuthCookies(c, accessStr, refreshStr)
 
-	response.Success(c, status, "Client logged in successfully", gin.H{
-		"message":      "Authentication successful. Auth tokens stored in cookies.",
-		"accessToken":  accessStr,
-		"refreshToken": refreshStr,
+	accessExpirySeconds := 30 * 24 * 60 * 60
+	if config.AppConfig != nil && config.AppConfig.Server.JWTAccessTokenExpiry > 0 {
+		accessExpirySeconds = int(config.AppConfig.Server.JWTAccessTokenExpiry.Seconds())
+	}
+
+	response.Success(c, status, "Client logged in successfully", dto.LoginSuccessResponse{
+		AccessToken:  accessStr,
+		RefreshToken: refreshStr,
+		TokenType:    "Bearer",
+		ExpiresIn:    accessExpirySeconds,
+		Message:      "Authentication successful. Auth tokens stored in cookies.",
 	})
 }
 
 func LogoutClientHandler(c *gin.Context) {
-	clientIDVal, exists := c.Get("client_id")
-	if !exists {
-		response.Error(c, http.StatusUnauthorized, "Unauthorized")
-		return
-	}
-	clientID, ok := clientIDVal.(int)
+	clientID, ok := middleware.GetAuthenticatedClientID(c)
 	if !ok {
 		response.Error(c, http.StatusUnauthorized, "Unauthorized")
 		return
@@ -148,7 +112,7 @@ func LogoutClientHandler(c *gin.Context) {
 		return
 	}
 
-	clearClientAuthCookies(c)
+	utils.ClearClientAuthCookies(c)
 
 	response.Success(c, status, "Client logged out successfully", gin.H{
 		"message": "Logged out successfully and cookies cleared.",
@@ -173,18 +137,12 @@ func ClientRefreshTokenHandler(c *gin.Context) {
 
 	newAccessStr, status, err := services.RefreshTokenService(c.Request.Context(), refreshStr)
 	if err != nil {
-		clearClientAuthCookies(c)
+		utils.ClearClientAuthCookies(c)
 		response.Error(c, status, err.Error())
 		return
 	}
 
-	isProduction, domain := getCookieConfig()
-	accessExpirySeconds := 30 * 24 * 60 * 60 // 30 days
-	if config.AppConfig != nil && config.AppConfig.Server.JWTAccessTokenExpiry > 0 {
-		accessExpirySeconds = int(config.AppConfig.Server.JWTAccessTokenExpiry.Seconds())
-	}
-	c.SetSameSite(http.SameSiteLaxMode)
-	c.SetCookie("clientAccessToken", newAccessStr, accessExpirySeconds, "/", domain, isProduction, true)
+	utils.SetClientAccessTokenCookie(c, newAccessStr)
 
 	response.Success(c, status, "Token refreshed successfully", gin.H{
 		"message":     "Access token refreshed and updated in cookie.",
@@ -193,12 +151,7 @@ func ClientRefreshTokenHandler(c *gin.Context) {
 }
 
 func ClientVerifySessionHandler(c *gin.Context) {
-	clientIDVal, exists := c.Get("client_id")
-	if !exists {
-		response.Error(c, http.StatusUnauthorized, "Unauthorized")
-		return
-	}
-	clientID, ok := clientIDVal.(int)
+	clientID, ok := middleware.GetAuthenticatedClientID(c)
 	if !ok {
 		response.Error(c, http.StatusUnauthorized, "Unauthorized")
 		return
@@ -219,12 +172,7 @@ func ClientVerifySessionHandler(c *gin.Context) {
 }
 
 func ClientSessionHandler(c *gin.Context) {
-	clientIDVal, exists := c.Get("client_id")
-	if !exists {
-		response.Error(c, http.StatusUnauthorized, "Unauthorized")
-		return
-	}
-	clientID, ok := clientIDVal.(int)
+	clientID, ok := middleware.GetAuthenticatedClientID(c)
 	if !ok {
 		response.Error(c, http.StatusUnauthorized, "Unauthorized")
 		return
@@ -240,12 +188,7 @@ func ClientSessionHandler(c *gin.Context) {
 }
 
 func ChangePasswordRequestHandler(c *gin.Context) {
-	clientIDVal, exists := c.Get("client_id")
-	if !exists {
-		response.Error(c, http.StatusUnauthorized, "Unauthorized")
-		return
-	}
-	clientID, ok := clientIDVal.(int)
+	clientID, ok := middleware.GetAuthenticatedClientID(c)
 	if !ok {
 		response.Error(c, http.StatusUnauthorized, "Unauthorized")
 		return
@@ -274,12 +217,7 @@ func ChangePasswordRequestHandler(c *gin.Context) {
 }
 
 func ChangePasswordVerifyHandler(c *gin.Context) {
-	clientIDVal, exists := c.Get("client_id")
-	if !exists {
-		response.Error(c, http.StatusUnauthorized, "Unauthorized")
-		return
-	}
-	clientID, ok := clientIDVal.(int)
+	clientID, ok := middleware.GetAuthenticatedClientID(c)
 	if !ok {
 		response.Error(c, http.StatusUnauthorized, "Unauthorized")
 		return

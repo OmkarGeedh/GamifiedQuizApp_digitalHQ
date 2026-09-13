@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/middleware"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/profile/dto"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/profile/services"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/utils/response"
@@ -11,12 +12,7 @@ import (
 )
 
 func GetProfileHandler(c *gin.Context) {
-	clientIDVal, exists := c.Get("client_id")
-	if !exists {
-		response.Error(c, http.StatusUnauthorized, "Unauthorized")
-		return
-	}
-	clientID, ok := clientIDVal.(int)
+	clientID, ok := middleware.GetAuthenticatedClientID(c)
 	if !ok {
 		response.Error(c, http.StatusUnauthorized, "Unauthorized")
 		return
@@ -32,12 +28,7 @@ func GetProfileHandler(c *gin.Context) {
 }
 
 func CreateProfileHandler(c *gin.Context) {
-	clientIDVal, exists := c.Get("client_id")
-	if !exists {
-		response.Error(c, http.StatusUnauthorized, "Unauthorized")
-		return
-	}
-	clientID, ok := clientIDVal.(int)
+	clientID, ok := middleware.GetAuthenticatedClientID(c)
 	if !ok {
 		response.Error(c, http.StatusUnauthorized, "Unauthorized")
 		return
@@ -63,12 +54,7 @@ func CreateProfileHandler(c *gin.Context) {
 }
 
 func UpdateProfileHandler(c *gin.Context) {
-	clientIDVal, exists := c.Get("client_id")
-	if !exists {
-		response.Error(c, http.StatusUnauthorized, "Unauthorized")
-		return
-	}
-	clientID, ok := clientIDVal.(int)
+	clientID, ok := middleware.GetAuthenticatedClientID(c)
 	if !ok {
 		response.Error(c, http.StatusUnauthorized, "Unauthorized")
 		return
