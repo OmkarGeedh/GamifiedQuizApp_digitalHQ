@@ -22,6 +22,7 @@ services:
       - REDIS_DB=${REDIS_DB:-0}
     volumes:
       - .:/app
+    command: ["./bin/server"]
     depends_on:
       postgres:
         condition: service_healthy

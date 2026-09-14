@@ -2,7 +2,6 @@ package config
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"strconv"
 	"time"
@@ -66,8 +65,10 @@ var (
 )
 
 func LoadEnv() error {
-	if err := godotenv.Load(".env"); err != nil {
-		log.Println("Note: .env file not found or environment already loaded")
+	// Attempt to find .env in current or parent directories (useful for go test in subdirectories)
+	envPaths := []string{".env", "../.env", "../../.env", "../../../.env", "../../../../.env"}
+	for _, p := range envPaths {
+		_ = godotenv.Load(p)
 	}
 
 	accessExpiryDays, _ := strconv.Atoi(getEnv("JWT_ACCESS_TOKEN_EXPIRY_DAYS", "30"))
@@ -86,15 +87,15 @@ func LoadEnv() error {
 		},
 		Database: DatabaseConfig{
 			URL:      os.Getenv("DATABASE_URL"),
-			Host:     getEnv("POSTGRES_HOST", "localhost"),
+			Host:     getEnv("POSTGRES_HOST", "127.0.0.1"),
 			Port:     getEnv("POSTGRES_PORT", "5432"),
 			User:     getEnv("POSTGRES_USER", "skillverse"),
-			Password: os.Getenv("POSTGRES_PASSWORD"),
+			Password: getEnv("POSTGRES_PASSWORD", "skillverse_secrets"),
 			Name:     getEnv("POSTGRES_DB", "gamifiedapp"),
 		},
 		Redis: RedisConfig{
 			Addr:     os.Getenv("REDIS_ADDR"),
-			Host:     getEnv("REDIS_HOST", "localhost"),
+			Host:     getEnv("REDIS_HOST", "127.0.0.1"),
 			Port:     getEnv("REDIS_PORT", "6379"),
 			Password: os.Getenv("REDIS_PASSWORD"),
 			DB:       redisDB,

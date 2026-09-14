@@ -27,7 +27,12 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 	// Check for existing active session
 	existing, err := repository.GetActiveSessionByClientID(ctx, clientID)
 	if err == nil && existing != nil {
-		return nil, http.StatusConflict, errors.New("an active session already exists; complete or abandon it first")
+		if req.AbandonStale {
+			existing.Status = models.SessionStatusAbandoned
+			_ = repository.UpdateSession(ctx, existing)
+		} else {
+			return nil, http.StatusConflict, errors.New("an active session already exists; complete or abandon it first")
+		}
 	}
 
 	// Validate topic has enough questions

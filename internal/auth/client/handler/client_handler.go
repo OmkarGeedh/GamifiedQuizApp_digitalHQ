@@ -13,8 +13,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func LoginGenOTPHandler(c *gin.Context) {
-	var req dto.LoginGenOTPRequest
+func LoginHandler(c *gin.Context) {
+	var req dto.LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.Error(c, http.StatusBadRequest, fmt.Sprintf("Invalid input: %s", err.Error()))
 		return
@@ -24,47 +24,7 @@ func LoginGenOTPHandler(c *gin.Context) {
 		return
 	}
 
-	res, status, err := services.LoginGenOTPService(c.Request.Context(), &req)
-	if err != nil {
-		response.Error(c, status, err.Error())
-		return
-	}
-
-	response.Success(c, status, "Proceed to OTP verification", res)
-}
-
-func LoginResendOTPHandler(c *gin.Context) {
-	var req dto.LoginResendOTPRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, fmt.Sprintf("Invalid input: %s", err.Error()))
-		return
-	}
-	if err := req.Validate(); err != nil {
-		response.Error(c, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	res, status, err := services.LoginResendOTPService(c.Request.Context(), &req)
-	if err != nil {
-		response.Error(c, status, err.Error())
-		return
-	}
-
-	response.Success(c, status, "OTP has been resent successfully", res)
-}
-
-func LoginOTPVerifyHandler(c *gin.Context) {
-	var req dto.LoginOTPVerifyRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, http.StatusBadRequest, fmt.Sprintf("Invalid input: %s", err.Error()))
-		return
-	}
-	if err := req.Validate(); err != nil {
-		response.Error(c, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	accessStr, refreshStr, status, err := services.LoginOTPVerifyService(c.Request.Context(), &req)
+	accessStr, refreshStr, clientRecord, status, err := services.LoginService(c.Request.Context(), &req)
 	if err != nil {
 		response.Error(c, status, err.Error())
 		return
@@ -78,12 +38,26 @@ func LoginOTPVerifyHandler(c *gin.Context) {
 		accessExpirySeconds = int(config.AppConfig.Server.JWTAccessTokenExpiry.Seconds())
 	}
 
+	var clientResp *dto.ClientSessionResponse
+	if clientRecord != nil {
+		clientResp = &dto.ClientSessionResponse{
+			ID:        clientRecord.ID,
+			Username:  clientRecord.Username,
+			Email:     clientRecord.Email,
+			Phone:     clientRecord.Phone,
+			Status:    clientRecord.Status,
+			CreatedAt: clientRecord.CreatedAt,
+			UpdatedAt: clientRecord.UpdatedAt,
+		}
+	}
+
 	response.Success(c, status, "Client logged in successfully", dto.LoginSuccessResponse{
 		AccessToken:  accessStr,
 		RefreshToken: refreshStr,
 		TokenType:    "Bearer",
 		ExpiresIn:    accessExpirySeconds,
-		Message:      "Authentication successful. Auth tokens stored in cookies.",
+		Client:       clientResp,
+		Message:      "Authentication successful.",
 	})
 }
 

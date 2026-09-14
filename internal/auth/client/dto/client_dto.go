@@ -10,12 +10,12 @@ import (
 // LOGIN DTOs
 // -----------------------------------------------------------------------------
 
-type LoginGenOTPRequest struct {
+type LoginRequest struct {
 	Email    string `json:"email" binding:"required"`
 	Password string `json:"password" binding:"required"`
 }
 
-func (r *LoginGenOTPRequest) Validate() error {
+func (r *LoginRequest) Validate() error {
 	r.Email = strings.TrimSpace(r.Email)
 	if r.Email == "" {
 		return errors.New("email is required")
@@ -26,46 +26,13 @@ func (r *LoginGenOTPRequest) Validate() error {
 	return nil
 }
 
-type LoginGenOTPResponse struct {
-	Phone   string `json:"phone,omitempty"`
-	Message string `json:"message"`
-}
-
-type LoginResendOTPRequest struct {
-	Email string `json:"email" binding:"required"`
-}
-
-func (r *LoginResendOTPRequest) Validate() error {
-	r.Email = strings.TrimSpace(r.Email)
-	if r.Email == "" {
-		return errors.New("email is required")
-	}
-	return nil
-}
-
-type LoginOTPVerifyRequest struct {
-	Email string `json:"email" binding:"required"`
-	OTP   string `json:"otp" binding:"required"`
-}
-
-func (r *LoginOTPVerifyRequest) Validate() error {
-	r.Email = strings.TrimSpace(r.Email)
-	r.OTP = strings.TrimSpace(r.OTP)
-	if r.Email == "" {
-		return errors.New("email is required")
-	}
-	if r.OTP == "" {
-		return errors.New("otp is required")
-	}
-	return nil
-}
-
 type LoginSuccessResponse struct {
-	AccessToken  string `json:"accessToken"`
-	RefreshToken string `json:"refreshToken"`
-	TokenType    string `json:"tokenType"`
-	ExpiresIn    int    `json:"expiresIn"`
-	Message      string `json:"message,omitempty"`
+	AccessToken  string                 `json:"accessToken"`
+	RefreshToken string                 `json:"refreshToken"`
+	TokenType    string                 `json:"tokenType"`
+	ExpiresIn    int                    `json:"expiresIn"`
+	Client       *ClientSessionResponse `json:"client,omitempty"`
+	Message      string                 `json:"message,omitempty"`
 }
 
 // -----------------------------------------------------------------------------

@@ -118,53 +118,7 @@
 					"response": []
 				},
 				{
-					"name": "Login - Generate OTP",
-					"event": [
-						{
-							"listen": "test",
-							"script": {
-								"exec": [
-									"var jsonData = pm.response.json();",
-									"if (jsonData.success && jsonData.data && jsonData.data.otp) {",
-									"    pm.environment.set(\"otp\", jsonData.data.otp);",
-									"}"
-								],
-								"type": "text/javascript"
-							}
-						}
-					],
-					"request": {
-						"method": "POST",
-						"header": [
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							},
-							{
-								"key": "Accept",
-								"value": "application/json"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n  \"email\": \"player@example.com\",\n  \"password\": \"secretpassword123\"\n}"
-						},
-						"url": {
-							"raw": "{{baseUrl}}/auth/login/otp",
-							"host": [
-								"{{baseUrl}}"
-							],
-							"path": [
-								"auth",
-								"login",
-								"otp"
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Login - Verify OTP (Saves JWT)",
+					"name": "Login (Direct - Saves JWT)",
 					"event": [
 						{
 							"listen": "test",
@@ -198,17 +152,16 @@
 						],
 						"body": {
 							"mode": "raw",
-							"raw": "{\n  \"email\": \"player@example.com\",\n  \"otp\": \"{{otp}}\"\n}"
+							"raw": "{\n  \"email\": \"player@example.com\",\n  \"password\": \"secretpassword123\"\n}"
 						},
 						"url": {
-							"raw": "{{baseUrl}}/auth/login/verify-otp",
+							"raw": "{{baseUrl}}/auth/login",
 							"host": [
 								"{{baseUrl}}"
 							],
 							"path": [
 								"auth",
-								"login",
-								"verify-otp"
+								"login"
 							]
 						}
 					},

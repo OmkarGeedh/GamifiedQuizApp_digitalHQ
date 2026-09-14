@@ -28,13 +28,10 @@ This directory contains the complete set of Postman collections and environment 
 ## ⚡ Automated Testing & Authentication Flow
 
 ### 1. Authentication
-1. **Trigger Login OTP**:
-   - Run `POST /auth/login/otp` with email `player@example.com` and password `secretpassword123`.
-   - The OTP is logged in the server console (or defaults to `123456` in local development).
-2. **Verify OTP**:
-   - Run `POST /auth/login/verify-otp` with the OTP.
-   - **The Postman test script automatically extracts `accessToken` and saves it into your Postman environment.**
-3. **Subsequent Calls**:
+1. **Direct Login (No OTP)**:
+   - Run `POST /auth/login` with email `player@example.com` and password `secretpassword123`.
+   - **The Postman test script automatically extracts `accessToken` and `refreshToken` and saves them directly into your Postman environment.**
+2. **Subsequent Calls**:
    - All authenticated requests automatically inherit the `Bearer {{accessToken}}` header.
 
 ---

@@ -25,23 +25,23 @@ import (
 // LOGIN SERVICES
 // -----------------------------------------------------------------------------
 
-func LoginGenOTPService(ctx context.Context, req *dto.LoginGenOTPRequest) (*dto.LoginGenOTPResponse, int, error) {
+func LoginService(ctx context.Context, req *dto.LoginRequest) (string, string, *models.Client, int, error) {
 	if req.Email == "" || req.Password == "" {
-		return nil, http.StatusBadRequest, errors.New("email and password required")
+		return "", "", nil, http.StatusBadRequest, errors.New("email and password required")
 	}
 
 	// 1. Fetch client using repository layer
 	clientRecord, err := repository.GetClientByEmail(ctx, req.Email)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, http.StatusUnauthorized, errors.New("invalid email or password")
+			return "", "", nil, http.StatusUnauthorized, errors.New("invalid email or password")
 		}
-		return nil, http.StatusInternalServerError, fmt.Errorf("database query error: %w", err)
+		return "", "", nil, http.StatusInternalServerError, fmt.Errorf("database query error: %w", err)
 	}
 
 	// 2. Check allowed statuses
 	if clientRecord.Status != "active" && clientRecord.Status != "pending" {
-		return nil, http.StatusUnauthorized, errors.New("account not active or blocked")
+		return "", "", nil, http.StatusUnauthorized, errors.New("account not active or blocked")
 	}
 
 	// 3. Verify password
@@ -52,185 +52,21 @@ func LoginGenOTPService(ctx context.Context, req *dto.LoginGenOTPRequest) (*dto.
 	combined := req.Password + secret
 
 	if err := bcrypt.CompareHashAndPassword([]byte(clientRecord.Password), []byte(combined)); err != nil {
-		return nil, http.StatusUnauthorized, errors.New("invalid email or password")
+		return "", "", nil, http.StatusUnauthorized, errors.New("invalid email or password")
 	}
 
-	// 4. Check OTP request cooldown in Redis (30 seconds)
-	cooldownKey := "otp-cooldown:" + req.Email
-	if config.RedisClient != nil {
-		cooldownExists, err := config.RedisClient.Exists(ctx, cooldownKey).Result()
-		if err == nil && cooldownExists > 0 {
-			return nil, http.StatusTooManyRequests, errors.New("please wait 30 seconds before requesting another OTP")
-		}
-	}
-
-	// 5. Generate secure OTP (6-digit)
-	otp, err := utils.GenerateOtp(6)
-	if err != nil {
-		return nil, http.StatusInternalServerError, errors.New("failed to generate secure OTP")
-	}
-
-	// 6. Store OTP in Redis with a 1-minute expiration
-	if config.RedisClient != nil {
-		err = config.RedisClient.Set(ctx, "otp:"+req.Email, otp, 1*time.Minute).Err()
-		if err != nil {
-			return nil, http.StatusInternalServerError, fmt.Errorf("failed to save OTP: %w", err)
-		}
-		_ = config.RedisClient.Set(ctx, cooldownKey, "active", 30*time.Second).Err()
-	}
-
-	phoneStr := ""
-	if clientRecord.Phone != nil {
-		phoneStr = *clientRecord.Phone
-	}
-
-	// Log OTP prominently
-	log.Printf("================================================================")
-	log.Printf("[LOGIN OTP] Generated OTP: >>> %s <<< for Email: %s (Phone: %s)", otp, req.Email, phoneStr)
-	log.Printf("================================================================")
-
-	return &dto.LoginGenOTPResponse{
-		Phone:   phoneStr,
-		Message: "OTP sent successfully",
-	}, http.StatusOK, nil
-}
-
-func LoginResendOTPService(ctx context.Context, req *dto.LoginResendOTPRequest) (*dto.LoginGenOTPResponse, int, error) {
-	if req.Email == "" {
-		return nil, http.StatusBadRequest, errors.New("email is required")
-	}
-
-	// 1. Fetch client from database
-	clientRecord, err := repository.GetClientByEmail(ctx, req.Email)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, http.StatusUnauthorized, errors.New("invalid email")
-		}
-		return nil, http.StatusInternalServerError, fmt.Errorf("database query error: %w", err)
-	}
-
-	// 2. Check allowed statuses
-	if clientRecord.Status != "active" && clientRecord.Status != "pending" {
-		return nil, http.StatusUnauthorized, errors.New("account not active or blocked")
-	}
-
-	// 3. Check lockout due to 5 prior failed attempts
-	lockoutKey := "block:otp-verify:" + req.Email
-	if config.RedisClient != nil {
-		isLocked, err := config.RedisClient.Exists(ctx, lockoutKey).Result()
-		if err == nil && isLocked > 0 {
-			return nil, http.StatusTooManyRequests, errors.New("too many failed attempts, please try again in 10 minutes")
-		}
-
-		// 4. Check OTP request cooldown in Redis (30 seconds)
-		cooldownKey := "otp-cooldown:" + req.Email
-		cooldownExists, err := config.RedisClient.Exists(ctx, cooldownKey).Result()
-		if err == nil && cooldownExists > 0 {
-			return nil, http.StatusTooManyRequests, errors.New("please wait 30 seconds before requesting another OTP")
-		}
-	}
-
-	// 5. Generate secure OTP
-	otp, err := utils.GenerateOtp(6)
-	if err != nil {
-		return nil, http.StatusInternalServerError, errors.New("failed to generate secure OTP")
-	}
-
-	// 6. Overwrite OTP in Redis with 1-minute expiration
-	if config.RedisClient != nil {
-		err = config.RedisClient.Set(ctx, "otp:"+req.Email, otp, 1*time.Minute).Err()
-		if err != nil {
-			return nil, http.StatusInternalServerError, fmt.Errorf("failed to save OTP: %w", err)
-		}
-		_ = config.RedisClient.Set(ctx, "otp-cooldown:"+req.Email, "active", 30*time.Second).Err()
-	}
-
-	phoneStr := ""
-	if clientRecord.Phone != nil {
-		phoneStr = *clientRecord.Phone
-	}
-
-	// Log Resent OTP prominently
-	log.Printf("================================================================")
-	log.Printf("[LOGIN OTP RESEND] Resent OTP: >>> %s <<< for Email: %s (Phone: %s)", otp, req.Email, phoneStr)
-	log.Printf("================================================================")
-
-	return &dto.LoginGenOTPResponse{
-		Phone:   phoneStr,
-		Message: "OTP resent successfully",
-	}, http.StatusOK, nil
-}
-
-func LoginOTPVerifyService(ctx context.Context, req *dto.LoginOTPVerifyRequest) (string, string, int, error) {
-	if req.Email == "" || req.OTP == "" {
-		return "", "", http.StatusBadRequest, errors.New("email and OTP required")
-	}
-
-	// 1. Check lockout
-	lockoutKey := "block:otp-verify:" + req.Email
-	if config.RedisClient != nil {
-		isLocked, err := config.RedisClient.Exists(ctx, lockoutKey).Result()
-		if err == nil && isLocked > 0 {
-			return "", "", http.StatusTooManyRequests, errors.New("too many failed attempts, please try again in 10 minutes")
-		}
-	}
-
-	// 2. Get OTP from Redis
-	storedOTP := ""
-	if config.RedisClient != nil {
-		var err error
-		storedOTP, err = config.RedisClient.Get(ctx, "otp:"+req.Email).Result()
-		if err != nil {
-			return "", "", http.StatusUnauthorized, errors.New("no OTP generated or expired")
-		}
-	}
-
-	// 3. Constant-time comparison
-	if subtle.ConstantTimeCompare([]byte(storedOTP), []byte(req.OTP)) != 1 {
-		if config.RedisClient != nil {
-			attemptsKey := "failed-otp-attempts:login:" + req.Email
-			attempts, _ := config.RedisClient.Incr(ctx, attemptsKey).Result()
-			if attempts == 1 {
-				config.RedisClient.Expire(ctx, attemptsKey, 10*time.Minute)
-			}
-
-			if attempts >= 5 {
-				config.RedisClient.Set(ctx, lockoutKey, "locked", 10*time.Minute)
-				config.RedisClient.Del(ctx, "otp:"+req.Email)
-				config.RedisClient.Del(ctx, attemptsKey)
-				return "", "", http.StatusTooManyRequests, errors.New("too many incorrect attempts. Your OTP has been invalidated, please try again in 10 minutes")
-			}
-
-			remaining := 5 - attempts
-			return "", "", http.StatusUnauthorized, fmt.Errorf("the OTP you entered is incorrect. %d attempts remaining", remaining)
-		}
-		return "", "", http.StatusUnauthorized, errors.New("invalid OTP")
-	}
-
-	// 4. Clean up OTP and failed attempts
-	if config.RedisClient != nil {
-		_ = config.RedisClient.Del(ctx, "otp:"+req.Email).Err()
-		_ = config.RedisClient.Del(ctx, "failed-otp-attempts:login:"+req.Email).Err()
-	}
-
-	// 5. Fetch Client from Database
-	clientRecord, err := repository.GetClientByEmail(ctx, req.Email)
-	if err != nil {
-		return "", "", http.StatusUnauthorized, errors.New("client not found")
-	}
-
-	// 6. Generate JWT Tokens
+	// 4. Generate JWT Tokens
 	jwtSecret := ""
 	if config.AppConfig != nil {
 		jwtSecret = config.AppConfig.Server.JWTSecret
 	}
 	if jwtSecret == "" {
-		return "", "", http.StatusInternalServerError, errors.New("JWT secret is not configured")
+		return "", "", nil, http.StatusInternalServerError, errors.New("JWT secret is not configured")
 	}
 
 	jti, err := utils.GenerateToken64()
 	if err != nil {
-		return "", "", http.StatusInternalServerError, fmt.Errorf("failed to generate token ID: %w", err)
+		return "", "", nil, http.StatusInternalServerError, fmt.Errorf("failed to generate token ID: %w", err)
 	}
 
 	accessExpiry := 30 * 24 * time.Hour
@@ -250,7 +86,7 @@ func LoginOTPVerifyService(ctx context.Context, req *dto.LoginOTPVerifyRequest) 
 	})
 	accessStr, err := accessToken.SignedString([]byte(jwtSecret))
 	if err != nil {
-		return "", "", http.StatusInternalServerError, fmt.Errorf("failed to sign access token: %w", err)
+		return "", "", nil, http.StatusInternalServerError, fmt.Errorf("failed to sign access token: %w", err)
 	}
 
 	refreshToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
@@ -260,16 +96,18 @@ func LoginOTPVerifyService(ctx context.Context, req *dto.LoginOTPVerifyRequest) 
 	})
 	refreshStr, err := refreshToken.SignedString([]byte(jwtSecret))
 	if err != nil {
-		return "", "", http.StatusInternalServerError, fmt.Errorf("failed to sign refresh token: %w", err)
+		return "", "", nil, http.StatusInternalServerError, fmt.Errorf("failed to sign refresh token: %w", err)
 	}
 
-	// 7. Persist active refresh token
+	// 5. Persist active refresh token
 	err = repository.UpdateClientRefreshToken(ctx, clientRecord.ID, &refreshStr)
 	if err != nil {
-		return "", "", http.StatusInternalServerError, fmt.Errorf("failed to save refresh token to database: %w", err)
+		return "", "", nil, http.StatusInternalServerError, fmt.Errorf("failed to save refresh token to database: %w", err)
 	}
 
-	return accessStr, refreshStr, http.StatusOK, nil
+	log.Printf("[LOGIN] Client logged in successfully: ID=%d, Email=%s", clientRecord.ID, clientRecord.Email)
+
+	return accessStr, refreshStr, clientRecord, http.StatusOK, nil
 }
 
 // -----------------------------------------------------------------------------

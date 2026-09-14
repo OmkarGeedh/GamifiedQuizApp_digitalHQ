@@ -37,6 +37,16 @@ func main() {
 		log.Printf("Warning: Database AutoMigrate failed: %v\n", err)
 	}
 
+	// Auto-seed initial demo user and questions if database is empty
+	var questionCount int64
+	pgDB.Table("questions").Count(&questionCount)
+	if questionCount == 0 {
+		log.Println("==> Fresh database detected. Running automatic seeding...")
+		if err := db.Seed(pgDB); err != nil {
+			log.Printf("Warning: Auto-seed failed: %v\n", err)
+		}
+	}
+
 	// 3. Initialize Redis connection
 	redisAddr := config.AppConfig.Redis.Endpoint()
 	redisPassword := config.AppConfig.Redis.Password

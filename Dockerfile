@@ -17,8 +17,11 @@ RUN go mod download
 # Copy source code
 COPY . .
 
+# Build production binary
+RUN CGO_ENABLED=0 go build -o /app/server .
+
 # Expose server port
 EXPOSE 8080
 
-# Run air by default
-CMD ["air", "-c", ".air.toml"]
+# Run compiled binary
+CMD ["/app/server"]

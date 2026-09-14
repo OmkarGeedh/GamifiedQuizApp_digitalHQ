@@ -11,6 +11,7 @@ import (
 type CreateSessionRequestDTO struct {
 	TopicID       string `json:"topic" binding:"required"`
 	QuestionCount int    `json:"question_count"`
+	AbandonStale  bool   `json:"abandon_stale,omitempty"`
 }
 
 // Validate ensures the request has sane defaults and limits.
