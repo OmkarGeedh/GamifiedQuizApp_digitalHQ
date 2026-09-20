@@ -183,3 +183,11 @@ Pre-configured Postman collection and environment files are available in the [`p
   ```bash
   docker compose restart app
   ```
+
+---
+
+## 📚 7. Architecture & Specifications
+
+- [Points, Scoring & Rewards Specification](docs/points_calculation.md): Comprehensive breakdown of the `CalculatePoints` algorithm (difficulty, speed, and combo multipliers), theoretical `maxScore` formula, currency economy (Coins, XP, Gems), level formula, and the 5-minute inactivity session TTL.
+- [Authentication Specification](docs/auth.md): Complete guide to JWT lifecycle, refresh tokens, and OTP verification.
+
