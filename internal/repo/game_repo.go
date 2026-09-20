@@ -119,7 +119,30 @@ func GetActiveSessionByClientID(ctx context.Context, clientID int) (*models.Game
 
 // UpdateSession persists updated session fields.
 func UpdateSession(ctx context.Context, session *models.GameSession) error {
-	return GetDB().WithContext(ctx).Save(session).Error
+	db := GetDB()
+	if db == nil {
+		return nil
+	}
+	return db.WithContext(ctx).Save(session).Error
+}
+
+// AbandonInactiveSessions marks all in_progress sessions inactive for longer than ttl as abandoned.
+func AbandonInactiveSessions(ctx context.Context, ttl time.Duration) (int64, error) {
+	db := GetDB()
+	if db == nil {
+		return 0, nil
+	}
+	cutoff := time.Now().UTC().Add(-ttl)
+	now := time.Now().UTC()
+	res := db.WithContext(ctx).
+		Model(&models.GameSession{}).
+		Where("status = ? AND (updated_at < ? OR (updated_at IS NULL AND (started_at < ? OR created_at < ?)))",
+			models.SessionStatusInProgress, cutoff, cutoff, cutoff).
+		Updates(map[string]interface{}{
+			"status":   models.SessionStatusAbandoned,
+			"ended_at": &now,
+		})
+	return res.RowsAffected, res.Error
 }
 
 // --- History Repository ---

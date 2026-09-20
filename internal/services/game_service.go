@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"math/rand/v2"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/config"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/dto"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/models"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/repo"
@@ -18,6 +21,78 @@ import (
 // Default time limit per question in seconds.
 const DefaultTimeLimitSec = 15
 
+// SessionInactivityTTL is the maximum allowed duration of inactivity (5 minutes) before a quiz session is abandoned.
+const SessionInactivityTTL = 5 * time.Minute
+
+// CheckAndAbandonIfExpired inspects if an active session has been inactive for longer than SessionInactivityTTL.
+// If expired, it transitions the status to "abandoned", sets EndedAt, persists the change, removes any Redis key,
+// and returns true.
+func CheckAndAbandonIfExpired(ctx context.Context, session *models.GameSession) bool {
+	if session == nil || session.Status != models.SessionStatusInProgress {
+		return false
+	}
+
+	lastActivity := session.UpdatedAt
+	if lastActivity.IsZero() {
+		lastActivity = session.StartedAt
+	}
+	if lastActivity.IsZero() {
+		lastActivity = session.CreatedAt
+	}
+
+	if time.Since(lastActivity) > SessionInactivityTTL {
+		now := time.Now().UTC()
+		session.Status = models.SessionStatusAbandoned
+		session.EndedAt = &now
+		_ = repo.UpdateSession(ctx, session)
+
+		if config.RedisClient != nil {
+			_ = config.RedisClient.Del(ctx, fmt.Sprintf("quiz:session:%s", session.ID)).Err()
+		}
+		return true
+	}
+	return false
+}
+
+// RefreshSessionTTL sets or refreshes the 5-minute inactivity TTL in Redis.
+func RefreshSessionTTL(ctx context.Context, sessionID string) {
+	if config.RedisClient != nil && sessionID != "" {
+		_ = config.RedisClient.Set(ctx, fmt.Sprintf("quiz:session:%s", sessionID), "active", SessionInactivityTTL).Err()
+	}
+}
+
+// ClearSessionTTL deletes the session key from Redis.
+func ClearSessionTTL(ctx context.Context, sessionID string) {
+	if config.RedisClient != nil && sessionID != "" {
+		_ = config.RedisClient.Del(ctx, fmt.Sprintf("quiz:session:%s", sessionID)).Err()
+	}
+}
+
+// StartSessionTTLSweeper runs a periodic background sweeper that marks inactive sessions (>5m) as abandoned.
+func StartSessionTTLSweeper(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 1 * time.Minute
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				count, err := repo.AbandonInactiveSessions(ctx, SessionInactivityTTL)
+				if err != nil {
+					log.Printf("[SessionTTLSweeper] Error sweeping inactive sessions: %v\n", err)
+				} else if count > 0 {
+					log.Printf("[SessionTTLSweeper] Abandoned %d inactive quiz sessions (> %v without activity)\n", count, SessionInactivityTTL)
+				}
+			}
+		}
+	}()
+}
+
 // --- Session Management ---
 
 // CreateSession initializes a new quiz session, picks random questions from the DB,
@@ -26,9 +101,15 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 	// Check for existing active session
 	existing, err := repo.GetActiveSessionByClientID(ctx, clientID)
 	if err == nil && existing != nil {
-		if req.AbandonStale {
+		if CheckAndAbandonIfExpired(ctx, existing) {
+			// Previous session was inactive for > 5 min and has been auto-abandoned.
+			// Client can now start a fresh session smoothly.
+		} else if req.AbandonStale {
+			now := time.Now().UTC()
 			existing.Status = models.SessionStatusAbandoned
+			existing.EndedAt = &now
 			_ = repo.UpdateSession(ctx, existing)
+			ClearSessionTTL(ctx, existing.ID)
 		} else {
 			return nil, http.StatusConflict, errors.New("an active session already exists; complete or abandon it first")
 		}
@@ -91,6 +172,8 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 		return nil, http.StatusInternalServerError, fmt.Errorf("failed to create session: %w", err)
 	}
 
+	RefreshSessionTTL(ctx, session.ID)
+
 	return &dto.SessionCreatedResponseDTO{
 		Session:        session.ID,
 		Topic:          session.TopicID,
@@ -115,10 +198,13 @@ func AbandonSession(ctx context.Context, clientID int, sessionID string) (int, e
 	if session.Status != models.SessionStatusInProgress {
 		return http.StatusConflict, errors.New("session is already completed or abandoned")
 	}
+	now := time.Now().UTC()
 	session.Status = models.SessionStatusAbandoned
+	session.EndedAt = &now
 	if err := repo.UpdateSession(ctx, session); err != nil {
 		return http.StatusInternalServerError, fmt.Errorf("failed to abandon session: %w", err)
 	}
+	ClearSessionTTL(ctx, sessionID)
 	return http.StatusOK, nil
 }
 
@@ -142,6 +228,11 @@ func EvaluateAnswer(ctx context.Context, clientID int, req *dto.SubmitAnswerRequ
 		return nil, http.StatusConflict, errors.New("session is not active")
 	}
 
+	// Check if session has expired due to 5 minutes of inactivity
+	if CheckAndAbandonIfExpired(ctx, session) {
+		return nil, http.StatusConflict, errors.New("quiz session expired due to 5 minutes of inactivity and has been abandoned")
+	}
+
 	// 2. Prevent duplicate answers for the same question in this session
 	already, err := repo.HasAnsweredQuestion(ctx, req.Session, req.Question)
 	if err != nil {
@@ -152,8 +243,8 @@ func EvaluateAnswer(ctx context.Context, clientID int, req *dto.SubmitAnswerRequ
 	}
 
 	// 3. Find question in session state (fallback to DB question if session state is empty)
-	var questionDifficulty int
 	var questionPoints int
+	var questionDifficulty int
 	var questionExplanation *string
 
 	sessionQuestions, _ := session.GetQuestions()
@@ -167,8 +258,8 @@ func EvaluateAnswer(ctx context.Context, clientID int, req *dto.SubmitAnswerRequ
 
 	var fallbackQ *models.Question
 	if matchedSQ != nil {
-		questionDifficulty = matchedSQ.Difficulty
 		questionPoints = matchedSQ.Points
+		questionDifficulty = matchedSQ.Difficulty
 		questionExplanation = matchedSQ.Explanation
 	} else {
 		// Fallback to database
@@ -180,15 +271,15 @@ func EvaluateAnswer(ctx context.Context, clientID int, req *dto.SubmitAnswerRequ
 			}
 			return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch question: %w", err)
 		}
-		questionDifficulty = fallbackQ.Difficulty
 		questionPoints = fallbackQ.Points
+		questionDifficulty = fallbackQ.Difficulty
 		questionExplanation = fallbackQ.Explanation
 	}
 
 	// 4. Grade the answer with robust multi-layered verification
 	isCorrect, isSkipped, resolvedCorrectOption := GradeAnswer(matchedSQ, fallbackQ, req.Option, req.SelectedText)
 
-	// 5. Calculate scoring
+	// 5. Calculate scoring with proper gamification algorithm (CalculatePoints)
 	pointsEarned := 0
 	coinsEarned := 0
 
@@ -196,6 +287,12 @@ func EvaluateAnswer(ctx context.Context, clientID int, req *dto.SubmitAnswerRequ
 		session.ComboStreak++
 		if session.ComboStreak > session.BestStreak {
 			session.BestStreak = session.ComboStreak
+		}
+		if questionPoints <= 0 {
+			questionPoints = 10
+		}
+		if questionDifficulty <= 0 {
+			questionDifficulty = 1
 		}
 		pointsEarned = CalculatePoints(questionPoints, questionDifficulty, req.TimeTakenMs, session.ComboStreak)
 		coinsEarned = CalculateCoins(pointsEarned)
@@ -226,6 +323,8 @@ func EvaluateAnswer(ctx context.Context, clientID int, req *dto.SubmitAnswerRequ
 	if err := repo.UpdateSession(ctx, session); err != nil {
 		return nil, http.StatusInternalServerError, fmt.Errorf("failed to update session: %w", err)
 	}
+
+	RefreshSessionTTL(ctx, session.ID)
 
 	return &dto.AnswerResultDTO{
 		Question:      req.Question,
@@ -260,6 +359,13 @@ func ApplyFiftyFifty(ctx context.Context, clientID int, req *dto.FiftyFiftyReque
 	if session.Status != models.SessionStatusInProgress {
 		return nil, http.StatusConflict, errors.New("session is not active")
 	}
+
+	// Check if session has expired due to 5 minutes of inactivity
+	if CheckAndAbandonIfExpired(ctx, session) {
+		return nil, http.StatusConflict, errors.New("quiz session expired due to 5 minutes of inactivity and has been abandoned")
+	}
+
+	RefreshSessionTTL(ctx, session.ID)
 
 	// Fetch question from session state (or DB fallback) to identify correct option
 	var correct string
@@ -322,6 +428,11 @@ func CompleteSession(ctx context.Context, clientID int, req *dto.CompleteSession
 		return nil, http.StatusConflict, errors.New("session is already completed or abandoned")
 	}
 
+	// Check if session has expired due to 5 minutes of inactivity
+	if CheckAndAbandonIfExpired(ctx, session) {
+		return nil, http.StatusConflict, errors.New("quiz session expired due to 5 minutes of inactivity and has been abandoned")
+	}
+
 	// Calculate rewards
 	coins, xp, gems := CalculateGameRewards(session.Score, session.CorrectCount, session.TotalQuestions)
 
@@ -345,6 +456,7 @@ func CompleteSession(ctx context.Context, clientID int, req *dto.CompleteSession
 	if err := repo.FinalizeSession(ctx, session, coins, xp, gems); err != nil {
 		return nil, http.StatusInternalServerError, fmt.Errorf("failed to finalize session: %w", err)
 	}
+	ClearSessionTTL(ctx, session.ID)
 
 	// If level changed, update level column separately
 	if didLevelUp {
@@ -379,10 +491,29 @@ func CompleteSession(ctx context.Context, clientID int, req *dto.CompleteSession
 	}
 
 	scoreBreakdown := map[string]int{
-		"quiz_score": session.Score,
+		"correct_answer_points": session.Score,
 	}
 
-	maxScore := session.TotalQuestions * 10
+	maxScore := 0
+	sessionQuestions, _ := session.GetQuestions()
+	combo := 0
+	for _, sq := range sessionQuestions {
+		combo++
+		pts := sq.Points
+		if pts <= 0 {
+			pts = 10
+		}
+		diff := sq.Difficulty
+		if diff <= 0 {
+			diff = 1
+		}
+		// Max score achievable under CalculatePoints:
+		// perfect speed bonus (< 50% time limit) and uninterrupted streak
+		maxScore += CalculatePoints(pts, diff, 1000, combo)
+	}
+	if maxScore == 0 {
+		maxScore = session.TotalQuestions * 10
+	}
 	if maxScore < session.Score {
 		maxScore = session.Score
 	}

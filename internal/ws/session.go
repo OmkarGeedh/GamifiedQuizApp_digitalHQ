@@ -203,7 +203,15 @@ func (gs *GameSession) handleAnswer(ctx context.Context, rawData json.RawMessage
 		if gs.Session.ComboStreak > gs.Session.BestStreak {
 			gs.Session.BestStreak = gs.Session.ComboStreak
 		}
-		pointsEarned = services.CalculatePoints(q.Points, q.Difficulty, data.TimeTakenMs, gs.Session.ComboStreak)
+		pts := q.Points
+		if pts <= 0 {
+			pts = 10
+		}
+		diff := q.Difficulty
+		if diff <= 0 {
+			diff = 1
+		}
+		pointsEarned = services.CalculatePoints(pts, diff, data.TimeTakenMs, gs.Session.ComboStreak)
 		coinsEarned = services.CalculateCoins(pointsEarned)
 		gs.Session.CorrectCount++
 	} else {

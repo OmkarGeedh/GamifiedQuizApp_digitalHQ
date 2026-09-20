@@ -1,7 +1,9 @@
 package services
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/models"
 )
@@ -310,3 +312,76 @@ func TestGradeAnswer_MultiLayeredEvaluation(t *testing.T) {
 		}
 	})
 }
+
+func TestCheckAndAbandonIfExpired(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("Returns false for nil session", func(t *testing.T) {
+		if CheckAndAbandonIfExpired(ctx, nil) {
+			t.Fatal("expected false for nil session")
+		}
+	})
+
+	t.Run("Returns false for already finished session", func(t *testing.T) {
+		session := &models.GameSession{
+			Status:    models.SessionStatusFinished,
+			UpdatedAt: time.Now().Add(-10 * time.Minute),
+		}
+		if CheckAndAbandonIfExpired(ctx, session) {
+			t.Fatal("expected false for finished session")
+		}
+	})
+
+	t.Run("Returns false for already abandoned session", func(t *testing.T) {
+		session := &models.GameSession{
+			Status:    models.SessionStatusAbandoned,
+			UpdatedAt: time.Now().Add(-10 * time.Minute),
+		}
+		if CheckAndAbandonIfExpired(ctx, session) {
+			t.Fatal("expected false for already abandoned session")
+		}
+	})
+
+	t.Run("Returns false when session active within 5 minutes", func(t *testing.T) {
+		session := &models.GameSession{
+			Status:    models.SessionStatusInProgress,
+			UpdatedAt: time.Now().Add(-2 * time.Minute),
+		}
+		if CheckAndAbandonIfExpired(ctx, session) {
+			t.Fatal("expected false for recently active session (2 min ago)")
+		}
+		if session.Status != models.SessionStatusInProgress {
+			t.Fatalf("expected status to remain in_progress, got %s", session.Status)
+		}
+	})
+
+	t.Run("Returns true and abandons session when inactive > 5 minutes", func(t *testing.T) {
+		session := &models.GameSession{
+			Status:    models.SessionStatusInProgress,
+			UpdatedAt: time.Now().Add(-5*time.Minute - 10*time.Second),
+		}
+		if !CheckAndAbandonIfExpired(ctx, session) {
+			t.Fatal("expected true for session inactive > 5 minutes")
+		}
+		if session.Status != models.SessionStatusAbandoned {
+			t.Fatalf("expected status to change to abandoned, got %s", session.Status)
+		}
+		if session.EndedAt == nil {
+			t.Fatal("expected EndedAt to be populated")
+		}
+	})
+
+	t.Run("Falls back to StartedAt when UpdatedAt is zero", func(t *testing.T) {
+		session := &models.GameSession{
+			Status:    models.SessionStatusInProgress,
+			StartedAt: time.Now().Add(-6 * time.Minute),
+		}
+		if !CheckAndAbandonIfExpired(ctx, session) {
+			t.Fatal("expected true when StartedAt > 5 min ago")
+		}
+		if session.Status != models.SessionStatusAbandoned {
+			t.Fatalf("expected status to change to abandoned, got %s", session.Status)
+		}
+	})
+}
+

@@ -95,6 +95,7 @@ type SignupSendCodeResponse struct {
 	CooldownSeconds int    `json:"cooldownSeconds"`
 	ExpiresIn       int    `json:"expiresIn"`
 	Message         string `json:"message,omitempty"`
+	OTP             string `json:"otp,omitempty"`
 }
 
 // PendingSignupData holds pending registration state in Redis or memory store.

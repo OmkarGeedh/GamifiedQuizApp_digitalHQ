@@ -265,6 +265,10 @@ func WebSocketGameHandler(c *gin.Context) {
 		response.Error(c, http.StatusConflict, "Session is not active")
 		return
 	}
+	if services.CheckAndAbandonIfExpired(c.Request.Context(), session) {
+		response.Error(c, http.StatusConflict, "quiz session expired due to 5 minutes of inactivity and has been abandoned")
+		return
+	}
 
 	// Fetch session questions from session state
 	questions, err := session.GetQuestions()

@@ -1,15 +1,18 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/config"
 	db "github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/database"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/routes"
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/services"
 	"github.com/gin-gonic/gin"
 )
 
@@ -66,6 +69,7 @@ func main() {
 	}
 
 	r := gin.Default()
+	r.HandleMethodNotAllowed = true
 
 	// Robust CORS Middleware
 	r.Use(func(c *gin.Context) {
@@ -124,11 +128,22 @@ func main() {
 	routes.RegisterGameRoutes(r)
 	routes.RegisterWalletRoutes(r)
 
+	// 5b. Start background session inactivity sweeper (TTL: 5 minutes, sweeps every 1 minute)
+	services.StartSessionTTLSweeper(context.Background(), 1*time.Minute)
+
 	// Fallback 404 handler with JSON response
 	r.NoRoute(func(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{
 			"success": false,
 			"message": fmt.Sprintf("Path '%s' not found", c.Request.URL.Path),
+		})
+	})
+
+	// Fallback 405 Method Not Allowed handler with JSON response
+	r.NoMethod(func(c *gin.Context) {
+		c.JSON(http.StatusMethodNotAllowed, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("Method %s not allowed on '%s'", c.Request.Method, c.Request.URL.Path),
 		})
 	})
 

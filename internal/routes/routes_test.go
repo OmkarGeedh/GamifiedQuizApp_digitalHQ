@@ -14,6 +14,8 @@ func setupTestEngine() *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 
+	r.HandleMethodNotAllowed = true
+
 	// Robust CORS Middleware matching main.go
 	r.Use(func(c *gin.Context) {
 		if len(c.Request.URL.Path) > 1 && strings.HasSuffix(c.Request.URL.Path, "/") {
@@ -59,6 +61,13 @@ func setupTestEngine() *gin.Engine {
 	routes.RegisterProfileRoutes(r)
 	routes.RegisterGameRoutes(r)
 	routes.RegisterWalletRoutes(r)
+
+	r.NoMethod(func(c *gin.Context) {
+		c.JSON(http.StatusMethodNotAllowed, gin.H{
+			"success": false,
+			"message": "Method not allowed",
+		})
+	})
 
 	return r
 }
@@ -122,3 +131,17 @@ func TestRouteRegistrationBothPrefixes(t *testing.T) {
 		}
 	}
 }
+
+func TestMethodNotAllowedReturns405(t *testing.T) {
+	router := setupTestEngine()
+
+	// GET on POST-only route /auth/login
+	req, _ := http.NewRequest(http.MethodGet, "/auth/login", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected status 405 Method Not Allowed, got %d", w.Code)
+	}
+}
+

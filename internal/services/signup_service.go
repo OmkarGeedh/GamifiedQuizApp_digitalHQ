@@ -9,6 +9,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -270,12 +271,17 @@ func SignupSendCodeService(ctx context.Context, ip string, req *dto.SignupSendCo
 	log.Printf("[SIGNUP VERIFICATION CODE] 6-Digit Code: >>> %s <<< for %s (%s)", otp, req.Email, req.DisplayName)
 	log.Printf("================================================================")
 
-	return &dto.SignupSendCodeResponse{
+	res := &dto.SignupSendCodeResponse{
 		Email:           req.Email,
 		CooldownSeconds: 60,
 		ExpiresIn:       600,
 		Message:         fmt.Sprintf("Verification code sent to %s", req.Email),
-	}, http.StatusOK, nil
+	}
+	if os.Getenv("ENV") != "production" {
+		res.OTP = otp
+	}
+
+	return res, http.StatusOK, nil
 }
 
 // SignupResendCodeService handles resending code with cooldown and rate limit enforcement.
@@ -321,12 +327,17 @@ func SignupResendCodeService(ctx context.Context, ip string, req *dto.SignupRese
 	log.Printf("[SIGNUP RESEND CODE] New 6-Digit Code: >>> %s <<< for %s", otp, req.Email)
 	log.Printf("================================================================")
 
-	return &dto.SignupSendCodeResponse{
+	res := &dto.SignupSendCodeResponse{
 		Email:           req.Email,
 		CooldownSeconds: 60,
 		ExpiresIn:       600,
 		Message:         fmt.Sprintf("A new verification code was sent to %s", req.Email),
-	}, http.StatusOK, nil
+	}
+	if os.Getenv("ENV") != "production" {
+		res.OTP = otp
+	}
+
+	return res, http.StatusOK, nil
 }
 
 // SignupVerifyService handles Step 2: Code verification, PostgreSQL account creation,
