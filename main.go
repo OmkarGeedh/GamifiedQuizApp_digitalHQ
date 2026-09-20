@@ -5,11 +5,9 @@ import (
 	"net/http"
 	"os"
 
-	authRoutes "github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/auth/client/routes"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/config"
 	db "github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/database"
-	gameRoutes "github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/game/routes"
-	profileRoutes "github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/profile/routes"
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/routes"
 	"github.com/gin-gonic/gin"
 )
 
@@ -100,9 +98,9 @@ func main() {
 	})
 
 	// 5. Register Routes
-	authRoutes.RegisterClientRoutes(r)
-	profileRoutes.RegisterProfileRoutes(r)
-	gameRoutes.RegisterGameRoutes(r)
+	routes.RegisterAuthRoutes(r)
+	routes.RegisterProfileRoutes(r)
+	routes.RegisterGameRoutes(r)
 
 	// 6. Start Server
 	port := os.Getenv("PORT")
