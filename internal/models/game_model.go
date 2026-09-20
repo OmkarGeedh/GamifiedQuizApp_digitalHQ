@@ -7,17 +7,19 @@ import (
 
 // SessionQuestion represents the shuffled state of a question within a game session.
 type SessionQuestion struct {
-	QuestionCode  string  `json:"question_code"`
-	Prompt        string  `json:"prompt"`
-	OptionA       string  `json:"option_a"`
-	OptionB       string  `json:"option_b"`
-	OptionC       string  `json:"option_c"`
-	OptionD       string  `json:"option_d"`
-	CorrectOption string  `json:"correct_option"` // 'a', 'b', 'c', or 'd' matching shuffled options
-	Difficulty    int     `json:"difficulty"`
-	Points        int     `json:"points"`
-	Hint          *string `json:"hint,omitempty"`
-	Explanation   *string `json:"explanation,omitempty"`
+	QuestionCode    string  `json:"question_code"`
+	Prompt          string  `json:"prompt"`
+	OptionA         string  `json:"option_a"`
+	OptionB         string  `json:"option_b"`
+	OptionC         string  `json:"option_c"`
+	OptionD         string  `json:"option_d"`
+	CorrectOption   string  `json:"correct_option"` // 'a', 'b', 'c', or 'd' matching shuffled options
+	OriginalCorrect string  `json:"original_correct,omitempty"` // original DB correct letter ('a', 'b', 'c', 'd')
+	CorrectText     string  `json:"correct_text,omitempty"`    // the actual string text of the correct answer
+	Difficulty      int     `json:"difficulty"`
+	Points          int     `json:"points"`
+	Hint            *string `json:"hint,omitempty"`
+	Explanation     *string `json:"explanation,omitempty"`
 }
 
 // Question represents a single MCQ question stored in PostgreSQL.
@@ -47,7 +49,7 @@ func (Question) TableName() string {
 // GameSession tracks a single quiz session for a player.
 type GameSession struct {
 	ID             string     `gorm:"column:id;type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
-	ClientID       int        `gorm:"column:client_id;not null;index:idx_game_sessions_client" json:"client_id"`
+	ClientID       int        `gorm:"column:client_id;not null;index:idx_game_sessions_client;index:idx_game_sessions_client_status,priority:1" json:"client_id"`
 	TopicID        string     `gorm:"column:topic_id;size:64;not null;default:'general'" json:"topic_id"`
 	TotalQuestions int        `gorm:"column:total_questions;not null;default:10" json:"total_questions"`
 	CurrentIdx     int        `gorm:"column:current_idx;not null;default:0" json:"current_idx"`
@@ -55,7 +57,7 @@ type GameSession struct {
 	CorrectCount   int        `gorm:"column:correct_count;not null;default:0" json:"correct_count"`
 	ComboStreak    int        `gorm:"column:combo_streak;not null;default:0" json:"combo_streak"`
 	BestStreak     int        `gorm:"column:best_streak;not null;default:0" json:"best_streak"`
-	Status         string     `gorm:"column:status;size:20;not null;default:'in_progress'" json:"status"`
+	Status         string     `gorm:"column:status;size:20;not null;default:'in_progress';index:idx_game_sessions_client_status,priority:2" json:"status"`
 	QuestionsState string     `gorm:"column:questions_state;type:text" json:"-"`
 	StartedAt      time.Time  `gorm:"column:started_at;autoCreateTime" json:"started_at"`
 	EndedAt        *time.Time `gorm:"column:ended_at" json:"ended_at,omitempty"`
@@ -118,12 +120,14 @@ func (UserQuestionHistory) TableName() string {
 // Rows are never updated or deleted — only inserted.
 type WalletLedger struct {
 	ID              string    `gorm:"column:id;type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
-	ClientID        int       `gorm:"column:client_id;not null;index:idx_wallet_ledger_client" json:"client_id"`
+	ClientID        int       `gorm:"column:client_id;not null;index:idx_wallet_ledger_client;index:idx_wallet_ledger_client_created,priority:1" json:"client_id"`
 	TransactionType string    `gorm:"column:transaction_type;size:50;not null" json:"transaction_type"`
+	Direction       string    `gorm:"column:direction;size:10;not null;default:'credit'" json:"direction"`
 	Amount          int       `gorm:"column:amount;not null" json:"amount"`
 	Currency        string    `gorm:"column:currency;size:20;not null" json:"currency"`
+	BalanceAfter    int       `gorm:"column:balance_after;not null;default:0" json:"balance_after"`
 	ReferenceID     string    `gorm:"column:reference_id;size:64" json:"reference_id,omitempty"`
-	CreatedAt       time.Time `gorm:"column:created_at;autoCreateTime" json:"created_at"`
+	CreatedAt       time.Time `gorm:"column:created_at;autoCreateTime;index:idx_wallet_ledger_client_created,priority:2" json:"created_at"`
 }
 
 func (WalletLedger) TableName() string {
@@ -132,9 +136,19 @@ func (WalletLedger) TableName() string {
 
 // Ledger transaction type constants
 const (
-	TxTypeQuizReward  = "quiz_reward"
-	TxTypeLevelBonus  = "level_up_bonus"
-	TxTypeStreakBonus = "streak_bonus"
+	TxTypeQuizReward       = "quiz_reward"
+	TxTypeLevelBonus       = "level_up_bonus"
+	TxTypeStreakBonus      = "streak_bonus"
+	TxTypePowerUpPurchase  = "power_up_purchase"
+	TxTypeShopPurchase     = "shop_purchase"
+	TxTypeManualDebit      = "manual_debit"
+	TxTypeManualCredit     = "manual_credit"
+)
+
+// Transaction direction constants
+const (
+	DirectionCredit = "credit"
+	DirectionDebit  = "debit"
 )
 
 // Ledger currency constants

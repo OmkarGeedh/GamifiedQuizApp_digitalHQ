@@ -101,6 +101,7 @@ func main() {
 	routes.RegisterAuthRoutes(r)
 	routes.RegisterProfileRoutes(r)
 	routes.RegisterGameRoutes(r)
+	routes.RegisterWalletRoutes(r)
 
 	// 6. Start Server
 	port := os.Getenv("PORT")

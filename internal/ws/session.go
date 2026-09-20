@@ -179,10 +179,9 @@ func (gs *GameSession) handleAnswer(ctx context.Context, rawData json.RawMessage
 	}
 
 	// Validate option
-	option := strings.ToLower(strings.TrimSpace(data.Option))
-	validOptions := map[string]bool{"a": true, "b": true, "c": true, "d": true, "skip": true}
-	if !validOptions[option] {
-		gs.sendError("option must be 'a', 'b', 'c', 'd', or 'skip'")
+	cleanOption := strings.TrimSpace(data.Option)
+	if cleanOption == "" {
+		gs.sendError("option is required")
 		return
 	}
 
@@ -192,14 +191,9 @@ func (gs *GameSession) handleAnswer(ctx context.Context, rawData json.RawMessage
 		return
 	}
 	q := gs.Questions[gs.Session.CurrentIdx]
-	gs.mu.Unlock()
 
-	// Grade
-	isSkipped := option == "skip"
-	isCorrect := false
-	if !isSkipped {
-		isCorrect = strings.EqualFold(option, q.CorrectOption)
-	}
+	// Grade using multi-layered GradeAnswer
+	isCorrect, _, resolvedCorrect := services.GradeAnswer(&q, nil, cleanOption, data.SelectedText)
 
 	pointsEarned := 0
 	coinsEarned := 0
@@ -216,6 +210,7 @@ func (gs *GameSession) handleAnswer(ctx context.Context, rawData json.RawMessage
 		gs.Session.ComboStreak = 0
 	}
 	gs.Session.Score += pointsEarned
+	currentScore := gs.Session.Score
 	gs.mu.Unlock()
 
 	// Record in DB
@@ -223,7 +218,7 @@ func (gs *GameSession) handleAnswer(ctx context.Context, rawData json.RawMessage
 		ClientID:       gs.ClientID,
 		SessionID:      gs.Session.ID,
 		QuestionCode:   q.QuestionCode,
-		SelectedOption: option,
+		SelectedOption: cleanOption,
 		IsCorrect:      isCorrect,
 		TimeTakenMs:    data.TimeTakenMs,
 		PointsAwarded:  pointsEarned,
@@ -235,13 +230,13 @@ func (gs *GameSession) handleAnswer(ctx context.Context, rawData json.RawMessage
 		Type: MsgTypeAnswerResult,
 		Data: AnswerResultPayload{
 			Question:      q.QuestionCode,
-			Option:        option,
-			CorrectOption: strings.ToLower(q.CorrectOption),
+			Option:        cleanOption,
+			CorrectOption: strings.ToLower(resolvedCorrect),
 			IsCorrect:     isCorrect,
 			Explanation:   q.Explanation,
 			PointsEarned:  pointsEarned,
 			CoinsEarned:   coinsEarned,
-			YourScore:     gs.Session.Score,
+			YourScore:     currentScore,
 			IsTimeout:     false,
 		},
 	})

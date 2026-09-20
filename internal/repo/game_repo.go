@@ -21,6 +21,32 @@ func GetQuestionsByTopic(ctx context.Context, topicID string, limit int) ([]mode
 	return questions, err
 }
 
+// GetQuestionsByCodes fetches questions matching the specified question codes,
+// preserving the caller's requested order.
+func GetQuestionsByCodes(ctx context.Context, codes []string) ([]models.Question, error) {
+	if len(codes) == 0 {
+		return nil, nil
+	}
+	var questions []models.Question
+	err := GetDB().WithContext(ctx).
+		Where("question_code IN ?", codes).
+		Find(&questions).Error
+	if err != nil {
+		return nil, err
+	}
+	questionMap := make(map[string]models.Question, len(questions))
+	for _, q := range questions {
+		questionMap[q.QuestionCode] = q
+	}
+	ordered := make([]models.Question, 0, len(codes))
+	for _, code := range codes {
+		if q, ok := questionMap[code]; ok {
+			ordered = append(ordered, q)
+		}
+	}
+	return ordered, nil
+}
+
 // GetQuestionByCode fetches a single question by its unique code.
 func GetQuestionByCode(ctx context.Context, code string) (*models.Question, error) {
 	var q models.Question

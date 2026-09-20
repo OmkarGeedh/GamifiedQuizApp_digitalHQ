@@ -9,9 +9,10 @@ import (
 
 // CreateSessionRequestDTO validates input for starting a new quiz session.
 type CreateSessionRequestDTO struct {
-	TopicID       string `json:"topic" binding:"required"`
-	QuestionCount int    `json:"question_count"`
-	AbandonStale  bool   `json:"abandon_stale,omitempty"`
+	TopicID       string   `json:"topic" binding:"required"`
+	QuestionCount int      `json:"question_count"`
+	AbandonStale  bool     `json:"abandon_stale,omitempty"`
+	QuestionCodes []string `json:"question_codes,omitempty"`
 }
 
 // Validate ensures the request has sane defaults and limits.
@@ -20,7 +21,9 @@ func (r *CreateSessionRequestDTO) Validate() error {
 	if r.TopicID == "" {
 		return errors.New("topic is required")
 	}
-	if r.QuestionCount <= 0 {
+	if len(r.QuestionCodes) > 0 {
+		r.QuestionCount = len(r.QuestionCodes)
+	} else if r.QuestionCount <= 0 {
 		r.QuestionCount = 10
 	}
 	if r.QuestionCount > 25 {
@@ -31,10 +34,11 @@ func (r *CreateSessionRequestDTO) Validate() error {
 
 // SubmitAnswerRequestDTO validates a player's answer submission.
 type SubmitAnswerRequestDTO struct {
-	Session     string `json:"session" binding:"required"`
-	Question    string `json:"question" binding:"required"`
-	Option      string `json:"option" binding:"required"`
-	TimeTakenMs int    `json:"time_taken_ms"`
+	Session      string `json:"session" binding:"required"`
+	Question     string `json:"question" binding:"required"`
+	Option       string `json:"option" binding:"required"`
+	SelectedText string `json:"selected_text,omitempty"`
+	TimeTakenMs  int    `json:"time_taken_ms"`
 }
 
 // Validate ensures the answer fields are correctly formatted.
@@ -47,14 +51,25 @@ func (r *SubmitAnswerRequestDTO) Validate() error {
 	if r.Question == "" {
 		return errors.New("question is required")
 	}
-	r.Option = strings.ToLower(strings.TrimSpace(r.Option))
+	r.Option = strings.TrimSpace(r.Option)
 	if r.Option == "" {
 		return errors.New("option is required")
 	}
+	r.SelectedText = strings.TrimSpace(r.SelectedText)
+
+	lowerOption := strings.ToLower(r.Option)
 	validOptions := map[string]bool{"a": true, "b": true, "c": true, "d": true, "skip": true}
-	if !validOptions[r.Option] {
-		return errors.New("option must be 'a', 'b', 'c', 'd', or 'skip'")
+	if validOptions[lowerOption] {
+		r.Option = lowerOption
+	} else if len(r.Option) > 1 {
+		// Player or client sent the full answer text in the option field
+		if r.SelectedText == "" {
+			r.SelectedText = r.Option
+		}
+	} else {
+		return errors.New("option must be 'a', 'b', 'c', 'd', 'skip', or the option text")
 	}
+
 	if r.TimeTakenMs < 0 {
 		return errors.New("time_taken_ms cannot be negative")
 	}
@@ -170,14 +185,18 @@ type StreakInfoDTO struct {
 
 // SessionCompleteResponseDTO is the final game summary after quiz completion.
 type SessionCompleteResponseDTO struct {
-	Session            string        `json:"session"`
-	TotalQuestions     int           `json:"total_questions"`
-	CorrectCount       int           `json:"correct_count"`
-	AccuracyPercentage float64       `json:"accuracy_percentage"`
-	FinalScore         int           `json:"final_score"`
-	CoinsAwarded       int           `json:"coins_awarded"`
-	XPAwarded          int           `json:"xp_awarded"`
-	GemsAwarded        int           `json:"gems_awarded"`
-	Level              LevelInfoDTO  `json:"level"`
-	Streak             StreakInfoDTO `json:"streak"`
+	Session            string            `json:"session"`
+	TotalQuestions     int               `json:"total_questions"`
+	CorrectCount       int               `json:"correct_count"`
+	AccuracyPercentage float64           `json:"accuracy_percentage"`
+	FinalScore         int               `json:"final_score"`
+	MaxScore           int               `json:"max_score,omitempty"`
+	CoinsAwarded       int               `json:"coins_awarded"`
+	XPAwarded          int               `json:"xp_awarded"`
+	GemsAwarded        int               `json:"gems_awarded"`
+	ScoreBreakdown     map[string]int    `json:"score_breakdown,omitempty"`
+	CoinBreakdown      map[string]int    `json:"coin_breakdown,omitempty"`
+	XPBreakdown        map[string]int    `json:"xp_breakdown,omitempty"`
+	Level              LevelInfoDTO      `json:"level"`
+	Streak             StreakInfoDTO     `json:"streak"`
 }

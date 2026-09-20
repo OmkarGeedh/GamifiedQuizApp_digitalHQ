@@ -17,9 +17,10 @@ type JoinGameData struct {
 
 // SubmitAnswerData is the payload for "submit_answer" messages.
 type SubmitAnswerData struct {
-	Question    string `json:"question"`
-	Option      string `json:"option"`
-	TimeTakenMs int    `json:"time_taken_ms"`
+	Question     string `json:"question"`
+	Option       string `json:"option"`
+	SelectedText string `json:"selected_text,omitempty"`
+	TimeTakenMs  int    `json:"time_taken_ms"`
 }
 
 // --- Outbound Messages (Server → Client) ---

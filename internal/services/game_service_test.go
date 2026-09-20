@@ -220,3 +220,93 @@ func TestShuffleQuestion_UniformDistribution(t *testing.T) {
 		}
 	}
 }
+
+func TestGradeAnswer_MultiLayeredEvaluation(t *testing.T) {
+	orig := models.Question{
+		QuestionCode:  "q101",
+		Prompt:        "What is 2 + 2?",
+		OptionA:       "4",
+		OptionB:       "3",
+		OptionC:       "2",
+		OptionD:       "5",
+		CorrectOption: "a", // "4"
+		Points:        10,
+		Difficulty:    1,
+	}
+
+	sq := ShuffleQuestion(orig)
+	// sq.CorrectText is "4"
+	// sq.OriginalCorrect is "a"
+	// sq.CorrectOption is whichever slot "4" was shuffled into
+
+	t.Run("Matches Shuffled Letter", func(t *testing.T) {
+		correct, skipped, res := GradeAnswer(&sq, nil, sq.CorrectOption, "")
+		if !correct || skipped || res != sq.CorrectOption {
+			t.Fatalf("Expected correct=true, skipped=false, got correct=%v, skipped=%v, res=%s", correct, skipped, res)
+		}
+	})
+
+	t.Run("Matches Original DB Letter", func(t *testing.T) {
+		correct, skipped, _ := GradeAnswer(&sq, nil, "a", "")
+		if !correct || skipped {
+			t.Fatalf("Expected original letter 'a' to evaluate as correct, got %v", correct)
+		}
+	})
+
+	t.Run("Matches Option Text in Option Field", func(t *testing.T) {
+		correct, skipped, _ := GradeAnswer(&sq, nil, "4", "")
+		if !correct || skipped {
+			t.Fatalf("Expected option text '4' to evaluate as correct, got %v", correct)
+		}
+	})
+
+	t.Run("Matches SelectedText when Option is Desynchronized", func(t *testing.T) {
+		// Suppose client showed option 'x' as "4", but session shuffled "4" elsewhere
+		wrongLetter := "b"
+		if sq.CorrectOption == "b" {
+			wrongLetter = "c"
+		}
+		correct, skipped, _ := GradeAnswer(&sq, nil, wrongLetter, "4")
+		if !correct || skipped {
+			t.Fatalf("Expected selected_text '4' to override mismatched option letter, got %v", correct)
+		}
+	})
+
+	t.Run("Matches Slot Text in Session Question", func(t *testing.T) {
+		// Selecting the letter that has "4"
+		correct, _, _ := GradeAnswer(&sq, nil, sq.CorrectOption, "")
+		if !correct {
+			t.Fatal("Expected slot text match to evaluate as correct")
+		}
+	})
+
+	t.Run("Rejects Incorrect Letter and Incorrect Text", func(t *testing.T) {
+		wrongLetter := "b"
+		if sq.CorrectOption == "b" {
+			wrongLetter = "c"
+		}
+		correct, skipped, _ := GradeAnswer(&sq, nil, wrongLetter, "999")
+		if correct || skipped {
+			t.Fatalf("Expected incorrect answer to be false, got correct=%v", correct)
+		}
+	})
+
+	t.Run("Handles Skip", func(t *testing.T) {
+		correct, skipped, res := GradeAnswer(&sq, nil, "skip", "")
+		if correct || !skipped || res != sq.CorrectOption {
+			t.Fatalf("Expected correct=false, skipped=true, got correct=%v, skipped=%v", correct, skipped)
+		}
+	})
+
+	t.Run("Fallback DB Question when Session State is Missing", func(t *testing.T) {
+		// Evaluating directly against models.Question
+		correctLetter, _, _ := GradeAnswer(nil, &orig, "a", "")
+		if !correctLetter {
+			t.Fatal("Expected DB question letter 'a' to evaluate as correct")
+		}
+		correctText, _, _ := GradeAnswer(nil, &orig, "b", "4")
+		if !correctText {
+			t.Fatal("Expected DB question with selected_text '4' to evaluate as correct")
+		}
+	})
+}

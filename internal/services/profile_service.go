@@ -13,6 +13,8 @@ import (
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/models"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/repo"
 	"github.com/google/uuid"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 	"gorm.io/gorm"
 )
 
@@ -92,7 +94,7 @@ func GetProfileSetupOptions(ctx context.Context) (*dto.ProfileSetupOptionsDTO, i
 					TopicsCount: 1,
 				})
 			} else {
-				displayName := strings.Title(strings.ReplaceAll(topicID, "_", " "))
+				displayName := cases.Title(language.English).String(strings.ReplaceAll(topicID, "_", " "))
 				subjects = append(subjects, dto.SubjectOptionDTO{
 					ID:          topicID,
 					Name:        displayName,

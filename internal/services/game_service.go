@@ -46,16 +46,26 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 		req.QuestionCount = int(count)
 	}
 
-	// Fetch random questions from DB
-	questions, err := repo.GetQuestionsByTopic(ctx, req.TopicID, req.QuestionCount)
-	if err != nil {
-		return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch questions: %w", err)
+	// Fetch questions: use specific requested codes if provided, otherwise random selection
+	var questions []models.Question
+	if len(req.QuestionCodes) > 0 {
+		var err error
+		questions, err = repo.GetQuestionsByCodes(ctx, req.QuestionCodes)
+		if err != nil {
+			return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch requested questions: %w", err)
+		}
 	}
-
-	// Shuffle the order of questions
-	rand.Shuffle(len(questions), func(i, j int) {
-		questions[i], questions[j] = questions[j], questions[i]
-	})
+	if len(questions) == 0 {
+		var err error
+		questions, err = repo.GetQuestionsByTopic(ctx, req.TopicID, req.QuestionCount)
+		if err != nil {
+			return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch questions: %w", err)
+		}
+		// Shuffle the order of randomly selected questions
+		rand.Shuffle(len(questions), func(i, j int) {
+			questions[i], questions[j] = questions[j], questions[i]
+		})
+	}
 
 	// Shuffle options for each question and create SessionQuestion objects
 	sessionQuestions := make([]models.SessionQuestion, 0, len(questions))
@@ -142,7 +152,6 @@ func EvaluateAnswer(ctx context.Context, clientID int, req *dto.SubmitAnswerRequ
 	}
 
 	// 3. Find question in session state (fallback to DB question if session state is empty)
-	var correctOption string
 	var questionDifficulty int
 	var questionPoints int
 	var questionExplanation *string
@@ -156,32 +165,28 @@ func EvaluateAnswer(ctx context.Context, clientID int, req *dto.SubmitAnswerRequ
 		}
 	}
 
+	var fallbackQ *models.Question
 	if matchedSQ != nil {
-		correctOption = matchedSQ.CorrectOption
 		questionDifficulty = matchedSQ.Difficulty
 		questionPoints = matchedSQ.Points
 		questionExplanation = matchedSQ.Explanation
 	} else {
 		// Fallback to database
-		question, err := repo.GetQuestionByCode(ctx, req.Question)
+		var err error
+		fallbackQ, err = repo.GetQuestionByCode(ctx, req.Question)
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return nil, http.StatusNotFound, errors.New("question not found")
 			}
 			return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch question: %w", err)
 		}
-		correctOption = question.CorrectOption
-		questionDifficulty = question.Difficulty
-		questionPoints = question.Points
-		questionExplanation = question.Explanation
+		questionDifficulty = fallbackQ.Difficulty
+		questionPoints = fallbackQ.Points
+		questionExplanation = fallbackQ.Explanation
 	}
 
-	// 4. Grade the answer
-	isSkipped := req.Option == "skip"
-	isCorrect := false
-	if !isSkipped {
-		isCorrect = strings.EqualFold(req.Option, correctOption)
-	}
+	// 4. Grade the answer with robust multi-layered verification
+	isCorrect, isSkipped, resolvedCorrectOption := GradeAnswer(matchedSQ, fallbackQ, req.Option, req.SelectedText)
 
 	// 5. Calculate scoring
 	pointsEarned := 0
@@ -225,7 +230,7 @@ func EvaluateAnswer(ctx context.Context, clientID int, req *dto.SubmitAnswerRequ
 	return &dto.AnswerResultDTO{
 		Question:      req.Question,
 		Option:        req.Option,
-		CorrectOption: strings.ToLower(correctOption),
+		CorrectOption: strings.ToLower(resolvedCorrectOption),
 		IsCorrect:     isCorrect,
 		IsSkipped:     isSkipped,
 		Explanation:   questionExplanation,
@@ -267,7 +272,7 @@ func ApplyFiftyFifty(ctx context.Context, clientID int, req *dto.FiftyFiftyReque
 		}
 	}
 	if matchedSQ != nil {
-		correct = strings.ToLower(matchedSQ.CorrectOption)
+		correct = strings.ToLower(strings.TrimSpace(matchedSQ.CorrectOption))
 	} else {
 		question, err := repo.GetQuestionByCode(ctx, req.Question)
 		if err != nil {
@@ -276,13 +281,13 @@ func ApplyFiftyFifty(ctx context.Context, clientID int, req *dto.FiftyFiftyReque
 			}
 			return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch question: %w", err)
 		}
-		correct = strings.ToLower(question.CorrectOption)
+		correct = strings.ToLower(strings.TrimSpace(question.CorrectOption))
 	}
 
-	// Pick 2 wrong options to hide
+	// Pick 2 wrong options to hide (guaranteeing correct option is never hidden)
 	wrongOptions := make([]string, 0, 3)
 	for _, opt := range []string{"a", "b", "c", "d"} {
-		if opt != correct {
+		if !strings.EqualFold(opt, correct) {
 			wrongOptions = append(wrongOptions, opt)
 		}
 	}
@@ -354,15 +359,47 @@ func CompleteSession(ctx context.Context, clientID int, req *dto.CompleteSession
 
 	nextLevelExp := CalculateExperienceForLevel(newLevel)
 
+	// Detailed reward breakdowns for mobile/frontend celebration
+	scoreCoins := int(math.Ceil(float64(session.Score) / 5.0))
+	coinBreakdown := map[string]int{
+		"completion_coins":     5,
+		"accuracy_bonus_coins": scoreCoins,
+	}
+	if didLevelUp {
+		coinBreakdown["level_up_bonus_coins"] = (newLevel - oldLevel) * 50
+	}
+
+	scoreXP := int(math.Ceil(float64(session.Score) / 2.0))
+	xpBreakdown := map[string]int{
+		"completion_xp": 10,
+		"speed_bonus_xp": scoreXP,
+	}
+	if didLevelUp {
+		xpBreakdown["level_up_bonus_xp"] = (newLevel - oldLevel) * 25
+	}
+
+	scoreBreakdown := map[string]int{
+		"quiz_score": session.Score,
+	}
+
+	maxScore := session.TotalQuestions * 10
+	if maxScore < session.Score {
+		maxScore = session.Score
+	}
+
 	return &dto.SessionCompleteResponseDTO{
 		Session:            session.ID,
 		TotalQuestions:     session.TotalQuestions,
 		CorrectCount:       session.CorrectCount,
 		AccuracyPercentage: accuracy,
 		FinalScore:         session.Score,
+		MaxScore:           maxScore,
 		CoinsAwarded:       coins,
 		XPAwarded:          xp,
 		GemsAwarded:        gems,
+		ScoreBreakdown:     scoreBreakdown,
+		CoinBreakdown:      coinBreakdown,
+		XPBreakdown:        xpBreakdown,
 		Level: dto.LevelInfoDTO{
 			Current:      newLevel,
 			DidLevelUp:   didLevelUp,
@@ -469,8 +506,36 @@ type rawOption struct {
 	text       string
 }
 
-// ShuffleQuestion randomly permutes options A, B, C, D and recalculates the correct_option letter.
+// ShuffleQuestion randomly permutes options A, B, C, D, recalculates the correct_option letter,
+// and preserves both the original correct letter and the correct answer text.
 func ShuffleQuestion(q models.Question) models.SessionQuestion {
+	origCorrectLetter := strings.ToLower(strings.TrimSpace(q.CorrectOption))
+
+	// Resolve the true correct text from the unshuffled options
+	var correctText string
+	switch origCorrectLetter {
+	case "a":
+		correctText = q.OptionA
+	case "b":
+		correctText = q.OptionB
+	case "c":
+		correctText = q.OptionC
+	case "d":
+		correctText = q.OptionD
+	default:
+		// If CorrectOption is not 'a'/'b'/'c'/'d', check if it directly contains the answer text
+		for _, candidate := range []string{q.OptionA, q.OptionB, q.OptionC, q.OptionD} {
+			if strings.EqualFold(strings.TrimSpace(q.CorrectOption), strings.TrimSpace(candidate)) {
+				correctText = candidate
+				break
+			}
+		}
+		if correctText == "" {
+			correctText = q.OptionA
+			origCorrectLetter = "a"
+		}
+	}
+
 	options := []rawOption{
 		{origLetter: "a", text: q.OptionA},
 		{origLetter: "b", text: q.OptionB},
@@ -485,25 +550,127 @@ func ShuffleQuestion(q models.Question) models.SessionQuestion {
 	letters := []string{"a", "b", "c", "d"}
 	var newCorrect string
 	for i, opt := range options {
-		if strings.EqualFold(opt.origLetter, q.CorrectOption) {
+		if strings.EqualFold(opt.origLetter, origCorrectLetter) || (correctText != "" && strings.EqualFold(strings.TrimSpace(opt.text), strings.TrimSpace(correctText))) {
 			newCorrect = letters[i]
 			break
 		}
 	}
+	if newCorrect == "" {
+		newCorrect = "a"
+	}
 
 	return models.SessionQuestion{
-		QuestionCode:  q.QuestionCode,
-		Prompt:        q.Prompt,
-		OptionA:       options[0].text,
-		OptionB:       options[1].text,
-		OptionC:       options[2].text,
-		OptionD:       options[3].text,
-		CorrectOption: newCorrect,
-		Difficulty:    q.Difficulty,
-		Points:        q.Points,
-		Hint:          q.Hint,
-		Explanation:   q.Explanation,
+		QuestionCode:    q.QuestionCode,
+		Prompt:          q.Prompt,
+		OptionA:         options[0].text,
+		OptionB:         options[1].text,
+		OptionC:         options[2].text,
+		OptionD:         options[3].text,
+		CorrectOption:   newCorrect,
+		OriginalCorrect: origCorrectLetter,
+		CorrectText:     correctText,
+		Difficulty:      q.Difficulty,
+		Points:          q.Points,
+		Hint:            q.Hint,
+		Explanation:     q.Explanation,
 	}
+}
+
+// GradeAnswer evaluates whether a player's answer is correct.
+// It handles:
+// 1. Shuffled option letter match ('a', 'b', 'c', 'd')
+// 2. Original unshuffled database letter match (e.g. 'a' before shuffle)
+// 3. Option text match (either submitted as option or selectedText matching CorrectText)
+// 4. Slot text match (option letter points to text matching CorrectText)
+// 5. Fallback database question matching by letter or text
+func GradeAnswer(sq *models.SessionQuestion, q *models.Question, option string, selectedText string) (isCorrect bool, isSkipped bool, resolvedCorrectOption string) {
+	cleanOption := strings.ToLower(strings.TrimSpace(option))
+	if cleanOption == "skip" {
+		if sq != nil {
+			return false, true, strings.ToLower(sq.CorrectOption)
+		}
+		if q != nil {
+			return false, true, strings.ToLower(strings.TrimSpace(q.CorrectOption))
+		}
+		return false, true, ""
+	}
+
+	cleanSelectedText := strings.TrimSpace(selectedText)
+
+	if sq != nil {
+		resolvedCorrectOption = strings.ToLower(strings.TrimSpace(sq.CorrectOption))
+		correctText := strings.TrimSpace(sq.CorrectText)
+		originalCorrect := strings.ToLower(strings.TrimSpace(sq.OriginalCorrect))
+
+		// 1. Check against shuffled session correct letter (primary match)
+		if strings.EqualFold(cleanOption, resolvedCorrectOption) {
+			return true, false, resolvedCorrectOption
+		}
+
+		// 2. Check against original unshuffled letter
+		if originalCorrect != "" && strings.EqualFold(cleanOption, originalCorrect) {
+			return true, false, resolvedCorrectOption
+		}
+
+		// 3. Check against correct answer text (via selectedText or option containing text)
+		if correctText != "" {
+			if cleanSelectedText != "" && strings.EqualFold(cleanSelectedText, correctText) {
+				return true, false, resolvedCorrectOption
+			}
+			if strings.EqualFold(strings.TrimSpace(option), correctText) {
+				return true, false, resolvedCorrectOption
+			}
+		}
+
+		// 4. Check if the option letter maps to text that matches correctText
+		var selectedSlotText string
+		switch cleanOption {
+		case "a":
+			selectedSlotText = sq.OptionA
+		case "b":
+			selectedSlotText = sq.OptionB
+		case "c":
+			selectedSlotText = sq.OptionC
+		case "d":
+			selectedSlotText = sq.OptionD
+		}
+		if correctText != "" && selectedSlotText != "" && strings.EqualFold(strings.TrimSpace(selectedSlotText), correctText) {
+			return true, false, resolvedCorrectOption
+		}
+
+		return false, false, resolvedCorrectOption
+	}
+
+	if q != nil {
+		resolvedCorrectOption = strings.ToLower(strings.TrimSpace(q.CorrectOption))
+		var correctText string
+		switch resolvedCorrectOption {
+		case "a":
+			correctText = q.OptionA
+		case "b":
+			correctText = q.OptionB
+		case "c":
+			correctText = q.OptionC
+		case "d":
+			correctText = q.OptionD
+		}
+
+		if strings.EqualFold(cleanOption, resolvedCorrectOption) {
+			return true, false, resolvedCorrectOption
+		}
+		if correctText != "" {
+			if cleanSelectedText != "" && strings.EqualFold(cleanSelectedText, strings.TrimSpace(correctText)) {
+				return true, false, resolvedCorrectOption
+			}
+			if strings.EqualFold(strings.TrimSpace(option), strings.TrimSpace(correctText)) {
+				return true, false, resolvedCorrectOption
+			}
+		}
+
+		return false, false, resolvedCorrectOption
+	}
+
+	return false, false, ""
 }
 
 // SessionQuestionToDTO converts a SessionQuestion into a client-safe DTO.

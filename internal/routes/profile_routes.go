@@ -8,21 +8,27 @@ import (
 
 // RegisterProfileRoutes registers all profile and onboarding routes.
 func RegisterProfileRoutes(router *gin.Engine) {
-	profileGrp := router.Group("/profile", middleware.ClientAuthMiddleware)
-	{
-		// Dynamic profile setup options (avatars, classes, boards, subjects)
-		profileGrp.GET("/options", handlers.GetProfileOptionsHandler)
-		profileGrp.GET("/setup-options", handlers.GetProfileOptionsHandler)
+	// Public options endpoints (for onboarding before login or without token)
+	router.GET("/profile/options", handlers.GetProfileOptionsHandler)
+	router.GET("/profile/setup-options", handlers.GetProfileOptionsHandler)
+	router.GET("/api/v1/profile/options", handlers.GetProfileOptionsHandler)
+	router.GET("/api/v1/profile/setup-options", handlers.GetProfileOptionsHandler)
 
+	registerAuthRoutes := func(grp *gin.RouterGroup) {
 		// 4-step onboarding submission
-		profileGrp.POST("/setup", handlers.SetupProfileHandler)
+		grp.POST("/setup", handlers.SetupProfileHandler)
 
 		// Core profile management
-		profileGrp.GET("", handlers.GetProfileHandler)
-		profileGrp.POST("", handlers.CreateProfileHandler)
-		profileGrp.PUT("", handlers.UpdateProfileHandler)
+		grp.GET("", handlers.GetProfileHandler)
+		grp.POST("", handlers.CreateProfileHandler)
+		grp.PUT("", handlers.UpdateProfileHandler)
 	}
 
-	// Public access alias for onboarding options if frontend needs it before session initialization
-	router.GET("/api/v1/profile/options", handlers.GetProfileOptionsHandler)
+	// 1. Client-root path: /profile/...
+	profileGrp := router.Group("/profile", middleware.ClientAuthMiddleware)
+	registerAuthRoutes(profileGrp)
+
+	// 2. Standard REST v1 path: /api/v1/profile/...
+	v1ProfileGrp := router.Group("/api/v1/profile", middleware.ClientAuthMiddleware)
+	registerAuthRoutes(v1ProfileGrp)
 }

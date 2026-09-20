@@ -26,6 +26,7 @@ import (
 )
 
 var (
+	
 	gameTestDBOnce sync.Once
 	gameTestDB     *gorm.DB
 	gameTestDBErr  error
@@ -42,6 +43,9 @@ func setupTestApp(t *testing.T) (*gin.Engine, string) {
 	gameTestDBOnce.Do(func() {
 		dbURL := config.AppConfig.Database.ConnectionString()
 		gameTestDB, gameTestDBErr = db.Connect(dbURL)
+		if gameTestDBErr == nil {
+			_ = db.AutoMigrate(gameTestDB)
+		}
 	})
 
 	if gameTestDBErr != nil {
