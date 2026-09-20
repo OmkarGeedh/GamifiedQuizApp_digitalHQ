@@ -62,7 +62,7 @@ docker compose ps
 
 | Service | Container Name | Port | Description |
 | :--- | :--- | :--- | :--- |
-| **`app`** | `quiz_api` | `http://localhost:8080` | Go Backend API (with Air live reload) |
+| **`app`** | `quiz_api` | `http://localhost:8080` *(Production: `https://gamifiedquizappdigitalhq-production.up.railway.app`)* | Go Backend API (with Air live reload) |
 | **`postgres`** | `quiz_postgres` | `localhost:5432` | PostgreSQL 16 Database |
 | **`redis`** | `quiz_redis` | `localhost:6379` | Redis 7 In-Memory Cache |
 | **`pgadmin`** | `quiz_pgadmin` | `http://localhost:5050` | pgAdmin 4 Database Web GUI |
