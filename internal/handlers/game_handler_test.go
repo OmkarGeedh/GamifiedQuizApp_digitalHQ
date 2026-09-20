@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,6 +22,13 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"gorm.io/gorm"
+)
+
+var (
+	gameTestDBOnce sync.Once
+	gameTestDB     *gorm.DB
+	gameTestDBErr  error
 )
 
 func setupTestApp(t *testing.T) (*gin.Engine, string) {
@@ -31,14 +39,16 @@ func setupTestApp(t *testing.T) (*gin.Engine, string) {
 		t.Logf("Notice loading .env: %v", err)
 	}
 
-	// Connect PostgreSQL
-	dbURL := config.AppConfig.Database.ConnectionString()
-	pgDB, err := db.Connect(dbURL)
-	if err != nil {
-		t.Skipf("Skipping game test: test database unreachable at %s: %v", dbURL, err)
+	gameTestDBOnce.Do(func() {
+		dbURL := config.AppConfig.Database.ConnectionString()
+		gameTestDB, gameTestDBErr = db.Connect(dbURL)
+	})
+
+	if gameTestDBErr != nil {
+		t.Skipf("Skipping game test: test database unreachable: %v", gameTestDBErr)
 		return nil, ""
 	}
-	config.DB = pgDB
+	config.DB = gameTestDB
 
 	// Connect Redis
 	redisAddr := config.AppConfig.Redis.Endpoint()

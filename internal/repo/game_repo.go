@@ -35,8 +35,12 @@ func GetQuestionByCode(ctx context.Context, code string) (*models.Question, erro
 
 // GetAvailableTopics returns distinct topic IDs with question counts.
 func GetAvailableTopics(ctx context.Context) ([]map[string]interface{}, error) {
+	db := GetDB()
+	if db == nil {
+		return nil, nil
+	}
 	var results []map[string]interface{}
-	err := GetDB().WithContext(ctx).
+	err := db.WithContext(ctx).
 		Model(&models.Question{}).
 		Select("topic_id, COUNT(*) as count").
 		Group("topic_id").

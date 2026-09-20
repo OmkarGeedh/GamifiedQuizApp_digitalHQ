@@ -91,82 +91,8 @@ type ChangePasswordStash struct {
 }
 
 // -----------------------------------------------------------------------------
-// REGISTRATION & RECOVERY DTOs
+// PASSWORD RECOVERY DTOs
 // -----------------------------------------------------------------------------
-
-type RegisterEmailRequest struct {
-	Email string `json:"email" binding:"required"`
-}
-
-func (r *RegisterEmailRequest) Validate() error {
-	r.Email = strings.TrimSpace(r.Email)
-	if r.Email == "" {
-		return errors.New("email is required")
-	}
-	return nil
-}
-
-type RegisterEmailVerifyRequest struct {
-	Email string `json:"email" binding:"required"`
-	OTP   string `json:"otp" binding:"required"`
-}
-
-func (r *RegisterEmailVerifyRequest) Validate() error {
-	r.Email = strings.TrimSpace(r.Email)
-	r.OTP = strings.TrimSpace(r.OTP)
-	if r.Email == "" || r.OTP == "" {
-		return errors.New("email and otp are required")
-	}
-	return nil
-}
-
-type RegisterPhoneRequest struct {
-	Phone string `json:"phone" binding:"required"`
-}
-
-func (r *RegisterPhoneRequest) Validate() error {
-	r.Phone = strings.TrimSpace(r.Phone)
-	if r.Phone == "" {
-		return errors.New("phone is required")
-	}
-	return nil
-}
-
-type RegisterPhoneVerifyRequest struct {
-	Phone string `json:"phone" binding:"required"`
-	OTP   string `json:"otp" binding:"required"`
-}
-
-func (r *RegisterPhoneVerifyRequest) Validate() error {
-	r.Phone = strings.TrimSpace(r.Phone)
-	r.OTP = strings.TrimSpace(r.OTP)
-	if r.Phone == "" || r.OTP == "" {
-		return errors.New("phone and otp are required")
-	}
-	return nil
-}
-
-type RegisterValidateBasicRequest struct {
-	Username string  `json:"username" binding:"required"`
-	Email    string  `json:"email" binding:"required"`
-	Phone    *string `json:"phone,omitempty"`
-	Password string  `json:"password" binding:"required"`
-}
-
-func (r *RegisterValidateBasicRequest) Validate() error {
-	r.Username = strings.TrimSpace(r.Username)
-	r.Email = strings.TrimSpace(r.Email)
-	if r.Username == "" {
-		return errors.New("username is required")
-	}
-	if r.Email == "" {
-		return errors.New("email is required")
-	}
-	if len(r.Password) < 6 {
-		return errors.New("password must be at least 6 characters long")
-	}
-	return nil
-}
 
 type ForgotPasswordRequest struct {
 	Email string `json:"email" binding:"required"`
@@ -207,3 +133,5 @@ func (r *ResetPasswordVerifyRequest) Validate() error {
 	}
 	return nil
 }
+
+

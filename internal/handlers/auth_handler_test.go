@@ -5,12 +5,20 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/config"
 	db "github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/database"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/routes"
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
+)
+
+var (
+	authTestDBOnce sync.Once
+	authTestDB     *gorm.DB
+	authTestDBErr  error
 )
 
 func setupAuthTestApp(t *testing.T) *gin.Engine {
@@ -20,13 +28,16 @@ func setupAuthTestApp(t *testing.T) *gin.Engine {
 		t.Logf("Notice loading .env: %v", err)
 	}
 
-	dbURL := config.AppConfig.Database.ConnectionString()
-	pgDB, err := db.Connect(dbURL)
-	if err != nil {
-		t.Skipf("Skipping auth test: test database unreachable at %s: %v", dbURL, err)
+	authTestDBOnce.Do(func() {
+		dbURL := config.AppConfig.Database.ConnectionString()
+		authTestDB, authTestDBErr = db.Connect(dbURL)
+	})
+
+	if authTestDBErr != nil {
+		t.Skipf("Skipping auth test: test database unreachable: %v", authTestDBErr)
 		return nil
 	}
-	config.DB = pgDB
+	config.DB = authTestDB
 
 	redisAddr := config.AppConfig.Redis.Endpoint()
 	redisClient, _ := db.ConnectRedis(redisAddr, config.AppConfig.Redis.Password, config.AppConfig.Redis.DB)
@@ -284,3 +295,5 @@ func TestLogin_ProtectedRoutesAndRefreshToken(t *testing.T) {
 		t.Fatalf("Expected 401 after logout, got %d", wRevoked.Code)
 	}
 }
+
+

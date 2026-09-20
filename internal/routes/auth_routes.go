@@ -8,47 +8,43 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// RegisterAuthRoutes registers all authentication, session, and password management routes.
 func RegisterAuthRoutes(router *gin.Engine) {
-	forgotRateLimit := middleware.RateLimitWithLimit("forgot-pwd", 5, 10*time.Minute)
-	emailReqRateLimit := middleware.RateLimitWithLimit("register-email", 5, 10*time.Minute)
-	phoneReqRateLimit := middleware.RateLimitWithLimit("register-phone", 5, 10*time.Minute)
+	// 1. Core Authentication Routes under /auth
+	authGrp := router.Group("/auth", middleware.RateLimit())
+	{
+		authGrp.POST("/login", handlers.LoginHandler)
+		authGrp.POST("/refresh", handlers.ClientRefreshTokenHandler)
+		authGrp.POST("/logout", middleware.ClientAuthMiddleware, handlers.LogoutClientHandler)
 
-	// Register routes on a group helper
-	registerGroup := func(grp *gin.RouterGroup) {
-		grp.POST("/login", handlers.LoginHandler)
-		grp.POST("/refresh", handlers.ClientRefreshTokenHandler)
-		grp.POST("/logout", middleware.ClientAuthMiddleware, handlers.LogoutClientHandler)
-		grp.POST("/forgot-password", forgotRateLimit, handlers.ForgotPasswordRequestHandler)
-		grp.POST("/forgot-password/verify", handlers.ForgotPasswordVerifyTokenHandler)
-		grp.POST("/forgot-password/reset", handlers.ResetPasswordVerifyHandler)
-		grp.POST("/register/email-request", emailReqRateLimit, handlers.RegisterEmailRequestHandler)
-		grp.POST("/register/email-verify", handlers.RegisterEmailVerifyHandler)
-		grp.POST("/register/phone-request", phoneReqRateLimit, handlers.RegisterPhoneOtpRequestHandler)
-		grp.POST("/register/phone-verify", handlers.RegisterPhoneOtpVerifyHandler)
-		grp.POST("/register/validate-basic", handlers.RegisterValidateBasicHandler)
-		grp.GET("/register/email-check", handlers.CheckEmailVerifyHandler)
-		grp.GET("/session", middleware.ClientAuthMiddleware, handlers.ClientSessionHandler)
-		grp.GET("/verify-session", middleware.ClientAuthMiddleware, handlers.ClientVerifySessionHandler)
+		// Password recovery (rate limited)
+		forgotRateLimit := middleware.RateLimitWithLimit("forgot-pwd", 5, 10*time.Minute)
+		authGrp.POST("/forgot-password", forgotRateLimit, handlers.ForgotPasswordRequestHandler)
+		authGrp.POST("/forgot-password/verify", handlers.ForgotPasswordVerifyTokenHandler)
+		authGrp.POST("/forgot-password/reset", handlers.ResetPasswordVerifyHandler)
 	}
 
-	// 1. Root /auth routes
-	authgrp := router.Group("/auth", middleware.RateLimit())
-	registerGroup(authgrp)
+	// 2. Dedicated Signup Flow Routes (/auth/signup/send-code, /resend-code, /verify)
+	signupGrp := router.Group("/auth/signup", middleware.RateLimit())
+	{
+		// Step 1: Submit details, enforce 60s cooldown & rate limit, dispatch 6-digit OTP
+		signupGrp.POST("/send-code", handlers.SignupSendCodeHandler)
 
-	// 2. /api/v1/auth routes
-	v1AuthGrp := router.Group("/api/v1/auth", middleware.RateLimit())
-	registerGroup(v1AuthGrp)
+		// Resend verification code (cooldown-guarded)
+		signupGrp.POST("/resend-code", handlers.SignupResendCodeHandler)
 
-	// Session Routes (convenience root aliases)
-	router.GET("/verify-session", middleware.ClientAuthMiddleware, handlers.ClientVerifySessionHandler)
-	router.GET("/session", middleware.ClientAuthMiddleware, handlers.ClientSessionHandler)
-	router.GET("/api/v1/session", middleware.ClientAuthMiddleware, handlers.ClientSessionHandler)
+		// Step 2: Verify 6-digit OTP, create DB user, issue JWTs & cookies, log in user
+		signupGrp.POST("/verify", handlers.SignupVerifyHandler)
+	}
 
-	// Password Routes
-	router.POST("/change-password-request", middleware.ClientAuthMiddleware, handlers.ChangePasswordRequestHandler)
-	router.POST("/change-password-verify", middleware.ClientAuthMiddleware, handlers.ChangePasswordVerifyHandler)
-	router.POST("/api/v1/change-password-request", middleware.ClientAuthMiddleware, handlers.ChangePasswordRequestHandler)
-	router.POST("/api/v1/change-password-verify", middleware.ClientAuthMiddleware, handlers.ChangePasswordVerifyHandler)
+	// 3. Authenticated Session & Password Change Routes
+	authRequired := router.Group("", middleware.ClientAuthMiddleware)
+	{
+		authRequired.GET("/verify-session", handlers.ClientVerifySessionHandler)
+		authRequired.GET("/session", handlers.ClientSessionHandler)
+		authRequired.POST("/change-password-request", handlers.ChangePasswordRequestHandler)
+		authRequired.POST("/change-password-verify", handlers.ChangePasswordVerifyHandler)
+	}
 }
 
 // RegisterClientRoutes is an alias for RegisterAuthRoutes for backward compatibility.

@@ -2,7 +2,6 @@ package services
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,54 +54,10 @@ func LoginService(ctx context.Context, req *dto.LoginRequest) (string, string, *
 		return "", "", nil, http.StatusUnauthorized, errors.New("invalid email or password")
 	}
 
-	// 4. Generate JWT Tokens
-	jwtSecret := ""
-	if config.AppConfig != nil {
-		jwtSecret = config.AppConfig.Server.JWTSecret
-	}
-	if jwtSecret == "" {
-		return "", "", nil, http.StatusInternalServerError, errors.New("JWT secret is not configured")
-	}
-
-	jti, err := utils.GenerateToken64()
+	// 4. Generate JWT Tokens and persist refresh token
+	accessStr, refreshStr, err := GenerateTokensForClient(ctx, clientRecord)
 	if err != nil {
-		return "", "", nil, http.StatusInternalServerError, fmt.Errorf("failed to generate token ID: %w", err)
-	}
-
-	accessExpiry := 30 * 24 * time.Hour
-	if config.AppConfig != nil && config.AppConfig.Server.JWTAccessTokenExpiry > 0 {
-		accessExpiry = config.AppConfig.Server.JWTAccessTokenExpiry
-	}
-	refreshExpiry := 180 * 24 * time.Hour
-	if config.AppConfig != nil && config.AppConfig.Server.JWTRefreshTokenExpiry > 0 {
-		refreshExpiry = config.AppConfig.Server.JWTRefreshTokenExpiry
-	}
-
-	accessToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"client_id": clientRecord.ID,
-		"email":     clientRecord.Email,
-		"exp":       time.Now().Add(accessExpiry).Unix(),
-		"jti":       jti,
-	})
-	accessStr, err := accessToken.SignedString([]byte(jwtSecret))
-	if err != nil {
-		return "", "", nil, http.StatusInternalServerError, fmt.Errorf("failed to sign access token: %w", err)
-	}
-
-	refreshToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"client_id": clientRecord.ID,
-		"email":     clientRecord.Email,
-		"exp":       time.Now().Add(refreshExpiry).Unix(),
-	})
-	refreshStr, err := refreshToken.SignedString([]byte(jwtSecret))
-	if err != nil {
-		return "", "", nil, http.StatusInternalServerError, fmt.Errorf("failed to sign refresh token: %w", err)
-	}
-
-	// 5. Persist active refresh token
-	err = repo.UpdateClientRefreshToken(ctx, clientRecord.ID, &refreshStr)
-	if err != nil {
-		return "", "", nil, http.StatusInternalServerError, fmt.Errorf("failed to save refresh token to database: %w", err)
+		return "", "", nil, http.StatusInternalServerError, err
 	}
 
 	log.Printf("[LOGIN] Client logged in successfully: ID=%d, Email=%s", clientRecord.ID, clientRecord.Email)
@@ -440,172 +395,60 @@ func ResetPasswordVerifyService(ctx context.Context, req *dto.ResetPasswordVerif
 }
 
 // -----------------------------------------------------------------------------
-// REGISTRATION OTP SERVICES
+// TOKEN GENERATION HELPER
 // -----------------------------------------------------------------------------
 
-func RegisterEmailRequestService(ctx context.Context, req *dto.RegisterEmailRequest) (string, int, error) {
-	if req.Email == "" {
-		return "", http.StatusBadRequest, errors.New("email is required")
-	}
-
-	exists, err := repo.CheckEmailExists(ctx, req.Email)
-	if err != nil {
-		return "", http.StatusInternalServerError, fmt.Errorf("database query error: %w", err)
-	}
-	if exists {
-		return "", http.StatusConflict, errors.New("email already in use")
-	}
-
-	otp, err := utils.GenerateOtp(6)
-	if err != nil {
-		return "", http.StatusInternalServerError, errors.New("failed to generate OTP")
-	}
-
-	if config.RedisClient != nil {
-		err = config.RedisClient.Set(ctx, "register-email-otp:"+req.Email, otp, 5*time.Minute).Err()
-		if err != nil {
-			return "", http.StatusInternalServerError, fmt.Errorf("failed to save OTP in Redis: %w", err)
-		}
-	}
-
-	// Log Registration Email OTP prominently
-	log.Printf("================================================================")
-	log.Printf("[REGISTER EMAIL OTP] Generated OTP: >>> %s <<< for Email: %s", otp, req.Email)
-	log.Printf("================================================================")
-
-	return otp, http.StatusOK, nil
-}
-
-func RegisterEmailVerifyService(ctx context.Context, req *dto.RegisterEmailVerifyRequest) (int, error) {
-	if req.Email == "" || req.OTP == "" {
-		return http.StatusBadRequest, errors.New("email and OTP required")
-	}
-
-	storedOTP := ""
-	if config.RedisClient != nil {
-		var err error
-		storedOTP, err = config.RedisClient.Get(ctx, "register-email-otp:"+req.Email).Result()
-		if err != nil {
-			return http.StatusUnauthorized, errors.New("no OTP requested or expired")
-		}
-	}
-
-	if subtle.ConstantTimeCompare([]byte(storedOTP), []byte(req.OTP)) != 1 {
-		return http.StatusUnauthorized, errors.New("invalid OTP")
-	}
-
-	if config.RedisClient != nil {
-		_ = config.RedisClient.Del(ctx, "register-email-otp:"+req.Email).Err()
-		_ = config.RedisClient.Set(ctx, "register-verified:email:"+req.Email, "verified", 15*time.Minute).Err()
-	}
-
-	return http.StatusOK, nil
-}
-
-func RegisterPhoneOtpRequestService(ctx context.Context, req *dto.RegisterPhoneRequest) (string, int, error) {
-	if req.Phone == "" {
-		return "", http.StatusBadRequest, errors.New("phone is required")
-	}
-
-	otp, err := utils.GenerateOtp(6)
-	if err != nil {
-		return "", http.StatusInternalServerError, errors.New("failed to generate OTP")
-	}
-
-	if config.RedisClient != nil {
-		err = config.RedisClient.Set(ctx, "register-phone-otp:"+req.Phone, otp, 5*time.Minute).Err()
-		if err != nil {
-			return "", http.StatusInternalServerError, fmt.Errorf("failed to save OTP in Redis: %w", err)
-		}
-	}
-
-	// Log Registration Phone OTP prominently
-	log.Printf("================================================================")
-	log.Printf("[REGISTER PHONE OTP] Generated OTP: >>> %s <<< for Phone: %s", otp, req.Phone)
-	log.Printf("================================================================")
-
-	return otp, http.StatusOK, nil
-}
-
-func RegisterPhoneOtpVerifyService(ctx context.Context, req *dto.RegisterPhoneVerifyRequest) (int, error) {
-	if req.Phone == "" || req.OTP == "" {
-		return http.StatusBadRequest, errors.New("phone and OTP required")
-	}
-
-	storedOTP := ""
-	if config.RedisClient != nil {
-		var err error
-		storedOTP, err = config.RedisClient.Get(ctx, "register-phone-otp:"+req.Phone).Result()
-		if err != nil {
-			return http.StatusUnauthorized, errors.New("no OTP requested or expired")
-		}
-	}
-
-	if subtle.ConstantTimeCompare([]byte(storedOTP), []byte(req.OTP)) != 1 {
-		return http.StatusUnauthorized, errors.New("invalid OTP")
-	}
-
-	if config.RedisClient != nil {
-		_ = config.RedisClient.Del(ctx, "register-phone-otp:"+req.Phone).Err()
-		_ = config.RedisClient.Set(ctx, "register-verified:phone:"+req.Phone, "verified", 15*time.Minute).Err()
-	}
-
-	return http.StatusOK, nil
-}
-
-func RegisterValidateBasicService(ctx context.Context, req *dto.RegisterValidateBasicRequest) (int, error) {
-	exists, err := repo.CheckEmailExists(ctx, req.Email)
-	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("failed to check email: %w", err)
-	}
-	if exists {
-		return http.StatusConflict, errors.New("email already in use")
-	}
-
-	// In production, ensure email was verified via OTP
-	if config.RedisClient != nil {
-		isVerified, err := config.RedisClient.Exists(ctx, "register-verified:email:"+req.Email).Result()
-		if err == nil && isVerified == 0 {
-			if config.AppConfig != nil && config.AppConfig.Server.Env == "production" {
-				return http.StatusBadRequest, errors.New("email has not been verified. Please verify your email OTP first")
-			}
-		}
-	}
-
-	secret := ""
+func GenerateTokensForClient(ctx context.Context, clientRecord *models.Client) (string, string, error) {
+	jwtSecret := ""
 	if config.AppConfig != nil {
-		secret = config.AppConfig.Server.PasswordSecret
+		jwtSecret = config.AppConfig.Server.JWTSecret
 	}
-	combined := req.Password + secret
-	hashed, err := bcrypt.GenerateFromPassword([]byte(combined), 12)
+	if jwtSecret == "" {
+		return "", "", errors.New("JWT secret is not configured")
+	}
+
+	jti, err := utils.GenerateToken64()
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("failed to hash password: %w", err)
+		return "", "", fmt.Errorf("failed to generate token ID: %w", err)
 	}
 
-	newClient := models.Client{
-		Username: req.Username,
-		Email:    req.Email,
-		Phone:    req.Phone,
-		Password: string(hashed),
-		Status:   "active",
+	accessExpiry := 30 * 24 * time.Hour
+	if config.AppConfig != nil && config.AppConfig.Server.JWTAccessTokenExpiry > 0 {
+		accessExpiry = config.AppConfig.Server.JWTAccessTokenExpiry
+	}
+	refreshExpiry := 180 * 24 * time.Hour
+	if config.AppConfig != nil && config.AppConfig.Server.JWTRefreshTokenExpiry > 0 {
+		refreshExpiry = config.AppConfig.Server.JWTRefreshTokenExpiry
 	}
 
-	if err := repo.CreateClient(ctx, &newClient); err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("failed to create client: %w", err)
+	accessToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"client_id": clientRecord.ID,
+		"email":     clientRecord.Email,
+		"exp":       time.Now().Add(accessExpiry).Unix(),
+		"jti":       jti,
+	})
+	accessStr, err := accessToken.SignedString([]byte(jwtSecret))
+	if err != nil {
+		return "", "", fmt.Errorf("failed to sign access token: %w", err)
 	}
 
-	// Clean up verified state token if present
-	if config.RedisClient != nil {
-		_ = config.RedisClient.Del(ctx, "register-verified:email:"+req.Email).Err()
+	refreshToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"client_id": clientRecord.ID,
+		"email":     clientRecord.Email,
+		"exp":       time.Now().Add(refreshExpiry).Unix(),
+	})
+	refreshStr, err := refreshToken.SignedString([]byte(jwtSecret))
+	if err != nil {
+		return "", "", fmt.Errorf("failed to sign refresh token: %w", err)
 	}
 
-	return http.StatusCreated, nil
+	// Persist active refresh token
+	err = repo.UpdateClientRefreshToken(ctx, clientRecord.ID, &refreshStr)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to save refresh token to database: %w", err)
+	}
+
+	return accessStr, refreshStr, nil
 }
 
-func CheckEmailVerifyService(ctx context.Context, email string) (bool, int, error) {
-	exists, err := repo.CheckEmailExists(ctx, email)
-	if err != nil {
-		return false, http.StatusInternalServerError, fmt.Errorf("failed to check email: %w", err)
-	}
-	return exists, http.StatusOK, nil
-}
+

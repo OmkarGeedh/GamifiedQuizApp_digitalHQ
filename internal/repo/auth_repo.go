@@ -58,6 +58,30 @@ func CheckEmailExists(ctx context.Context, email string) (bool, error) {
 	return count > 0, nil
 }
 
+func CheckUsernameExists(ctx context.Context, username string) (bool, error) {
+	var count int64
+	err := GetDB().WithContext(ctx).
+		Model(&models.Client{}).
+		Where("username = ? AND status != ?", username, "deleted").
+		Count(&count).Error
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func CheckPhoneExists(ctx context.Context, phone string) (bool, error) {
+	var count int64
+	err := GetDB().WithContext(ctx).
+		Model(&models.Client{}).
+		Where("phone = ? AND status != ?", phone, "deleted").
+		Count(&count).Error
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 func UpdateClientPhone(ctx context.Context, id int, phone *string) error {
 	return GetDB().WithContext(ctx).
 		Model(&models.Client{}).

@@ -9,7 +9,12 @@ type Profile struct {
 	ClientID       int       `gorm:"column:client_id;not null;uniqueIndex" json:"client_id"`
 	UUID           string    `gorm:"column:uuid;size:64;not null;uniqueIndex" json:"uuid"`
 	FullName       string    `gorm:"column:full_name;size:100;not null" json:"full_name"`
+	AvatarID       string    `gorm:"column:avatar_id;size:50;not null;default:'user'" json:"avatar_id"`
 	AvatarURL      string    `gorm:"column:avatar_url;size:255" json:"avatar_url,omitempty"`
+	Class          string    `gorm:"column:class;size:50" json:"class,omitempty"`
+	Board          string    `gorm:"column:board;size:100" json:"board,omitempty"`
+	Subjects       string    `gorm:"column:subjects;type:text;default:'[]'" json:"subjects,omitempty"`
+	IsOnboarded    bool      `gorm:"column:is_onboarded;not null;default:false;index:idx_client_profiles_onboarded" json:"is_onboarded"`
 	Coins          int       `gorm:"column:coins;not null;default:100" json:"coins"`
 	Gems           int       `gorm:"column:gems;not null;default:10" json:"gems"`
 	Experience     int       `gorm:"column:experience;not null;default:0" json:"experience"`

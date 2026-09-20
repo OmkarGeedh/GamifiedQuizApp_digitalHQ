@@ -2,9 +2,11 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/dto"
@@ -21,6 +23,109 @@ func CalculateExperienceForLevel(level int) int {
 	}
 	return level * 150
 }
+
+// -----------------------------------------------------------------------------
+// DYNAMIC PROFILE SETUP OPTIONS
+// -----------------------------------------------------------------------------
+
+// GetProfileSetupOptions returns dynamic options for avatars, classes, boards,
+// and curriculum subjects directly from backend data (no frontend hardcoding).
+// Assets/icons are rendered and handled directly by the frontend.
+func GetProfileSetupOptions(ctx context.Context) (*dto.ProfileSetupOptionsDTO, int, error) {
+	avatars := []dto.AvatarOptionDTO{
+		{ID: "user", Name: "Classic", Icon: "user"},
+		{ID: "paw", Name: "Paw", Icon: "paw"},
+		{ID: "moon", Name: "Moon", Icon: "moon"},
+		{ID: "robot", Name: "Robot", Icon: "robot"},
+		{ID: "ninja", Name: "Ninja", Icon: "ninja"},
+		{ID: "magic", Name: "Magic", Icon: "magic"},
+	}
+
+	classes := []string{
+		"8th",
+		"9th",
+		"10th",
+		"11th",
+		"12th",
+	}
+
+	boards := []string{
+		"Maharashtra State Board",
+		"CBSE",
+		"ICSE",
+		"State Board",
+	}
+
+	topicMeta := map[string]struct {
+		Name        string
+		Description string
+		Difficulty  string
+	}{
+		"accounting": {
+			Name:        "Book-Keeping & Accountancy",
+			Description: "Available from the deployed backend.",
+			Difficulty:  "Beginner",
+		},
+		"general": {
+			Name:        "General Knowledge",
+			Description: "Curated general knowledge quizzes.",
+			Difficulty:  "All Levels",
+		},
+	}
+
+	var subjects []dto.SubjectOptionDTO
+	topics, err := repo.GetAvailableTopics(ctx)
+	if err == nil && len(topics) > 0 {
+		for _, t := range topics {
+			topicID, _ := t["topic_id"].(string)
+			if topicID == "" {
+				continue
+			}
+
+			meta, exists := topicMeta[topicID]
+			if exists {
+				subjects = append(subjects, dto.SubjectOptionDTO{
+					ID:          topicID,
+					Name:        meta.Name,
+					Description: meta.Description,
+					Difficulty:  meta.Difficulty,
+					TopicsCount: 1,
+				})
+			} else {
+				displayName := strings.Title(strings.ReplaceAll(topicID, "_", " "))
+				subjects = append(subjects, dto.SubjectOptionDTO{
+					ID:          topicID,
+					Name:        displayName,
+					Description: "Comprehensive topic quizzes available from backend.",
+					Difficulty:  "Intermediate",
+					TopicsCount: 1,
+				})
+			}
+		}
+	}
+
+	// Fallback to Book-Keeping & Accountancy if topics table was not yet populated
+	if len(subjects) == 0 {
+		subjects = append(subjects, dto.SubjectOptionDTO{
+			ID:          "accounting",
+			Name:        "Book-Keeping & Accountancy",
+			Description: "Available from the deployed backend.",
+			Difficulty:  "Beginner",
+			TopicsCount: 1,
+		})
+	}
+
+	return &dto.ProfileSetupOptionsDTO{
+		Avatars:  avatars,
+		Classes:  classes,
+		Boards:   boards,
+		Subjects: subjects,
+	}, http.StatusOK, nil
+}
+
+// -----------------------------------------------------------------------------
+// PROFILE RETRIEVAL & INITIALIZATION
+// -----------------------------------------------------------------------------
 
 func GetOrCreateProfile(ctx context.Context, clientID int) (*models.Profile, error) {
 	profile, err := repo.GetProfileByClientID(ctx, clientID)
@@ -45,6 +150,7 @@ func GetOrCreateProfile(ctx context.Context, clientID int) (*models.Profile, err
 				ClientID:       clientID,
 				UUID:           uuid.New().String(),
 				FullName:       displayName,
+				AvatarID:       "user",
 				Coins:          100, // Starter bonus
 				Gems:           10,  // Starter bonus
 				Experience:     0,
@@ -53,13 +159,13 @@ func GetOrCreateProfile(ctx context.Context, clientID int) (*models.Profile, err
 				HighestStreak:  1,
 				LastActiveDate: todayDate,
 				WeeklyScore:    0,
+				IsOnboarded:    false,
 			}
 
 			if err := repo.CreateProfile(ctx, &newProfile); err != nil {
 				return nil, fmt.Errorf("failed to create default profile: %w", err)
 			}
 
-			// Record today's activity
 			_ = repo.RecordDailyActivity(ctx, clientID, todayStr)
 
 			return &newProfile, nil
@@ -67,18 +173,16 @@ func GetOrCreateProfile(ctx context.Context, clientID int) (*models.Profile, err
 		return nil, err
 	}
 
-	// Profile exists: check and update daily streak
+	// Profile exists: update streak if new active day
 	lastActiveStr := profile.LastActiveDate.Format("2006-01-02")
 	if lastActiveStr != todayStr {
 		yesterdayStr := now.AddDate(0, 0, -1).Format("2006-01-02")
 		if lastActiveStr == yesterdayStr {
-			// Consecutive day: increment streak
 			profile.CurrentStreak++
 			if profile.CurrentStreak > profile.HighestStreak {
 				profile.HighestStreak = profile.CurrentStreak
 			}
 		} else {
-			// Broken streak: reset to 1
 			profile.CurrentStreak = 1
 		}
 
@@ -129,12 +233,31 @@ func GetMyProfile(ctx context.Context, clientID int) (*dto.ProfileResponseDTO, i
 		History: last7Days,
 	}
 
+	// Parse subjects JSON array
+	var subjects []string
+	if profile.Subjects != "" {
+		_ = json.Unmarshal([]byte(profile.Subjects), &subjects)
+	}
+	if subjects == nil {
+		subjects = []string{}
+	}
+
+	avatarID := profile.AvatarID
+	if avatarID == "" {
+		avatarID = "user"
+	}
+
 	res := &dto.ProfileResponseDTO{
 		UUID:            profile.UUID,
 		Name:            profile.FullName,
 		Email:           client.Email,
 		Phone:           client.Phone,
+		AvatarID:        avatarID,
 		AvatarURL:       profile.AvatarURL,
+		Class:           profile.Class,
+		Board:           profile.Board,
+		Subjects:        subjects,
+		IsOnboarded:     profile.IsOnboarded,
 		Streaks:         profile.CurrentStreak,
 		HighestStreak:   profile.HighestStreak,
 		Last7DaysStreak: last7Days,
@@ -154,39 +277,77 @@ func GetMyProfile(ctx context.Context, clientID int) (*dto.ProfileResponseDTO, i
 	return res, http.StatusOK, nil
 }
 
+// -----------------------------------------------------------------------------
+// PROFILE SETUP (4-Step Onboarding Submission)
+// -----------------------------------------------------------------------------
+
+// SetupProfile completes the 4-step onboarding flow: saves avatar, name, class,
+// board, subjects, and marks is_onboarded = true.
+func SetupProfile(ctx context.Context, clientID int, req *dto.ProfileSetupRequestDTO) (*dto.ProfileResponseDTO, int, error) {
+	if err := req.Validate(); err != nil {
+		return nil, http.StatusBadRequest, err
+	}
+
+	profile, err := GetOrCreateProfile(ctx, clientID)
+	if err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to retrieve profile: %w", err)
+	}
+
+	profile.FullName = req.Name
+	profile.AvatarID = req.AvatarID
+	if req.AvatarURL != nil && *req.AvatarURL != "" {
+		profile.AvatarURL = *req.AvatarURL
+	}
+	profile.Class = req.Class
+	profile.Board = req.Board
+
+	subjectsJSON, err := json.Marshal(req.Subjects)
+	if err == nil {
+		profile.Subjects = string(subjectsJSON)
+	}
+	profile.IsOnboarded = true
+
+	if err := repo.UpdateProfile(ctx, profile); err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to save profile setup: %w", err)
+	}
+
+	return GetMyProfile(ctx, clientID)
+}
+
+// CreateMyProfile is an alias/upsert for SetupProfile for backwards compatibility.
 func CreateMyProfile(ctx context.Context, clientID int, req *dto.CreateProfileRequestDTO) (*dto.ProfileResponseDTO, int, error) {
-	existing, err := repo.GetProfileByClientID(ctx, clientID)
-	if err == nil && existing != nil {
-		return nil, http.StatusConflict, errors.New("profile already exists for this client")
+	profile, err := GetOrCreateProfile(ctx, clientID)
+	if err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to initialize profile: %w", err)
 	}
 
-	now := time.Now().UTC()
-	todayDate, _ := time.Parse("2006-01-02", now.Format("2006-01-02"))
-
-	newProfile := models.Profile{
-		ClientID:       clientID,
-		UUID:           uuid.New().String(),
-		FullName:       req.FullName,
-		AvatarURL:      req.AvatarURL,
-		Coins:          100,
-		Gems:           10,
-		Experience:     0,
-		Level:          1,
-		CurrentStreak:  1,
-		HighestStreak:  1,
-		LastActiveDate: todayDate,
-		WeeklyScore:    0,
+	if req.FullName != "" {
+		profile.FullName = req.FullName
 	}
-
-	if err := repo.CreateProfile(ctx, &newProfile); err != nil {
-		return nil, http.StatusInternalServerError, fmt.Errorf("failed to create profile: %w", err)
+	if req.AvatarID != nil {
+		profile.AvatarID = *req.AvatarID
 	}
-
+	if req.AvatarURL != nil {
+		profile.AvatarURL = *req.AvatarURL
+	}
+	if req.Class != nil {
+		profile.Class = *req.Class
+	}
+	if req.Board != nil {
+		profile.Board = *req.Board
+	}
+	if len(req.Subjects) > 0 {
+		b, _ := json.Marshal(req.Subjects)
+		profile.Subjects = string(b)
+		profile.IsOnboarded = true
+	}
 	if req.Phone != nil {
 		_ = repo.UpdateClientPhone(ctx, clientID, req.Phone)
 	}
 
-	_ = repo.RecordDailyActivity(ctx, clientID, now.Format("2006-01-02"))
+	if err := repo.UpdateProfile(ctx, profile); err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to update profile: %w", err)
+	}
 
 	return GetMyProfile(ctx, clientID)
 }
@@ -200,8 +361,21 @@ func UpdateMyProfile(ctx context.Context, clientID int, req *dto.UpdateProfileRe
 	if req.Name != nil && *req.Name != "" {
 		profile.FullName = *req.Name
 	}
+	if req.AvatarID != nil && *req.AvatarID != "" {
+		profile.AvatarID = *req.AvatarID
+	}
 	if req.AvatarURL != nil {
 		profile.AvatarURL = *req.AvatarURL
+	}
+	if req.Class != nil {
+		profile.Class = *req.Class
+	}
+	if req.Board != nil {
+		profile.Board = *req.Board
+	}
+	if req.Subjects != nil {
+		b, _ := json.Marshal(req.Subjects)
+		profile.Subjects = string(b)
 	}
 	if req.Phone != nil {
 		_ = repo.UpdateClientPhone(ctx, clientID, req.Phone)
