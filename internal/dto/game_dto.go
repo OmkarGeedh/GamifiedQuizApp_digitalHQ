@@ -183,6 +183,14 @@ type StreakInfoDTO struct {
 	TodayCompleted bool `json:"today_completed"`
 }
 
+// LevelUpRewardDTO keeps the existing level-up economy event separate from
+// the base MCQ rewards and their breakdown totals.
+type LevelUpRewardDTO struct {
+	Coins int `json:"coins"`
+	XP    int `json:"xp"`
+	Gems  int `json:"gems"`
+}
+
 // SessionCompleteResponseDTO is the final game summary after quiz completion.
 type SessionCompleteResponseDTO struct {
 	Session            string            `json:"session"`
@@ -197,6 +205,7 @@ type SessionCompleteResponseDTO struct {
 	ScoreBreakdown     map[string]int    `json:"score_breakdown,omitempty"`
 	CoinBreakdown      map[string]int    `json:"coin_breakdown,omitempty"`
 	XPBreakdown        map[string]int    `json:"xp_breakdown,omitempty"`
+	LevelUpReward      *LevelUpRewardDTO `json:"level_up_reward,omitempty"`
 	Level              LevelInfoDTO      `json:"level"`
 	Streak             StreakInfoDTO     `json:"streak"`
 }

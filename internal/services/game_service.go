@@ -18,8 +18,19 @@ import (
 	"gorm.io/gorm"
 )
 
-// Default time limit per question in seconds.
-const DefaultTimeLimitSec = 15
+const (
+	// Default time limit per question in seconds. It is retained for session
+	// behavior, but it does not affect MCQ points or rewards.
+	DefaultTimeLimitSec = 15
+
+	MCQCorrectAnswerPoints = 10
+	MCQCompletionXP          = 10
+	MCQCorrectAnswerXP       = 5
+	MCQPerfectBonusXP        = 15
+	MCQCompletionCoins       = 5
+	MCQCorrectAnswerCoins    = 2
+	MCQPerfectBonusCoins     = 10
+)
 
 // SessionInactivityTTL is the maximum allowed duration of inactivity (5 minutes) before a quiz session is abandoned.
 const SessionInactivityTTL = 5 * time.Minute
@@ -243,8 +254,6 @@ func EvaluateAnswer(ctx context.Context, clientID int, req *dto.SubmitAnswerRequ
 	}
 
 	// 3. Find question in session state (fallback to DB question if session state is empty)
-	var questionPoints int
-	var questionDifficulty int
 	var questionExplanation *string
 
 	sessionQuestions, _ := session.GetQuestions()
@@ -258,8 +267,6 @@ func EvaluateAnswer(ctx context.Context, clientID int, req *dto.SubmitAnswerRequ
 
 	var fallbackQ *models.Question
 	if matchedSQ != nil {
-		questionPoints = matchedSQ.Points
-		questionDifficulty = matchedSQ.Difficulty
 		questionExplanation = matchedSQ.Explanation
 	} else {
 		// Fallback to database
@@ -271,16 +278,14 @@ func EvaluateAnswer(ctx context.Context, clientID int, req *dto.SubmitAnswerRequ
 			}
 			return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch question: %w", err)
 		}
-		questionPoints = fallbackQ.Points
-		questionDifficulty = fallbackQ.Difficulty
 		questionExplanation = fallbackQ.Explanation
 	}
 
 	// 4. Grade the answer with robust multi-layered verification
 	isCorrect, isSkipped, resolvedCorrectOption := GradeAnswer(matchedSQ, fallbackQ, req.Option, req.SelectedText)
 
-	// 5. Calculate scoring with proper gamification algorithm (CalculatePoints)
-	pointsEarned := 0
+	// 5. Award fixed MCQ points after the backend has evaluated correctness.
+	pointsEarned := CalculateMCQAnswerPoints(isCorrect)
 	coinsEarned := 0
 
 	if isCorrect {
@@ -288,13 +293,6 @@ func EvaluateAnswer(ctx context.Context, clientID int, req *dto.SubmitAnswerRequ
 		if session.ComboStreak > session.BestStreak {
 			session.BestStreak = session.ComboStreak
 		}
-		if questionPoints <= 0 {
-			questionPoints = 10
-		}
-		if questionDifficulty <= 0 {
-			questionDifficulty = 1
-		}
-		pointsEarned = CalculatePoints(questionPoints, questionDifficulty, req.TimeTakenMs, session.ComboStreak)
 		session.CorrectCount++
 	} else {
 		session.ComboStreak = 0
@@ -432,8 +430,12 @@ func CompleteSession(ctx context.Context, clientID int, req *dto.CompleteSession
 		return nil, http.StatusConflict, errors.New("quiz session expired due to 5 minutes of inactivity and has been abandoned")
 	}
 
-	// Calculate rewards
-	reward := CalculateGameRewards(session.Score, session.CorrectCount, session.TotalQuestions)
+	// Recompute the final score from backend-owned correctness so sessions
+	// always finish under the deterministic MCQ rule, including sessions that
+	// may have started before a scoring deployment.
+	finalScore := session.CorrectCount * MCQCorrectAnswerPoints
+	session.Score = finalScore
+	reward := CalculateGameRewards(finalScore, session.CorrectCount, session.TotalQuestions)
 
 	// Fetch current profile for level calculation
 	profile, err := GetOrCreateProfile(ctx, clientID)
@@ -445,16 +447,27 @@ func CompleteSession(ctx context.Context, clientID int, req *dto.CompleteSession
 	newLevel := CalculateNewLevel(newExperience)
 	didLevelUp := newLevel > oldLevel
 
-	// Level-up bonus
+	var levelUpReward *dto.LevelUpRewardDTO
+	levelBonusCoins := 0
+	levelBonusGems := 0
 	if didLevelUp {
-		levelBonusCoins := (newLevel - oldLevel) * 50
-		reward.Coins += levelBonusCoins
-		reward.Gems += (newLevel - oldLevel)
-		reward.CoinBreakdown["level_up_bonus_coins"] = levelBonusCoins
+		levelsGained := newLevel - oldLevel
+		levelBonusCoins = levelsGained * 50
+		levelBonusGems = levelsGained
+		levelUpReward = &dto.LevelUpRewardDTO{
+			Coins: levelBonusCoins,
+			Gems:  levelBonusGems,
+		}
 	}
 
 	// Atomic finalization: session + ledger + profile update
-	if err := repo.FinalizeSession(ctx, session, coins, xp, gems); err != nil {
+	if err := repo.FinalizeSession(
+		ctx,
+		session,
+		reward.Coins+levelBonusCoins,
+		reward.XP,
+		reward.Gems+levelBonusGems,
+	); err != nil {
 		return nil, http.StatusInternalServerError, fmt.Errorf("failed to finalize session: %w", err)
 	}
 	ClearSessionTTL(ctx, session.ID)
@@ -472,66 +485,22 @@ func CompleteSession(ctx context.Context, clientID int, req *dto.CompleteSession
 
 	nextLevelExp := CalculateExperienceForLevel(newLevel)
 
-	// Detailed reward breakdowns for mobile/frontend celebration
-	scoreCoins := int(math.Ceil(float64(session.Score) / 5.0))
-	coinBreakdown := map[string]int{
-		"completion_coins":     5,
-		"accuracy_bonus_coins": scoreCoins,
-	}
-	if didLevelUp {
-		coinBreakdown["level_up_bonus_coins"] = (newLevel - oldLevel) * 50
-	}
-
-	scoreXP := int(math.Ceil(float64(session.Score) / 2.0))
-	xpBreakdown := map[string]int{
-		"completion_xp": 10,
-		"speed_bonus_xp": scoreXP,
-	}
-	if didLevelUp {
-		xpBreakdown["level_up_bonus_xp"] = (newLevel - oldLevel) * 25
-	}
-
-	scoreBreakdown := map[string]int{
-		"correct_answer_points": session.Score,
-	}
-
-	maxScore := 0
-	sessionQuestions, _ := session.GetQuestions()
-	combo := 0
-	for _, sq := range sessionQuestions {
-		combo++
-		pts := sq.Points
-		if pts <= 0 {
-			pts = 10
-		}
-		diff := sq.Difficulty
-		if diff <= 0 {
-			diff = 1
-		}
-		// Max score achievable under CalculatePoints:
-		// perfect speed bonus (< 50% time limit) and uninterrupted streak
-		maxScore += CalculatePoints(pts, diff, 1000, combo)
-	}
-	if maxScore == 0 {
-		maxScore = session.TotalQuestions * 10
-	}
-	if maxScore < session.Score {
-		maxScore = session.Score
-	}
-
 	return &dto.SessionCompleteResponseDTO{
 		Session:            session.ID,
 		TotalQuestions:     session.TotalQuestions,
 		CorrectCount:       session.CorrectCount,
 		AccuracyPercentage: accuracy,
-		FinalScore:         session.Score,
-		MaxScore:           maxScore,
-		CoinsAwarded:       coins,
-		XPAwarded:          xp,
-		GemsAwarded:        gems,
-		ScoreBreakdown:     scoreBreakdown,
-		CoinBreakdown:      coinBreakdown,
-		XPBreakdown:        xpBreakdown,
+		FinalScore:         finalScore,
+		MaxScore:           CalculateMaxScore(session.TotalQuestions),
+		CoinsAwarded:       reward.Coins,
+		XPAwarded:          reward.XP,
+		GemsAwarded:        reward.Gems,
+		ScoreBreakdown: map[string]int{
+			"correct_answer_points": finalScore,
+		},
+		CoinBreakdown: reward.CoinBreakdown,
+		XPBreakdown:   reward.XPBreakdown,
+		LevelUpReward: levelUpReward,
 		Level: dto.LevelInfoDTO{
 			Current:      newLevel,
 			DidLevelUp:   didLevelUp,
@@ -553,6 +522,15 @@ func CalculatePoints(_, _, _, _ int) int {
 	return MCQCorrectAnswerPoints
 }
 
+// CalculateMCQAnswerPoints applies the complete per-answer MCQ score rule.
+// Wrong and skipped answers are both represented by isCorrect=false.
+func CalculateMCQAnswerPoints(isCorrect bool) int {
+	if !isCorrect {
+		return 0
+	}
+	return MCQCorrectAnswerPoints
+}
+
 // CalculateCoins is retained for API compatibility. MCQ coins are awarded only
 // on session completion, not per question.
 func CalculateCoins(_ int) int {
@@ -570,23 +548,19 @@ type GameRewardSummary struct {
 // CalculateGameRewards computes deterministic completion rewards.
 func CalculateGameRewards(_ int, correctCount, totalQuestions int) GameRewardSummary {
 	xpBreakdown := map[string]int{
-		"completion_xp":      CompletionXP,
-		"correct_answer_xp":  correctCount * CorrectAnswerXP,
-		"perfect_bonus_xp":   0,
+		"completion_xp":     MCQCompletionXP,
+		"correct_answer_xp": correctCount * MCQCorrectAnswerXP,
+		"perfect_bonus_xp":  0,
 	}
 	coinBreakdown := map[string]int{
-		"completion_coins":     CompletionCoins,
-		"accuracy_bonus_coins": 0,
+		"completion_coins":     MCQCompletionCoins,
+		"correct_answer_coins": correctCount * MCQCorrectAnswerCoins,
+		"perfect_bonus_coins":  0,
 	}
 
-	if totalQuestions > 0 {
-		accuracy := float64(correctCount) / float64(totalQuestions)
-		if accuracy >= 1.0 {
-			xpBreakdown["perfect_bonus_xp"] = PerfectQuizBonusXP
-		}
-		if accuracy >= 0.8 {
-			coinBreakdown["accuracy_bonus_coins"] = AccuracyBonusCoins
-		}
+	if totalQuestions > 0 && correctCount == totalQuestions {
+		xpBreakdown["perfect_bonus_xp"] = MCQPerfectBonusXP
+		coinBreakdown["perfect_bonus_coins"] = MCQPerfectBonusCoins
 	}
 
 	xp := 0

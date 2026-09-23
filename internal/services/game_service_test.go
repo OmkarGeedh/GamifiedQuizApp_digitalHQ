@@ -32,6 +32,26 @@ func TestCalculatePoints_DeterministicForCorrectAnswers(t *testing.T) {
 	}
 }
 
+func TestCalculateMCQAnswerPoints(t *testing.T) {
+	tests := []struct {
+		name      string
+		isCorrect bool
+		expected  int
+	}{
+		{name: "correct", isCorrect: true, expected: 10},
+		{name: "wrong", isCorrect: false, expected: 0},
+		{name: "skipped", isCorrect: false, expected: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := CalculateMCQAnswerPoints(tt.isCorrect); got != tt.expected {
+				t.Fatalf("expected %d points, got %d", tt.expected, got)
+			}
+		})
+	}
+}
+
 func TestCalculateCoins_NoPerQuestionCoins(t *testing.T) {
 	tests := []int{0, 1, 10, 15, 100}
 	for _, points := range tests {
@@ -42,81 +62,96 @@ func TestCalculateCoins_NoPerQuestionCoins(t *testing.T) {
 	}
 }
 
-func TestCalculateGameRewards_PerfectGame(t *testing.T) {
-	reward := CalculateGameRewards(50, 5, 5)
-	if reward.Coins != 15 {
-		t.Errorf("expected coins 15, got %d", reward.Coins)
-	}
-	if reward.XP != 55 {
-		t.Errorf("expected xp 55, got %d", reward.XP)
-	}
-	if reward.Gems != 3 {
-		t.Errorf("expected gems 3, got %d", reward.Gems)
-	}
-	if reward.XPBreakdown["completion_xp"] != 20 ||
-		reward.XPBreakdown["correct_answer_xp"] != 25 ||
-		reward.XPBreakdown["perfect_bonus_xp"] != 10 {
-		t.Errorf("unexpected XP breakdown: %+v", reward.XPBreakdown)
-	}
-	if reward.CoinBreakdown["completion_coins"] != 10 ||
-		reward.CoinBreakdown["accuracy_bonus_coins"] != 5 {
-		t.Errorf("unexpected coin breakdown: %+v", reward.CoinBreakdown)
-	}
-}
-
-func TestCalculateGameRewards_GoodAccuracy(t *testing.T) {
-	reward := CalculateGameRewards(40, 4, 5)
-	if reward.Gems != 1 {
-		t.Errorf("expected gems 1, got %d", reward.Gems)
-	}
-	if reward.Coins != 15 {
-		t.Errorf("expected coins 15, got %d", reward.Coins)
-	}
-	if reward.XP != 40 {
-		t.Errorf("expected xp 40, got %d", reward.XP)
-	}
-}
-
-func TestCalculateGameRewards_PoorAccuracy(t *testing.T) {
-	reward := CalculateGameRewards(10, 1, 5)
-	if reward.Gems != 0 {
-		t.Errorf("expected gems 0, got %d", reward.Gems)
-	}
-	if reward.Coins != 10 {
-		t.Errorf("expected completion-only coins 10, got %d", reward.Coins)
-	}
-	if reward.XP != 25 {
-		t.Errorf("expected xp 25, got %d", reward.XP)
-	}
-}
-
-func TestRewardBreakdownSumsMatchAwardedTotals(t *testing.T) {
-	reward := CalculateGameRewards(40, 4, 5)
-
-	xpSum := 0
-	for _, value := range reward.XPBreakdown {
-		xpSum += value
-	}
-	if xpSum != reward.XP {
-		t.Errorf("expected XP breakdown sum %d to match awarded XP %d", xpSum, reward.XP)
+func TestCalculateGameRewards_MCQScenarios(t *testing.T) {
+	tests := []struct {
+		name           string
+		correctCount   int
+		totalQuestions int
+		expectedScore  int
+		expectedXP     int
+		expectedCoins  int
+		expectedGems   int
+		perfect        bool
+	}{
+		{name: "0 of 10", correctCount: 0, totalQuestions: 10, expectedScore: 0, expectedXP: 10, expectedCoins: 5},
+		{name: "1 of 10", correctCount: 1, totalQuestions: 10, expectedScore: 10, expectedXP: 15, expectedCoins: 7},
+		{name: "5 of 10", correctCount: 5, totalQuestions: 10, expectedScore: 50, expectedXP: 35, expectedCoins: 15},
+		{name: "9 of 10", correctCount: 9, totalQuestions: 10, expectedScore: 90, expectedXP: 55, expectedCoins: 23, expectedGems: 1},
+		{name: "10 of 10", correctCount: 10, totalQuestions: 10, expectedScore: 100, expectedXP: 75, expectedCoins: 35, expectedGems: 3, perfect: true},
 	}
 
-	coinSum := 0
-	for _, value := range reward.CoinBreakdown {
-		coinSum += value
-	}
-	if coinSum != reward.Coins {
-		t.Errorf("expected coin breakdown sum %d to match awarded coins %d", coinSum, reward.Coins)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reward := CalculateGameRewards(tt.expectedScore, tt.correctCount, tt.totalQuestions)
+			if reward.XP != tt.expectedXP {
+				t.Errorf("expected XP %d, got %d", tt.expectedXP, reward.XP)
+			}
+			if reward.Coins != tt.expectedCoins {
+				t.Errorf("expected coins %d, got %d", tt.expectedCoins, reward.Coins)
+			}
+			if reward.Gems != tt.expectedGems {
+				t.Errorf("expected existing gem reward %d, got %d", tt.expectedGems, reward.Gems)
+			}
+
+			expectedPerfectXP := 0
+			expectedPerfectCoins := 0
+			if tt.perfect {
+				expectedPerfectXP = MCQPerfectBonusXP
+				expectedPerfectCoins = MCQPerfectBonusCoins
+			}
+			if got := reward.XPBreakdown["perfect_bonus_xp"]; got != expectedPerfectXP {
+				t.Errorf("expected perfect XP bonus %d, got %d", expectedPerfectXP, got)
+			}
+			if got := reward.CoinBreakdown["perfect_bonus_coins"]; got != expectedPerfectCoins {
+				t.Errorf("expected perfect coin bonus %d, got %d", expectedPerfectCoins, got)
+			}
+
+			xpSum := sumBreakdown(reward.XPBreakdown)
+			if xpSum != reward.XP {
+				t.Errorf("XP breakdown sum %d does not match awarded XP %d", xpSum, reward.XP)
+			}
+			coinSum := sumBreakdown(reward.CoinBreakdown)
+			if coinSum != reward.Coins {
+				t.Errorf("coin breakdown sum %d does not match awarded coins %d", coinSum, reward.Coins)
+			}
+
+			scoreBreakdown := map[string]int{
+				"correct_answer_points": tt.correctCount * MCQCorrectAnswerPoints,
+			}
+			if scoreSum := sumBreakdown(scoreBreakdown); scoreSum != tt.expectedScore {
+				t.Errorf("score breakdown sum %d does not match final score %d", scoreSum, tt.expectedScore)
+			}
+			if maxScore := CalculateMaxScore(tt.totalQuestions); maxScore != 100 {
+				t.Errorf("expected max score 100, got %d", maxScore)
+			}
+		})
 	}
 }
 
 func TestCalculateMaxScore(t *testing.T) {
-	if got := CalculateMaxScore(5); got != 50 {
-		t.Errorf("expected max score 50, got %d", got)
+	tests := []struct {
+		totalQuestions int
+		expected       int
+	}{
+		{totalQuestions: 0, expected: 0},
+		{totalQuestions: 5, expected: 50},
+		{totalQuestions: 10, expected: 100},
+		{totalQuestions: 20, expected: 200},
 	}
-	if got := CalculateMaxScore(0); got != 0 {
-		t.Errorf("expected max score 0, got %d", got)
+
+	for _, tt := range tests {
+		if got := CalculateMaxScore(tt.totalQuestions); got != tt.expected {
+			t.Errorf("CalculateMaxScore(%d): expected %d, got %d", tt.totalQuestions, tt.expected, got)
+		}
 	}
+}
+
+func sumBreakdown(breakdown map[string]int) int {
+	total := 0
+	for _, value := range breakdown {
+		total += value
+	}
+	return total
 }
 
 func TestCalculateNewLevel(t *testing.T) {

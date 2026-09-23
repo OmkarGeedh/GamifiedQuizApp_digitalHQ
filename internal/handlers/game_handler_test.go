@@ -26,7 +26,6 @@ import (
 )
 
 var (
-	
 	gameTestDBOnce sync.Once
 	gameTestDB     *gorm.DB
 	gameTestDBErr  error
@@ -258,8 +257,11 @@ func TestE2E_MCQ_REST_Workflow(t *testing.T) {
 		if !resp.Data.IsCorrect {
 			t.Fatalf("Expected answer to be correct for session correct_option=%s, got correct_option=%s", firstCorrectOption, resp.Data.CorrectOption)
 		}
-		if resp.Data.PointsEarned <= 0 || resp.Data.CoinsEarned <= 0 {
-			t.Fatalf("Expected positive points and coins, got pts=%d, coins=%d", resp.Data.PointsEarned, resp.Data.CoinsEarned)
+		if resp.Data.PointsEarned != 10 {
+			t.Fatalf("Expected exactly 10 points for a correct MCQ answer, got %d", resp.Data.PointsEarned)
+		}
+		if resp.Data.CoinsEarned != 0 {
+			t.Fatalf("Expected no per-answer coins, got %d", resp.Data.CoinsEarned)
 		}
 		if resp.Data.ComboStreak != 1 {
 			t.Fatalf("Expected combo streak 1, got %d", resp.Data.ComboStreak)
@@ -317,10 +319,18 @@ func TestE2E_MCQ_REST_Workflow(t *testing.T) {
 		if resp.Data.PointsEarned != 0 {
 			t.Fatalf("Expected 0 points for skip, got %d", resp.Data.PointsEarned)
 		}
+		if resp.Data.CoinsEarned != 0 {
+			t.Fatalf("Expected 0 coins for skip, got %d", resp.Data.CoinsEarned)
+		}
 	})
 
 	// 9. Complete Session and Claim Rewards
 	t.Run("Complete session awards wallet ledger and profile updates", func(t *testing.T) {
+		var profileBefore models.Profile
+		if err := config.DB.Where("client_id = ?", 1).First(&profileBefore).Error; err != nil {
+			t.Fatalf("Failed to load profile before completion: %v", err)
+		}
+
 		body, _ := json.Marshal(dto.CompleteSessionRequestDTO{
 			Session: activeSessionID,
 		})
@@ -342,25 +352,100 @@ func TestE2E_MCQ_REST_Workflow(t *testing.T) {
 			t.Fatalf("Failed to decode response: %v", err)
 		}
 
-		if resp.Data.CoinsAwarded <= 0 || resp.Data.XPAwarded <= 0 {
-			t.Fatalf("Expected positive coins and XP, got coins=%d, xp=%d", resp.Data.CoinsAwarded, resp.Data.XPAwarded)
+		if resp.Data.FinalScore != 10 || resp.Data.MaxScore != 50 {
+			t.Fatalf("Expected score 10/50, got %d/%d", resp.Data.FinalScore, resp.Data.MaxScore)
+		}
+		if resp.Data.CorrectCount != 1 || resp.Data.TotalQuestions != 5 {
+			t.Fatalf("Expected 1/5 correct, got %d/%d", resp.Data.CorrectCount, resp.Data.TotalQuestions)
+		}
+		if resp.Data.AccuracyPercentage != 20 {
+			t.Fatalf("Expected 20%% accuracy, got %.2f%%", resp.Data.AccuracyPercentage)
+		}
+		if resp.Data.XPAwarded != 15 {
+			t.Fatalf("Expected 15 base XP, got %d", resp.Data.XPAwarded)
+		}
+		if resp.Data.CoinsAwarded != 7 {
+			t.Fatalf("Expected 7 base coins, got %d", resp.Data.CoinsAwarded)
+		}
+		if totalBreakdown(resp.Data.ScoreBreakdown) != resp.Data.FinalScore {
+			t.Fatalf("Score breakdown does not match final score: %+v", resp.Data.ScoreBreakdown)
+		}
+		if totalBreakdown(resp.Data.XPBreakdown) != resp.Data.XPAwarded {
+			t.Fatalf("XP breakdown does not match XP awarded: %+v", resp.Data.XPBreakdown)
+		}
+		if totalBreakdown(resp.Data.CoinBreakdown) != resp.Data.CoinsAwarded {
+			t.Fatalf("Coin breakdown does not match coins awarded: %+v", resp.Data.CoinBreakdown)
+		}
+		if resp.Data.XPBreakdown["perfect_bonus"] != 0 || resp.Data.CoinBreakdown["perfect_bonus"] != 0 {
+			t.Fatalf("Perfect bonuses must be zero for a partial quiz: xp=%d, coins=%d",
+				resp.Data.XPBreakdown["perfect_bonus"], resp.Data.CoinBreakdown["perfect_bonus"])
 		}
 
-		// Verify Wallet Ledger database entries
-		var ledgerCount int64
-		config.DB.Model(&models.WalletLedger{}).
-			Where("client_id = ? AND reference_id = ?", 1, activeSessionID).
-			Count(&ledgerCount)
-
-		if ledgerCount == 0 {
-			t.Fatalf("Expected wallet_ledger entries for session %s, found 0", activeSessionID)
+		// Verify immutable answer history contains the deterministic awards.
+		var correctHistory models.UserQuestionHistory
+		if err := config.DB.Where("session_id = ? AND question_code = ?", activeSessionID, firstQuestionCode).
+			First(&correctHistory).Error; err != nil {
+			t.Fatalf("Failed to load correct-answer history: %v", err)
+		}
+		if !correctHistory.IsCorrect || correctHistory.PointsAwarded != 10 || correctHistory.CoinsAwarded != 0 {
+			t.Fatalf("Unexpected correct-answer history: %+v", correctHistory)
 		}
 
-		// Verify Session is finished in DB
+		var skippedHistory models.UserQuestionHistory
+		if err := config.DB.Where("session_id = ? AND question_code = ?", activeSessionID, secondQuestionCode).
+			First(&skippedHistory).Error; err != nil {
+			t.Fatalf("Failed to load skipped-answer history: %v", err)
+		}
+		if skippedHistory.IsCorrect || skippedHistory.SelectedOption != "skip" || skippedHistory.PointsAwarded != 0 || skippedHistory.CoinsAwarded != 0 {
+			t.Fatalf("Unexpected skipped-answer history: %+v", skippedHistory)
+		}
+
+		// Verify the completed session persists the authoritative score and count.
 		var dbSession models.GameSession
-		config.DB.Where("id = ?", activeSessionID).First(&dbSession)
+		if err := config.DB.Where("id = ?", activeSessionID).First(&dbSession).Error; err != nil {
+			t.Fatalf("Failed to load completed session: %v", err)
+		}
 		if dbSession.Status != models.SessionStatusFinished {
 			t.Fatalf("Expected session status finished, got %s", dbSession.Status)
+		}
+		if dbSession.Score != 10 || dbSession.CorrectCount != 1 {
+			t.Fatalf("Expected persisted score=10 and correct_count=1, got score=%d correct_count=%d",
+				dbSession.Score, dbSession.CorrectCount)
+		}
+
+		// Verify ledger and profile totals, including any separately reported level-up event.
+		expectedCoins := resp.Data.CoinsAwarded
+		expectedXP := resp.Data.XPAwarded
+		if resp.Data.LevelUpReward != nil {
+			expectedCoins += resp.Data.LevelUpReward.Coins
+			expectedXP += resp.Data.LevelUpReward.XP
+		}
+
+		var ledgerEntries []models.WalletLedger
+		if err := config.DB.Where("client_id = ? AND reference_id = ?", 1, activeSessionID).
+			Find(&ledgerEntries).Error; err != nil {
+			t.Fatalf("Failed to load wallet ledger entries: %v", err)
+		}
+		ledgerTotals := make(map[string]int)
+		for _, entry := range ledgerEntries {
+			ledgerTotals[entry.Currency] += entry.Amount
+		}
+		if ledgerTotals[models.CurrencyCoins] != expectedCoins {
+			t.Fatalf("Expected %d persisted coins, got %d", expectedCoins, ledgerTotals[models.CurrencyCoins])
+		}
+		if ledgerTotals[models.CurrencyExperience] != expectedXP {
+			t.Fatalf("Expected %d persisted XP, got %d", expectedXP, ledgerTotals[models.CurrencyExperience])
+		}
+
+		var profileAfter models.Profile
+		if err := config.DB.Where("client_id = ?", 1).First(&profileAfter).Error; err != nil {
+			t.Fatalf("Failed to load profile after completion: %v", err)
+		}
+		if profileAfter.Coins-profileBefore.Coins != expectedCoins {
+			t.Fatalf("Expected profile coin delta %d, got %d", expectedCoins, profileAfter.Coins-profileBefore.Coins)
+		}
+		if profileAfter.Experience-profileBefore.Experience != expectedXP {
+			t.Fatalf("Expected profile XP delta %d, got %d", expectedXP, profileAfter.Experience-profileBefore.Experience)
 		}
 	})
 
@@ -428,6 +513,14 @@ func TestE2E_MCQ_REST_Workflow(t *testing.T) {
 			t.Fatalf("Expected status abandoned, got %s", dbSession.Status)
 		}
 	})
+}
+
+func totalBreakdown(values map[string]int) int {
+	total := 0
+	for _, value := range values {
+		total += value
+	}
+	return total
 }
 
 func TestE2E_WebSocket_LiveGame(t *testing.T) {

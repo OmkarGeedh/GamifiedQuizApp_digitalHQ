@@ -74,14 +74,22 @@ type AnswerResultPayload struct {
 
 // GameOverPayload is the final summary sent when the quiz ends.
 type GameOverPayload struct {
-	FinalScore     int  `json:"final_score"`
-	TotalQuestions int  `json:"total_questions"`
-	CorrectCount   int  `json:"correct_count"`
-	CoinsEarned    int  `json:"coins_earned"`
-	XPEarned       int  `json:"xp_earned"`
-	GemsEarned     int  `json:"gems_earned"`
-	NewLevel       int  `json:"new_level"`
-	DidLevelUp     bool `json:"did_level_up"`
+	FinalScore     int                   `json:"final_score"`
+	TotalQuestions int                   `json:"total_questions"`
+	CorrectCount   int                   `json:"correct_count"`
+	CoinsEarned    int                   `json:"coins_earned"`
+	XPEarned       int                   `json:"xp_earned"`
+	GemsEarned     int                   `json:"gems_earned"`
+	NewLevel       int                   `json:"new_level"`
+	DidLevelUp     bool                  `json:"did_level_up"`
+	LevelUpReward  *LevelUpRewardPayload `json:"level_up_reward,omitempty"`
+}
+
+// LevelUpRewardPayload is separate from the base MCQ reward totals.
+type LevelUpRewardPayload struct {
+	Coins int `json:"coins"`
+	XP    int `json:"xp"`
+	Gems  int `json:"gems"`
 }
 
 // ErrorPayload communicates error details to the client.

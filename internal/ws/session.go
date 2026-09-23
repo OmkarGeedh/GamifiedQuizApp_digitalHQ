@@ -195,7 +195,7 @@ func (gs *GameSession) handleAnswer(ctx context.Context, rawData json.RawMessage
 	// Grade using multi-layered GradeAnswer
 	isCorrect, _, resolvedCorrect := services.GradeAnswer(&q, nil, cleanOption, data.SelectedText)
 
-	pointsEarned := 0
+	pointsEarned := services.CalculateMCQAnswerPoints(isCorrect)
 	coinsEarned := 0
 
 	if isCorrect {
@@ -203,15 +203,6 @@ func (gs *GameSession) handleAnswer(ctx context.Context, rawData json.RawMessage
 		if gs.Session.ComboStreak > gs.Session.BestStreak {
 			gs.Session.BestStreak = gs.Session.ComboStreak
 		}
-		pts := q.Points
-		if pts <= 0 {
-			pts = 10
-		}
-		diff := q.Difficulty
-		if diff <= 0 {
-			diff = 1
-		}
-		pointsEarned = services.CalculatePoints(pts, diff, data.TimeTakenMs, gs.Session.ComboStreak)
 		coinsEarned = services.CalculateCoins(pointsEarned)
 		gs.Session.CorrectCount++
 	} else {
@@ -323,8 +314,8 @@ func (gs *GameSession) handleGameEnd(ctx context.Context) {
 	}
 	gs.mu.Unlock()
 
-	// Calculate rewards
-	coins, xp, gems := services.CalculateGameRewards(gs.Session.Score, gs.Session.CorrectCount, gs.Session.TotalQuestions)
+	gs.Session.Score = gs.Session.CorrectCount * services.MCQCorrectAnswerPoints
+	reward := services.CalculateGameRewards(gs.Session.Score, gs.Session.CorrectCount, gs.Session.TotalQuestions)
 
 	// Fetch profile for level info
 	profile, err := services.GetOrCreateProfile(ctx, gs.ClientID)
@@ -332,16 +323,31 @@ func (gs *GameSession) handleGameEnd(ctx context.Context) {
 	didLevelUp := false
 	if err == nil {
 		oldLevel := profile.Level
-		newLevel = services.CalculateNewLevel(profile.Experience + xp)
+		newLevel = services.CalculateNewLevel(profile.Experience + reward.XP)
 		didLevelUp = newLevel > oldLevel
-		if didLevelUp {
-			coins += (newLevel - oldLevel) * 50
-			gems += (newLevel - oldLevel)
+	}
+
+	var levelUpReward *LevelUpRewardPayload
+	levelBonusCoins := 0
+	levelBonusGems := 0
+	if didLevelUp {
+		levelsGained := newLevel - profile.Level
+		levelBonusCoins = levelsGained * 50
+		levelBonusGems = levelsGained
+		levelUpReward = &LevelUpRewardPayload{
+			Coins: levelBonusCoins,
+			Gems:  levelBonusGems,
 		}
 	}
 
 	// Atomic finalization
-	_ = repo.FinalizeSession(ctx, gs.Session, coins, xp, gems)
+	_ = repo.FinalizeSession(
+		ctx,
+		gs.Session,
+		reward.Coins+levelBonusCoins,
+		reward.XP,
+		reward.Gems+levelBonusGems,
+	)
 
 	if didLevelUp && profile != nil {
 		_ = repo.UpdateProfileLevel(ctx, gs.ClientID, newLevel)
@@ -354,11 +360,12 @@ func (gs *GameSession) handleGameEnd(ctx context.Context) {
 			FinalScore:     gs.Session.Score,
 			TotalQuestions: gs.Session.TotalQuestions,
 			CorrectCount:   gs.Session.CorrectCount,
-			CoinsEarned:    coins,
-			XPEarned:       xp,
-			GemsEarned:     gems,
+			CoinsEarned:    reward.Coins,
+			XPEarned:       reward.XP,
+			GemsEarned:     reward.Gems,
 			NewLevel:       newLevel,
 			DidLevelUp:     didLevelUp,
+			LevelUpReward:  levelUpReward,
 		},
 	})
 }
