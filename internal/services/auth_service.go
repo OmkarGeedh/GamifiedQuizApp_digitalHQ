@@ -1,0 +1,454 @@
+package services
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/config"
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/dto"
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/models"
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/repo"
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/utils"
+	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
+)
+
+// -----------------------------------------------------------------------------
+// LOGIN SERVICES
+// -----------------------------------------------------------------------------
+
+func LoginService(ctx context.Context, req *dto.LoginRequest) (string, string, *models.Client, int, error) {
+	if req.Email == "" || req.Password == "" {
+		return "", "", nil, http.StatusBadRequest, errors.New("email and password required")
+	}
+
+	// 1. Fetch client using repository layer
+	clientRecord, err := repo.GetClientByEmail(ctx, req.Email)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", "", nil, http.StatusUnauthorized, errors.New("invalid email or password")
+		}
+		return "", "", nil, http.StatusInternalServerError, fmt.Errorf("database query error: %w", err)
+	}
+
+	// 2. Check allowed statuses
+	if clientRecord.Status != "active" && clientRecord.Status != "pending" {
+		return "", "", nil, http.StatusUnauthorized, errors.New("account not active or blocked")
+	}
+
+	// 3. Verify password
+	secret := ""
+	if config.AppConfig != nil {
+		secret = config.AppConfig.Server.PasswordSecret
+	}
+	combined := req.Password + secret
+
+	if err := bcrypt.CompareHashAndPassword([]byte(clientRecord.Password), []byte(combined)); err != nil {
+		return "", "", nil, http.StatusUnauthorized, errors.New("invalid email or password")
+	}
+
+	// 4. Generate JWT Tokens and persist refresh token
+	accessStr, refreshStr, err := GenerateTokensForClient(ctx, clientRecord)
+	if err != nil {
+		return "", "", nil, http.StatusInternalServerError, err
+	}
+
+	log.Printf("[LOGIN] Client logged in successfully: ID=%d, Email=%s", clientRecord.ID, clientRecord.Email)
+
+	return accessStr, refreshStr, clientRecord, http.StatusOK, nil
+}
+
+// -----------------------------------------------------------------------------
+// SESSION & TOKEN SERVICES
+// -----------------------------------------------------------------------------
+
+func LogoutClientService(ctx context.Context, clientID int, jti string, exp int64) (int, error) {
+	err := repo.UpdateClientRefreshToken(ctx, clientID, nil)
+	if err != nil {
+		return http.StatusInternalServerError, fmt.Errorf("failed to clear refresh token in database: %w", err)
+	}
+
+	// Blacklist JTI in Redis until expiration
+	if jti != "" && exp > 0 && config.RedisClient != nil {
+		ttl := time.Until(time.Unix(exp, 0))
+		if ttl > 0 {
+			err = config.RedisClient.Set(ctx, "blacklist:"+jti, "revoked", ttl).Err()
+			if err != nil {
+				return http.StatusInternalServerError, fmt.Errorf("failed to blacklist token JTI: %w", err)
+			}
+		}
+	}
+
+	return http.StatusOK, nil
+}
+
+func RefreshTokenService(ctx context.Context, tokenStr string) (string, int, error) {
+	if tokenStr == "" {
+		return "", http.StatusBadRequest, errors.New("refresh token required")
+	}
+
+	jwtSecret := ""
+	if config.AppConfig != nil {
+		jwtSecret = config.AppConfig.Server.JWTSecret
+	}
+
+	token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return []byte(jwtSecret), nil
+	})
+	if err != nil || !token.Valid {
+		return "", http.StatusUnauthorized, errors.New("invalid or expired refresh token")
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return "", http.StatusUnauthorized, errors.New("invalid token payload")
+	}
+
+	clientIDVal, ok := claims["client_id"]
+	if !ok {
+		return "", http.StatusUnauthorized, errors.New("invalid token payload (client_id missing)")
+	}
+	clientID := int(clientIDVal.(float64))
+
+	clientRecord, err := repo.GetClientByID(ctx, clientID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", http.StatusUnauthorized, errors.New("client not found")
+		}
+		return "", http.StatusInternalServerError, fmt.Errorf("failed to fetch client: %w", err)
+	}
+
+	if clientRecord.RefreshToken == nil || *clientRecord.RefreshToken != tokenStr {
+		return "", http.StatusUnauthorized, errors.New("invalid session or refresh token. please log in again")
+	}
+
+	jti, err := utils.GenerateToken64()
+	if err != nil {
+		return "", http.StatusInternalServerError, fmt.Errorf("failed to generate token ID: %w", err)
+	}
+
+	accessExpiry := 30 * 24 * time.Hour
+	if config.AppConfig != nil && config.AppConfig.Server.JWTAccessTokenExpiry > 0 {
+		accessExpiry = config.AppConfig.Server.JWTAccessTokenExpiry
+	}
+
+	newAccessToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"client_id": clientRecord.ID,
+		"email":     clientRecord.Email,
+		"exp":       time.Now().Add(accessExpiry).Unix(),
+		"jti":       jti,
+	})
+	newAccessStr, err := newAccessToken.SignedString([]byte(jwtSecret))
+	if err != nil {
+		return "", http.StatusInternalServerError, fmt.Errorf("failed to sign access token: %w", err)
+	}
+
+	return newAccessStr, http.StatusOK, nil
+}
+
+func ClientVerifySessionService(ctx context.Context, clientID int) (*dto.ClientVerifySessionResponse, int, error) {
+	clientRecord, err := repo.GetClientByID(ctx, clientID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return &dto.ClientVerifySessionResponse{Active: false}, http.StatusOK, nil
+		}
+		return nil, http.StatusInternalServerError, fmt.Errorf("database query error: %w", err)
+	}
+
+	return &dto.ClientVerifySessionResponse{
+		Active: true,
+		Status: clientRecord.Status,
+	}, http.StatusOK, nil
+}
+
+func ClientSessionService(ctx context.Context, clientID int) (*dto.ClientSessionResponse, int, error) {
+	clientRecord, err := repo.GetClientByID(ctx, clientID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, http.StatusNotFound, errors.New("client not found")
+		}
+		return nil, http.StatusInternalServerError, fmt.Errorf("database query error: %w", err)
+	}
+
+	return &dto.ClientSessionResponse{
+		ID:        clientRecord.ID,
+		Username:  clientRecord.Username,
+		Email:     clientRecord.Email,
+		Phone:     clientRecord.Phone,
+		Status:    clientRecord.Status,
+		CreatedAt: clientRecord.CreatedAt,
+		UpdatedAt: clientRecord.UpdatedAt,
+	}, http.StatusOK, nil
+}
+
+// -----------------------------------------------------------------------------
+// PASSWORD CHANGE SERVICES
+// -----------------------------------------------------------------------------
+
+func ChangePasswordRequestService(ctx context.Context, clientID int, req *dto.ChangePasswordRequest) (string, int, error) {
+	if req.OldPassword == "" || req.NewPassword == "" {
+		return "", http.StatusBadRequest, errors.New("both oldPassword and newPassword are required")
+	}
+
+	clientRecord, err := repo.GetClientByID(ctx, clientID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", http.StatusNotFound, errors.New("client not found")
+		}
+		return "", http.StatusInternalServerError, fmt.Errorf("database error: %w", err)
+	}
+
+	secret := ""
+	if config.AppConfig != nil {
+		secret = config.AppConfig.Server.PasswordSecret
+	}
+	combined := req.OldPassword + secret
+	if err := bcrypt.CompareHashAndPassword([]byte(clientRecord.Password), []byte(combined)); err != nil {
+		return "", http.StatusUnauthorized, errors.New("incorrect old password")
+	}
+
+	otpCode, err := utils.GenerateOtp(6)
+	if err != nil {
+		return "", http.StatusInternalServerError, errors.New("failed to generate verification OTP")
+	}
+
+	stash := dto.ChangePasswordStash{
+		OTP:         otpCode,
+		NewPassword: req.NewPassword,
+	}
+	stashBytes, err := json.Marshal(stash)
+	if err != nil {
+		return "", http.StatusInternalServerError, fmt.Errorf("failed to serialize password change details: %w", err)
+	}
+
+	if config.RedisClient != nil {
+		key := "change-password:" + strconv.Itoa(clientID)
+		err = config.RedisClient.Set(ctx, key, string(stashBytes), 2*time.Minute).Err()
+		if err != nil {
+			return "", http.StatusInternalServerError, fmt.Errorf("failed to save verification details to Redis: %w", err)
+		}
+	}
+
+	// Log Change Password OTP prominently
+	log.Printf("================================================================")
+	log.Printf("[CHANGE PASSWORD OTP] Generated OTP: >>> %s <<< for Client ID: %d (Email: %s)", otpCode, clientID, clientRecord.Email)
+	log.Printf("================================================================")
+
+	return otpCode, http.StatusOK, nil
+}
+
+func ChangePasswordVerifyService(ctx context.Context, clientID int, req *dto.ChangePasswordVerifyRequest) (int, error) {
+	if req.OTP == "" {
+		return http.StatusBadRequest, errors.New("OTP is required")
+	}
+
+	key := "change-password:" + strconv.Itoa(clientID)
+	stashJSON := ""
+	if config.RedisClient != nil {
+		var err error
+		stashJSON, err = config.RedisClient.Get(ctx, key).Result()
+		if err != nil {
+			return http.StatusUnauthorized, errors.New("no OTP found or expired. Request password change first")
+		}
+	}
+
+	var stash dto.ChangePasswordStash
+	if err := json.Unmarshal([]byte(stashJSON), &stash); err != nil {
+		return http.StatusInternalServerError, fmt.Errorf("failed to parse verification details: %w", err)
+	}
+
+	if req.OTP != stash.OTP {
+		return http.StatusUnauthorized, errors.New("invalid OTP")
+	}
+
+	if config.RedisClient != nil {
+		_ = config.RedisClient.Del(ctx, key).Err()
+	}
+
+	secret := ""
+	if config.AppConfig != nil {
+		secret = config.AppConfig.Server.PasswordSecret
+	}
+	combined := stash.NewPassword + secret
+	hashed, err := bcrypt.GenerateFromPassword([]byte(combined), 12)
+	if err != nil {
+		return http.StatusInternalServerError, fmt.Errorf("failed to hash new password: %w", err)
+	}
+
+	err = repo.UpdateClientPassword(ctx, clientID, string(hashed))
+	if err != nil {
+		return http.StatusInternalServerError, fmt.Errorf("failed to save new password to database: %w", err)
+	}
+
+	log.Printf("[CHANGE PASSWORD] Successfully updated password for Client ID: %d\n", clientID)
+
+	return http.StatusOK, nil
+}
+
+// -----------------------------------------------------------------------------
+// FORGOT / RESET PASSWORD SERVICES
+// -----------------------------------------------------------------------------
+
+func ForgotPasswordRequestService(ctx context.Context, req *dto.ForgotPasswordRequest) (string, int, error) {
+	if req.Email == "" {
+		return "", http.StatusBadRequest, errors.New("email is required")
+	}
+
+	clientRecord, err := repo.GetClientByEmail(ctx, req.Email)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// Don't leak user existence; return standard success message
+			return "", http.StatusOK, nil
+		}
+		return "", http.StatusInternalServerError, fmt.Errorf("database error: %w", err)
+	}
+
+	// Generate secure 64-char reset token
+	resetToken, err := utils.GenerateToken64()
+	if err != nil {
+		return "", http.StatusInternalServerError, errors.New("failed to generate reset token")
+	}
+
+	// Store in Redis with 15-minute expiration
+	if config.RedisClient != nil {
+		err = config.RedisClient.Set(ctx, "forgot-password:"+resetToken, strconv.Itoa(clientRecord.ID), 15*time.Minute).Err()
+		if err != nil {
+			return "", http.StatusInternalServerError, fmt.Errorf("failed to save reset token in Redis: %w", err)
+		}
+	}
+
+	// Log Forgot Password Token prominently
+	log.Printf("================================================================")
+	log.Printf("[FORGOT PASSWORD TOKEN] Generated Reset Token: >>> %s <<< for Email: %s", resetToken, req.Email)
+	log.Printf("================================================================")
+
+	return resetToken, http.StatusOK, nil
+}
+
+func ForgotPasswordVerifyTokenService(ctx context.Context, req *dto.ForgotPasswordVerifyTokenRequest) (int, error) {
+	if req.Token == "" {
+		return http.StatusBadRequest, errors.New("token is required")
+	}
+
+	if config.RedisClient != nil {
+		exists, err := config.RedisClient.Exists(ctx, "forgot-password:"+req.Token).Result()
+		if err != nil || exists == 0 {
+			return http.StatusUnauthorized, errors.New("invalid or expired reset token")
+		}
+	}
+
+	return http.StatusOK, nil
+}
+
+func ResetPasswordVerifyService(ctx context.Context, req *dto.ResetPasswordVerifyRequest) (int, error) {
+	if req.Token == "" || req.NewPassword == "" {
+		return http.StatusBadRequest, errors.New("token and newPassword are required")
+	}
+
+	clientIDStr := ""
+	if config.RedisClient != nil {
+		var err error
+		clientIDStr, err = config.RedisClient.Get(ctx, "forgot-password:"+req.Token).Result()
+		if err != nil || clientIDStr == "" {
+			return http.StatusUnauthorized, errors.New("invalid or expired reset token")
+		}
+	}
+
+	clientID, err := strconv.Atoi(clientIDStr)
+	if err != nil {
+		return http.StatusInternalServerError, errors.New("invalid client ID stored in reset token")
+	}
+
+	secret := ""
+	if config.AppConfig != nil {
+		secret = config.AppConfig.Server.PasswordSecret
+	}
+	combined := req.NewPassword + secret
+	hashed, err := bcrypt.GenerateFromPassword([]byte(combined), 12)
+	if err != nil {
+		return http.StatusInternalServerError, fmt.Errorf("failed to hash password: %w", err)
+	}
+
+	if err := repo.UpdateClientPassword(ctx, clientID, string(hashed)); err != nil {
+		return http.StatusInternalServerError, fmt.Errorf("failed to update password: %w", err)
+	}
+
+	// Invalidate reset token and refresh token
+	if config.RedisClient != nil {
+		_ = config.RedisClient.Del(ctx, "forgot-password:"+req.Token).Err()
+	}
+	_ = repo.UpdateClientRefreshToken(ctx, clientID, nil)
+
+	log.Printf("[RESET PASSWORD] Successfully reset password for Client ID: %d\n", clientID)
+
+	return http.StatusOK, nil
+}
+
+// -----------------------------------------------------------------------------
+// TOKEN GENERATION HELPER
+// -----------------------------------------------------------------------------
+
+func GenerateTokensForClient(ctx context.Context, clientRecord *models.Client) (string, string, error) {
+	jwtSecret := ""
+	if config.AppConfig != nil {
+		jwtSecret = config.AppConfig.Server.JWTSecret
+	}
+	if jwtSecret == "" {
+		return "", "", errors.New("JWT secret is not configured")
+	}
+
+	jti, err := utils.GenerateToken64()
+	if err != nil {
+		return "", "", fmt.Errorf("failed to generate token ID: %w", err)
+	}
+
+	accessExpiry := 30 * 24 * time.Hour
+	if config.AppConfig != nil && config.AppConfig.Server.JWTAccessTokenExpiry > 0 {
+		accessExpiry = config.AppConfig.Server.JWTAccessTokenExpiry
+	}
+	refreshExpiry := 180 * 24 * time.Hour
+	if config.AppConfig != nil && config.AppConfig.Server.JWTRefreshTokenExpiry > 0 {
+		refreshExpiry = config.AppConfig.Server.JWTRefreshTokenExpiry
+	}
+
+	accessToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"client_id": clientRecord.ID,
+		"email":     clientRecord.Email,
+		"exp":       time.Now().Add(accessExpiry).Unix(),
+		"jti":       jti,
+	})
+	accessStr, err := accessToken.SignedString([]byte(jwtSecret))
+	if err != nil {
+		return "", "", fmt.Errorf("failed to sign access token: %w", err)
+	}
+
+	refreshToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"client_id": clientRecord.ID,
+		"email":     clientRecord.Email,
+		"exp":       time.Now().Add(refreshExpiry).Unix(),
+	})
+	refreshStr, err := refreshToken.SignedString([]byte(jwtSecret))
+	if err != nil {
+		return "", "", fmt.Errorf("failed to sign refresh token: %w", err)
+	}
+
+	// Persist active refresh token
+	err = repo.UpdateClientRefreshToken(ctx, clientRecord.ID, &refreshStr)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to save refresh token to database: %w", err)
+	}
+
+	return accessStr, refreshStr, nil
+}
+
+

@@ -8,10 +8,8 @@ import (
 	"os"
 	"time"
 
-	authModels "github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/auth/client/models"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/config"
-	gameModels "github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/game/models"
-	profileModels "github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/profile/models"
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/models"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
@@ -20,13 +18,13 @@ import (
 // AllModels lists all GORM entity models across the application
 func AllModels() []interface{} {
 	return []interface{}{
-		&authModels.Client{},
-		&profileModels.Profile{},
-		&profileModels.StreakActivity{},
-		&gameModels.Question{},
-		&gameModels.GameSession{},
-		&gameModels.UserQuestionHistory{},
-		&gameModels.WalletLedger{},
+		&models.Client{},
+		&models.Profile{},
+		&models.StreakActivity{},
+		&models.Question{},
+		&models.GameSession{},
+		&models.UserQuestionHistory{},
+		&models.WalletLedger{},
 	}
 }
 
@@ -74,7 +72,7 @@ func Seed(db *gorm.DB) error {
 	ctx := context.Background()
 
 	// 1. Seed demo player
-	var existing authModels.Client
+	var existing models.Client
 	err := db.WithContext(ctx).Where("email = ?", "player@example.com").First(&existing).Error
 	if err != nil && err == gorm.ErrRecordNotFound {
 		passwordSecret := "super_secret_pepper_salt"
@@ -87,7 +85,7 @@ func Seed(db *gorm.DB) error {
 		}
 
 		phone := "+1-555-0199"
-		client := authModels.Client{
+		client := models.Client{
 			Username: "quizmaster",
 			Email:    "player@example.com",
 			Phone:    &phone,
@@ -102,7 +100,7 @@ func Seed(db *gorm.DB) error {
 		todayStr := now.Format("2006-01-02")
 		todayDate, _ := time.Parse("2006-01-02", todayStr)
 
-		profile := profileModels.Profile{
+		profile := models.Profile{
 			ClientID:       client.ID,
 			UUID:           uuid.New().String(),
 			FullName:       "Pro Quiz Champion",
@@ -122,7 +120,7 @@ func Seed(db *gorm.DB) error {
 		// Seed streak activities for the last 3 days
 		for i := 2; i >= 0; i-- {
 			d := now.AddDate(0, 0, -i).Format("2006-01-02")
-			db.WithContext(ctx).Create(&profileModels.StreakActivity{
+			db.WithContext(ctx).Create(&models.StreakActivity{
 				ClientID:     client.ID,
 				ActivityDate: d,
 				Completed:    true,
@@ -145,7 +143,7 @@ func Seed(db *gorm.DB) error {
 // seedQuestions loads 100 MCQ questions from the embedded JSON seed file.
 func seedQuestions(ctx context.Context, db *gorm.DB) error {
 	var existingCount int64
-	db.WithContext(ctx).Model(&gameModels.Question{}).Count(&existingCount)
+	db.WithContext(ctx).Model(&models.Question{}).Count(&existingCount)
 	if existingCount > 0 {
 		log.Printf("==> Refreshing questions table (%d existing rows with latest seed data)...\n", existingCount)
 		if err := db.WithContext(ctx).Exec("TRUNCATE TABLE questions RESTART IDENTITY CASCADE").Error; err != nil {
@@ -155,6 +153,9 @@ func seedQuestions(ctx context.Context, db *gorm.DB) error {
 
 	// Try multiple paths to find the seed file
 	paths := []string{
+		"internal/data/seed_questions.json",
+		"./internal/data/seed_questions.json",
+		"/app/internal/data/seed_questions.json",
 		"internal/game/data/seed_questions.json",
 		"./internal/game/data/seed_questions.json",
 		"/app/internal/game/data/seed_questions.json",
@@ -192,7 +193,7 @@ func seedQuestions(ctx context.Context, db *gorm.DB) error {
 		return fmt.Errorf("failed to parse seed_questions.json: %w", err)
 	}
 
-	questions := make([]gameModels.Question, 0, len(seeds))
+	questions := make([]models.Question, 0, len(seeds))
 	for _, s := range seeds {
 		var hint *string
 		if s.Hint != nil && *s.Hint != "" {
@@ -204,7 +205,7 @@ func seedQuestions(ctx context.Context, db *gorm.DB) error {
 			e := *s.Explanation
 			explanation = &e
 		}
-		q := gameModels.Question{
+		q := models.Question{
 			QuestionCode:  s.QuestionCode,
 			TopicID:       s.TopicID,
 			Prompt:        s.Prompt,

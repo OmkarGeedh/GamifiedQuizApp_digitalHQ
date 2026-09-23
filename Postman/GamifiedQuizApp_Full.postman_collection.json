@@ -56,7 +56,7 @@
 			"name": "1. Authentication",
 			"item": [
 				{
-					"name": "Register Validate Basic",
+					"name": "Signup: Send Verification Code",
 					"request": {
 						"method": "POST",
 						"header": [
@@ -71,49 +71,150 @@
 						],
 						"body": {
 							"mode": "raw",
-							"raw": "{\n  \"username\": \"quizmaster\",\n  \"email\": \"player@example.com\",\n  \"phone\": \"+1-555-0199\",\n  \"password\": \"secretpassword123\"\n}"
+							"raw": "{\n  \"displayName\": \"Omkar\",\n  \"email\": \"test@gmail.com\",\n  \"password\": \"Password123!\"\n}"
 						},
 						"url": {
-							"raw": "{{baseUrl}}/auth/register/validate-basic",
+							"raw": "{{baseUrl}}/auth/signup/send-code",
 							"host": [
 								"{{baseUrl}}"
 							],
 							"path": [
 								"auth",
-								"register",
-								"validate-basic"
+								"signup",
+								"send-code"
 							]
-						}
+						},
+						"description": "Step 1 of frontend signup flow: submits display name, email, password. Enforces 60s cooldown and 5 req/15min rate limit."
 					},
 					"response": []
 				},
 				{
-					"name": "Check Email Availability",
+					"name": "Signup: Resend Verification Code",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Accept",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"test@gmail.com\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/signup/resend-code",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"auth",
+								"signup",
+								"resend-code"
+							]
+						},
+						"description": "Resends 6-digit OTP code if 60-second cooldown has passed."
+					},
+					"response": []
+				},
+				{
+					"name": "Signup: Verify and Create Account",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Accept",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"test@gmail.com\",\n  \"code\": \"123456\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/signup/verify",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"auth",
+								"signup",
+								"verify"
+							]
+						},
+						"description": "Step 2 of frontend signup flow: verifies 6-digit OTP code, creates account in PostgreSQL, generates JWT access/refresh tokens, sets cookies, and logs the user in."
+					},
+					"response": []
+				},
+				{
+					"name": "Get Profile Setup Options",
 					"request": {
 						"method": "GET",
 						"header": [
 							{
 								"key": "Accept",
 								"value": "application/json"
+							},
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}"
 							}
 						],
 						"url": {
-							"raw": "{{baseUrl}}/auth/register/email-check?email=player@example.com",
+							"raw": "{{baseUrl}}/profile/options",
 							"host": [
 								"{{baseUrl}}"
 							],
 							"path": [
-								"auth",
-								"register",
-								"email-check"
-							],
-							"query": [
-								{
-									"key": "email",
-									"value": "player@example.com"
-								}
+								"profile",
+								"options"
 							]
-						}
+						},
+						"description": "Fetches dynamic options for the 4-step profile setup (avatars, classes, boards, and subjects from the backend database)."
+					},
+					"response": []
+				},
+				{
+					"name": "Submit Profile Setup (4-Step Onboarding)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Accept",
+								"value": "application/json"
+							},
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"avatarId\": \"user\",\n  \"name\": \"Omkar\",\n  \"class\": \"11th\",\n  \"board\": \"Maharashtra State Board\",\n  \"subjects\": [\"accounting\"]\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/profile/setup",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"profile",
+								"setup"
+							]
+						},
+						"description": "Submits the completed 4-step profile setup: avatar, name, class, board, and subjects, marking isOnboarded=true."
 					},
 					"response": []
 				},

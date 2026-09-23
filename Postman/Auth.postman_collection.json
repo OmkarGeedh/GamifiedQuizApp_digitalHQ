@@ -7,10 +7,10 @@
 	},
 	"item": [
 		{
-			"name": "1. Registration",
+			"name": "1. Signup Flow",
 			"item": [
 				{
-					"name": "Register Validate Basic",
+					"name": "Step 1: Send Verification Code",
 					"request": {
 						"method": "POST",
 						"header": [
@@ -25,56 +25,25 @@
 						],
 						"body": {
 							"mode": "raw",
-							"raw": "{\n  \"username\": \"quizmaster\",\n  \"email\": \"player@example.com\",\n  \"phone\": \"+1-555-0199\",\n  \"password\": \"secretpassword123\"\n}"
+							"raw": "{\n  \"displayName\": \"Omkar\",\n  \"email\": \"test@gmail.com\",\n  \"password\": \"Password123!\"\n}"
 						},
 						"url": {
-							"raw": "{{baseUrl}}/auth/register/validate-basic",
+							"raw": "{{baseUrl}}/auth/signup/send-code",
 							"host": [
 								"{{baseUrl}}"
 							],
 							"path": [
 								"auth",
-								"register",
-								"validate-basic"
+								"signup",
+								"send-code"
 							]
 						},
-						"description": "Registers a new client with username, email, phone (optional), and bcrypt hashed password."
+						"description": "Step 1 of frontend signup flow: submits display name, email, and password. Validates constraints, enforces 60s cooldown and 5 req/15min rate limit, generates 6-digit OTP code, and logs code to console."
 					},
 					"response": []
 				},
 				{
-					"name": "Check Email Availability",
-					"request": {
-						"method": "GET",
-						"header": [
-							{
-								"key": "Accept",
-								"value": "application/json"
-							}
-						],
-						"url": {
-							"raw": "{{baseUrl}}/auth/register/email-check?email=player@example.com",
-							"host": [
-								"{{baseUrl}}"
-							],
-							"path": [
-								"auth",
-								"register",
-								"email-check"
-							],
-							"query": [
-								{
-									"key": "email",
-									"value": "player@example.com"
-								}
-							]
-						},
-						"description": "Checks if an email is already registered."
-					},
-					"response": []
-				},
-				{
-					"name": "Request Email Verification OTP",
+					"name": "Step 2: Resend Verification Code",
 					"request": {
 						"method": "POST",
 						"header": [
@@ -89,25 +58,25 @@
 						],
 						"body": {
 							"mode": "raw",
-							"raw": "{\n  \"email\": \"player@example.com\"\n}"
+							"raw": "{\n  \"email\": \"test@gmail.com\"\n}"
 						},
 						"url": {
-							"raw": "{{baseUrl}}/auth/register/email-request",
+							"raw": "{{baseUrl}}/auth/signup/resend-code",
 							"host": [
 								"{{baseUrl}}"
 							],
 							"path": [
 								"auth",
-								"register",
-								"email-request"
+								"signup",
+								"resend-code"
 							]
 						},
-						"description": "Generates a 6-digit registration OTP, stores it in Redis, and sends it to the email address through the configured SMTP provider."
+						"description": "Resends 6-digit OTP code if 60-second cooldown has passed. If still on cooldown, returns HTTP 429 with remaining seconds."
 					},
 					"response": []
 				},
 				{
-					"name": "Verify Registration Email OTP",
+					"name": "Step 3: Verify and Create Account",
 					"request": {
 						"method": "POST",
 						"header": [
@@ -122,86 +91,20 @@
 						],
 						"body": {
 							"mode": "raw",
-							"raw": "{\n  \"email\": \"player@example.com\",\n  \"otp\": \"{{otp}}\"\n}"
+							"raw": "{\n  \"email\": \"test@gmail.com\",\n  \"code\": \"123456\"\n}"
 						},
 						"url": {
-							"raw": "{{baseUrl}}/auth/register/email-verify",
+							"raw": "{{baseUrl}}/auth/signup/verify",
 							"host": [
 								"{{baseUrl}}"
 							],
 							"path": [
 								"auth",
-								"register",
-								"email-verify"
+								"signup",
+								"verify"
 							]
 						},
-						"description": "Verifies the registration email OTP against Redis."
-					},
-					"response": []
-				},
-				{
-					"name": "Request Phone Verification OTP",
-					"request": {
-						"method": "POST",
-						"header": [
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							},
-							{
-								"key": "Accept",
-								"value": "application/json"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n  \"phone\": \"+1-555-0199\"\n}"
-						},
-						"url": {
-							"raw": "{{baseUrl}}/auth/register/phone-request",
-							"host": [
-								"{{baseUrl}}"
-							],
-							"path": [
-								"auth",
-								"register",
-								"phone-request"
-							]
-						},
-						"description": "Generates a phone verification OTP stored in Redis."
-					},
-					"response": []
-				},
-				{
-					"name": "Verify Phone OTP",
-					"request": {
-						"method": "POST",
-						"header": [
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							},
-							{
-								"key": "Accept",
-								"value": "application/json"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n  \"phone\": \"+1-555-0199\",\n  \"otp\": \"{{otp}}\"\n}"
-						},
-						"url": {
-							"raw": "{{baseUrl}}/auth/register/phone-verify",
-							"host": [
-								"{{baseUrl}}"
-							],
-							"path": [
-								"auth",
-								"register",
-								"phone-verify"
-							]
-						},
-						"description": "Verifies the phone registration OTP."
+						"description": "Step 2 of frontend signup flow: verifies 6-digit OTP code, creates the user account in PostgreSQL, generates JWT access and refresh tokens, sets HTTP-only auth cookies, and logs the user in."
 					},
 					"response": []
 				}
