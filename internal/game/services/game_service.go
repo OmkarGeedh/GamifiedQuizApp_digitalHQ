@@ -16,8 +16,16 @@ import (
 	"gorm.io/gorm"
 )
 
-// Default time limit per question in seconds.
-const DefaultTimeLimitSec = 15
+const (
+	// Default time limit per question in seconds.
+	DefaultTimeLimitSec    = 15
+	MCQCorrectAnswerPoints = 10
+	CompletionXP          = 20
+	CorrectAnswerXP       = 5
+	PerfectQuizBonusXP    = 10
+	CompletionCoins       = 10
+	AccuracyBonusCoins    = 5
+)
 
 // --- Session Management ---
 
@@ -194,7 +202,6 @@ func EvaluateAnswer(ctx context.Context, clientID int, req *dto.SubmitAnswerRequ
 			session.BestStreak = session.ComboStreak
 		}
 		pointsEarned = CalculatePoints(questionPoints, questionDifficulty, req.TimeTakenMs, session.ComboStreak)
-		coinsEarned = CalculateCoins(pointsEarned)
 		session.CorrectCount++
 	} else {
 		session.ComboStreak = 0
@@ -319,7 +326,7 @@ func CompleteSession(ctx context.Context, clientID int, req *dto.CompleteSession
 	}
 
 	// Calculate rewards
-	coins, xp, gems := CalculateGameRewards(session.Score, session.CorrectCount, session.TotalQuestions)
+	reward := CalculateGameRewards(session.Score, session.CorrectCount, session.TotalQuestions)
 
 	// Fetch current profile for level calculation
 	profile, err := profileServices.GetOrCreateProfile(ctx, clientID)
@@ -327,18 +334,20 @@ func CompleteSession(ctx context.Context, clientID int, req *dto.CompleteSession
 		return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch profile: %w", err)
 	}
 	oldLevel := profile.Level
-	newExperience := profile.Experience + xp
+	newExperience := profile.Experience + reward.XP
 	newLevel := CalculateNewLevel(newExperience)
 	didLevelUp := newLevel > oldLevel
 
 	// Level-up bonus
 	if didLevelUp {
-		coins += (newLevel - oldLevel) * 50
-		gems += (newLevel - oldLevel)
+		levelBonusCoins := (newLevel - oldLevel) * 50
+		reward.Coins += levelBonusCoins
+		reward.Gems += (newLevel - oldLevel)
+		reward.CoinBreakdown["level_up_bonus_coins"] = levelBonusCoins
 	}
 
 	// Atomic finalization: session + ledger + profile update
-	if err := repository.FinalizeSession(ctx, session, coins, xp, gems); err != nil {
+	if err := repository.FinalizeSession(ctx, session, reward.Coins, reward.XP, reward.Gems); err != nil {
 		return nil, http.StatusInternalServerError, fmt.Errorf("failed to finalize session: %w", err)
 	}
 
@@ -362,9 +371,13 @@ func CompleteSession(ctx context.Context, clientID int, req *dto.CompleteSession
 		CorrectCount:       session.CorrectCount,
 		AccuracyPercentage: accuracy,
 		FinalScore:         session.Score,
-		CoinsAwarded:       coins,
-		XPAwarded:          xp,
-		GemsAwarded:        gems,
+		MaxScore:           CalculateMaxScore(session.TotalQuestions),
+		CoinsAwarded:       reward.Coins,
+		XPAwarded:          reward.XP,
+		GemsAwarded:        reward.Gems,
+		ScoreBreakdown:     map[string]int{"correct_answer_points": session.Score, "bonus_points": 0},
+		XPBreakdown:        reward.XPBreakdown,
+		CoinBreakdown:      reward.CoinBreakdown,
 		Level: dto.LevelInfoDTO{
 			Current:      newLevel,
 			DidLevelUp:   didLevelUp,
@@ -380,69 +393,81 @@ func CompleteSession(ctx context.Context, clientID int, req *dto.CompleteSession
 
 // --- Scoring Formulas ---
 
-// CalculatePoints computes points for a correct answer.
-// Base points are multiplied by difficulty factor, speed bonus, and combo multiplier.
-func CalculatePoints(basePoints, difficulty, timeTakenMs, comboStreak int) int {
-	difficultyMultiplier := 1.0
-	switch difficulty {
-	case 2:
-		difficultyMultiplier = 1.5
-	case 3:
-		difficultyMultiplier = 2.0
-	}
-
-	// Speed bonus: answering in under 50% of time limit gets up to 50% bonus
-	timeLimitMs := DefaultTimeLimitSec * 1000
-	speedFactor := 1.0
-	if timeTakenMs > 0 && timeTakenMs < timeLimitMs {
-		ratio := float64(timeTakenMs) / float64(timeLimitMs)
-		if ratio < 0.5 {
-			speedFactor = 1.5
-		} else if ratio < 0.75 {
-			speedFactor = 1.25
-		}
-	}
-
-	// Combo streak multiplier
-	comboMultiplier := 1.0
-	switch {
-	case comboStreak >= 7:
-		comboMultiplier = 2.0
-	case comboStreak >= 5:
-		comboMultiplier = 1.5
-	case comboStreak >= 3:
-		comboMultiplier = 1.2
-	}
-
-	raw := float64(basePoints) * difficultyMultiplier * speedFactor * comboMultiplier
-	return int(math.Round(raw))
+// CalculatePoints computes deterministic MVP points for a correct answer.
+// Difficulty, speed, combo streaks, and power-ups do not modify score yet.
+func CalculatePoints(_, _, _, _ int) int {
+	return MCQCorrectAnswerPoints
 }
 
-// CalculateCoins derives coins from points earned per question.
-func CalculateCoins(pointsEarned int) int {
-	return int(math.Ceil(float64(pointsEarned) / 5.0))
+// CalculateCoins is retained for API compatibility. MCQ coins are awarded only
+// on session completion, not per question.
+func CalculateCoins(_ int) int {
+	return 0
 }
 
-// CalculateGameRewards computes total coins, XP, and gems for a completed session.
-func CalculateGameRewards(totalScore, correctCount, totalQuestions int) (coins, xp, gems int) {
-	coins = int(math.Ceil(float64(totalScore) / 5.0))
-	xp = int(math.Ceil(float64(totalScore) / 2.0))
-	gems = 0
+type GameRewardSummary struct {
+	Coins         int
+	XP            int
+	Gems          int
+	XPBreakdown   map[string]int
+	CoinBreakdown map[string]int
+}
+
+// CalculateGameRewards computes deterministic completion rewards.
+func CalculateGameRewards(_ int, correctCount, totalQuestions int) GameRewardSummary {
+	xpBreakdown := map[string]int{
+		"completion_xp":      CompletionXP,
+		"correct_answer_xp":  correctCount * CorrectAnswerXP,
+		"perfect_bonus_xp":   0,
+	}
+	coinBreakdown := map[string]int{
+		"completion_coins":     CompletionCoins,
+		"accuracy_bonus_coins": 0,
+	}
 
 	if totalQuestions > 0 {
 		accuracy := float64(correctCount) / float64(totalQuestions)
 		if accuracy >= 1.0 {
-			gems = 3 // Perfect game
+			xpBreakdown["perfect_bonus_xp"] = PerfectQuizBonusXP
+		}
+		if accuracy >= 0.8 {
+			coinBreakdown["accuracy_bonus_coins"] = AccuracyBonusCoins
+		}
+	}
+
+	xp := 0
+	for _, value := range xpBreakdown {
+		xp += value
+	}
+	coins := 0
+	for _, value := range coinBreakdown {
+		coins += value
+	}
+
+	gems := 0
+	if totalQuestions > 0 {
+		accuracy := float64(correctCount) / float64(totalQuestions)
+		if accuracy >= 1.0 {
+			gems = 3
 		} else if accuracy >= 0.8 {
 			gems = 1
 		}
 	}
 
-	// Completion bonus
-	coins += 5
-	xp += 10
+	return GameRewardSummary{
+		Coins:         coins,
+		XP:            xp,
+		Gems:          gems,
+		XPBreakdown:   xpBreakdown,
+		CoinBreakdown: coinBreakdown,
+	}
+}
 
-	return coins, xp, gems
+func CalculateMaxScore(totalQuestions int) int {
+	if totalQuestions <= 0 {
+		return 0
+	}
+	return totalQuestions * MCQCorrectAnswerPoints
 }
 
 // CalculateNewLevel determines the player's level based on total experience.
@@ -513,7 +538,7 @@ func SessionQuestionToDTO(sq models.SessionQuestion, includeCorrect bool) dto.Qu
 	d := dto.QuestionDTO{
 		Question: sq.QuestionCode,
 		Prompt:   sq.Prompt,
-		Points:   sq.Points,
+		Points:   MCQCorrectAnswerPoints,
 		Hint:     sq.Hint,
 		Options: []dto.OptionDTO{
 			{Option: "a", Text: sq.OptionA},

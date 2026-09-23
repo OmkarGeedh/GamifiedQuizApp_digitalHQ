@@ -170,14 +170,18 @@ type StreakInfoDTO struct {
 
 // SessionCompleteResponseDTO is the final game summary after quiz completion.
 type SessionCompleteResponseDTO struct {
-	Session            string       `json:"session"`
-	TotalQuestions     int          `json:"total_questions"`
-	CorrectCount       int          `json:"correct_count"`
-	AccuracyPercentage float64      `json:"accuracy_percentage"`
-	FinalScore         int          `json:"final_score"`
-	CoinsAwarded       int          `json:"coins_awarded"`
-	XPAwarded          int          `json:"xp_awarded"`
-	GemsAwarded        int          `json:"gems_awarded"`
-	Level              LevelInfoDTO `json:"level"`
-	Streak             StreakInfoDTO `json:"streak"`
+	Session            string         `json:"session"`
+	TotalQuestions     int            `json:"total_questions"`
+	CorrectCount       int            `json:"correct_count"`
+	AccuracyPercentage float64        `json:"accuracy_percentage"`
+	FinalScore         int            `json:"final_score"`
+	MaxScore           int            `json:"max_score"`
+	CoinsAwarded       int            `json:"coins_awarded"`
+	XPAwarded          int            `json:"xp_awarded"`
+	GemsAwarded        int            `json:"gems_awarded"`
+	ScoreBreakdown     map[string]int `json:"score_breakdown"`
+	XPBreakdown        map[string]int `json:"xp_breakdown"`
+	CoinBreakdown      map[string]int `json:"coin_breakdown"`
+	Level              LevelInfoDTO   `json:"level"`
+	Streak             StreakInfoDTO  `json:"streak"`
 }

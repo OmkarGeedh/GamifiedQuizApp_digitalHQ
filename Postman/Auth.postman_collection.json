@@ -102,7 +102,7 @@
 								"email-request"
 							]
 						},
-						"description": "Generates a 6-digit registration OTP stored in Redis and logged on the server."
+						"description": "Generates a 6-digit registration OTP, stores it in Redis, and sends it to the email address through the configured SMTP provider."
 					},
 					"response": []
 				},

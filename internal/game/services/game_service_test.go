@@ -6,95 +6,114 @@ import (
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/game/models"
 )
 
-func TestCalculatePoints_EasyQuick(t *testing.T) {
-	// Easy question, answered very fast (under 50% time), no combo
-	points := CalculatePoints(10, 1, 3000, 1)
-	// Base 10 * diff 1.0 * speed 1.5 * combo 1.0 = 15
-	if points != 15 {
-		t.Errorf("expected 15, got %d", points)
-	}
-}
-
-func TestCalculatePoints_MediumMediumSpeed(t *testing.T) {
-	// Medium question, 60% time used, combo streak 3
-	points := CalculatePoints(15, 2, 9000, 3)
-	// Base 15 * diff 1.5 * speed 1.25 * combo 1.2 = 33.75 → 34
-	if points != 34 {
-		t.Errorf("expected 34, got %d", points)
-	}
-}
-
-func TestCalculatePoints_HardSlowHighCombo(t *testing.T) {
-	// Hard question, slow answer (>75%), combo streak 7
-	points := CalculatePoints(20, 3, 13000, 7)
-	// Base 20 * diff 2.0 * speed 1.0 * combo 2.0 = 80
-	if points != 80 {
-		t.Errorf("expected 80, got %d", points)
-	}
-}
-
-func TestCalculatePoints_ZeroTime(t *testing.T) {
-	// Zero time (should not crash, no speed bonus)
-	points := CalculatePoints(10, 1, 0, 1)
-	if points != 10 {
-		t.Errorf("expected 10, got %d", points)
-	}
-}
-
-func TestCalculateCoins(t *testing.T) {
+func TestCalculatePoints_DeterministicForCorrectAnswers(t *testing.T) {
 	tests := []struct {
-		points   int
-		expected int
+		name        string
+		basePoints  int
+		difficulty  int
+		timeTakenMs int
+		comboStreak int
 	}{
-		{10, 2},
-		{15, 3},
-		{0, 0},
-		{1, 1},
-		{100, 20},
+		{"easy quick", 10, 1, 3000, 1},
+		{"medium medium speed", 15, 2, 9000, 3},
+		{"hard slow high combo", 20, 3, 13000, 7},
+		{"zero time", 10, 1, 0, 1},
 	}
+
 	for _, tt := range tests {
-		got := CalculateCoins(tt.points)
-		if got != tt.expected {
-			t.Errorf("CalculateCoins(%d): expected %d, got %d", tt.points, tt.expected, got)
+		t.Run(tt.name, func(t *testing.T) {
+			points := CalculatePoints(tt.basePoints, tt.difficulty, tt.timeTakenMs, tt.comboStreak)
+			if points != MCQCorrectAnswerPoints {
+				t.Errorf("expected %d, got %d", MCQCorrectAnswerPoints, points)
+			}
+		})
+	}
+}
+
+func TestCalculateCoins_NoPerQuestionCoins(t *testing.T) {
+	tests := []int{0, 1, 10, 15, 100}
+	for _, points := range tests {
+		got := CalculateCoins(points)
+		if got != 0 {
+			t.Errorf("CalculateCoins(%d): expected 0, got %d", points, got)
 		}
 	}
 }
 
 func TestCalculateGameRewards_PerfectGame(t *testing.T) {
-	coins, xp, gems := CalculateGameRewards(100, 10, 10)
-	// coins = ceil(100/5) + 5 = 25
-	// xp = ceil(100/2) + 10 = 60
-	// gems = 3 (perfect game)
-	if coins != 25 {
-		t.Errorf("expected coins 25, got %d", coins)
+	reward := CalculateGameRewards(50, 5, 5)
+	if reward.Coins != 15 {
+		t.Errorf("expected coins 15, got %d", reward.Coins)
 	}
-	if xp != 60 {
-		t.Errorf("expected xp 60, got %d", xp)
+	if reward.XP != 55 {
+		t.Errorf("expected xp 55, got %d", reward.XP)
 	}
-	if gems != 3 {
-		t.Errorf("expected gems 3, got %d", gems)
+	if reward.Gems != 3 {
+		t.Errorf("expected gems 3, got %d", reward.Gems)
+	}
+	if reward.XPBreakdown["completion_xp"] != 20 ||
+		reward.XPBreakdown["correct_answer_xp"] != 25 ||
+		reward.XPBreakdown["perfect_bonus_xp"] != 10 {
+		t.Errorf("unexpected XP breakdown: %+v", reward.XPBreakdown)
+	}
+	if reward.CoinBreakdown["completion_coins"] != 10 ||
+		reward.CoinBreakdown["accuracy_bonus_coins"] != 5 {
+		t.Errorf("unexpected coin breakdown: %+v", reward.CoinBreakdown)
 	}
 }
 
 func TestCalculateGameRewards_GoodAccuracy(t *testing.T) {
-	coins, xp, gems := CalculateGameRewards(80, 8, 10)
-	// gems = 1 (80% accuracy)
-	if gems != 1 {
-		t.Errorf("expected gems 1, got %d", gems)
+	reward := CalculateGameRewards(40, 4, 5)
+	if reward.Gems != 1 {
+		t.Errorf("expected gems 1, got %d", reward.Gems)
 	}
-	if coins <= 0 {
-		t.Errorf("expected positive coins, got %d", coins)
+	if reward.Coins != 15 {
+		t.Errorf("expected coins 15, got %d", reward.Coins)
 	}
-	if xp <= 0 {
-		t.Errorf("expected positive xp, got %d", xp)
+	if reward.XP != 40 {
+		t.Errorf("expected xp 40, got %d", reward.XP)
 	}
 }
 
 func TestCalculateGameRewards_PoorAccuracy(t *testing.T) {
-	_, _, gems := CalculateGameRewards(30, 3, 10)
-	// gems = 0 (30% accuracy)
-	if gems != 0 {
-		t.Errorf("expected gems 0, got %d", gems)
+	reward := CalculateGameRewards(10, 1, 5)
+	if reward.Gems != 0 {
+		t.Errorf("expected gems 0, got %d", reward.Gems)
+	}
+	if reward.Coins != 10 {
+		t.Errorf("expected completion-only coins 10, got %d", reward.Coins)
+	}
+	if reward.XP != 25 {
+		t.Errorf("expected xp 25, got %d", reward.XP)
+	}
+}
+
+func TestRewardBreakdownSumsMatchAwardedTotals(t *testing.T) {
+	reward := CalculateGameRewards(40, 4, 5)
+
+	xpSum := 0
+	for _, value := range reward.XPBreakdown {
+		xpSum += value
+	}
+	if xpSum != reward.XP {
+		t.Errorf("expected XP breakdown sum %d to match awarded XP %d", xpSum, reward.XP)
+	}
+
+	coinSum := 0
+	for _, value := range reward.CoinBreakdown {
+		coinSum += value
+	}
+	if coinSum != reward.Coins {
+		t.Errorf("expected coin breakdown sum %d to match awarded coins %d", coinSum, reward.Coins)
+	}
+}
+
+func TestCalculateMaxScore(t *testing.T) {
+	if got := CalculateMaxScore(5); got != 50 {
+		t.Errorf("expected max score 50, got %d", got)
+	}
+	if got := CalculateMaxScore(0); got != 0 {
+		t.Errorf("expected max score 0, got %d", got)
 	}
 }
 
@@ -105,8 +124,8 @@ func TestCalculateNewLevel(t *testing.T) {
 	}{
 		{0, 1},
 		{50, 1},
-		{100, 2},  // Level 1 requires 100 XP
-		{250, 2},  // Level 2 requires 300 XP (100+300 = 400 needed for level 3)
+		{100, 2},
+		{250, 2},
 		{400, 3},
 		{1000, 4},
 	}
@@ -118,31 +137,6 @@ func TestCalculateNewLevel(t *testing.T) {
 	}
 }
 
-func TestCalculatePoints_ComboTiers(t *testing.T) {
-	base := 10
-	difficulty := 1
-	timeMs := 14000 // Slow (>75%), no speed bonus
-
-	// No combo (streak 0)
-	p0 := CalculatePoints(base, difficulty, timeMs, 0)
-	// Combo 3 (1.2x)
-	p3 := CalculatePoints(base, difficulty, timeMs, 3)
-	// Combo 5 (1.5x)
-	p5 := CalculatePoints(base, difficulty, timeMs, 5)
-	// Combo 7 (2.0x)
-	p7 := CalculatePoints(base, difficulty, timeMs, 7)
-
-	if p3 <= p0 {
-		t.Errorf("combo 3 (%d) should be greater than no combo (%d)", p3, p0)
-	}
-	if p5 <= p3 {
-		t.Errorf("combo 5 (%d) should be greater than combo 3 (%d)", p5, p3)
-	}
-	if p7 <= p5 {
-		t.Errorf("combo 7 (%d) should be greater than combo 5 (%d)", p7, p5)
-	}
-}
-
 func TestShuffleQuestion_PreservesOptionsAndMapsCorrectAnswer(t *testing.T) {
 	orig := models.Question{
 		QuestionCode:  "42",
@@ -151,7 +145,7 @@ func TestShuffleQuestion_PreservesOptionsAndMapsCorrectAnswer(t *testing.T) {
 		OptionB:       "Berlin",
 		OptionC:       "Madrid",
 		OptionD:       "Rome",
-		CorrectOption: "a", // Paris
+		CorrectOption: "a",
 		Points:        10,
 		Difficulty:    1,
 	}
@@ -162,7 +156,6 @@ func TestShuffleQuestion_PreservesOptionsAndMapsCorrectAnswer(t *testing.T) {
 			t.Fatalf("QuestionCode changed: %s", shuffled.QuestionCode)
 		}
 
-		// Ensure all original texts are present in shuffled options
 		seen := map[string]bool{}
 		for _, opt := range []string{shuffled.OptionA, shuffled.OptionB, shuffled.OptionC, shuffled.OptionD} {
 			seen[opt] = true
@@ -173,7 +166,6 @@ func TestShuffleQuestion_PreservesOptionsAndMapsCorrectAnswer(t *testing.T) {
 			}
 		}
 
-		// Ensure CorrectOption accurately points to "Paris"
 		var correctText string
 		switch shuffled.CorrectOption {
 		case "a":
@@ -212,12 +204,9 @@ func TestShuffleQuestion_UniformDistribution(t *testing.T) {
 		counts[sq.CorrectOption]++
 	}
 
-	// Each option should be selected roughly 25% of the time (100 times out of 400)
-	// Allow wide tolerance [40, 180] to avoid flaky tests
 	for letter, count := range counts {
 		if count < 40 || count > 180 {
 			t.Errorf("Option %s frequency %d out of %d is outside expected distribution", letter, count, trials)
 		}
 	}
 }
-

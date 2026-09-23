@@ -15,6 +15,7 @@ import (
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/auth/client/models"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/auth/client/repository"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/config"
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/mailer"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/utils"
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
@@ -443,37 +444,40 @@ func ResetPasswordVerifyService(ctx context.Context, req *dto.ResetPasswordVerif
 // REGISTRATION OTP SERVICES
 // -----------------------------------------------------------------------------
 
-func RegisterEmailRequestService(ctx context.Context, req *dto.RegisterEmailRequest) (string, int, error) {
+func RegisterEmailRequestService(ctx context.Context, req *dto.RegisterEmailRequest) (int, error) {
 	if req.Email == "" {
-		return "", http.StatusBadRequest, errors.New("email is required")
+		return http.StatusBadRequest, errors.New("email is required")
 	}
 
 	exists, err := repository.CheckEmailExists(ctx, req.Email)
 	if err != nil {
-		return "", http.StatusInternalServerError, fmt.Errorf("database query error: %w", err)
+		return http.StatusInternalServerError, fmt.Errorf("database query error: %w", err)
 	}
 	if exists {
-		return "", http.StatusConflict, errors.New("email already in use")
+		return http.StatusConflict, errors.New("email already in use")
 	}
 
 	otp, err := utils.GenerateOtp(6)
 	if err != nil {
-		return "", http.StatusInternalServerError, errors.New("failed to generate OTP")
+		return http.StatusInternalServerError, errors.New("failed to generate OTP")
 	}
 
-	if config.RedisClient != nil {
-		err = config.RedisClient.Set(ctx, "register-email-otp:"+req.Email, otp, 5*time.Minute).Err()
-		if err != nil {
-			return "", http.StatusInternalServerError, fmt.Errorf("failed to save OTP in Redis: %w", err)
-		}
+	if config.RedisClient == nil {
+		return http.StatusServiceUnavailable, errors.New("email verification is temporarily unavailable")
 	}
 
-	// Log Registration Email OTP prominently
-	log.Printf("================================================================")
-	log.Printf("[REGISTER EMAIL OTP] Generated OTP: >>> %s <<< for Email: %s", otp, req.Email)
-	log.Printf("================================================================")
+	otpKey := "register-email-otp:" + req.Email
+	if err = config.RedisClient.Set(ctx, otpKey, otp, 5*time.Minute).Err(); err != nil {
+		return http.StatusInternalServerError, fmt.Errorf("failed to save OTP in Redis: %w", err)
+	}
 
-	return otp, http.StatusOK, nil
+	if err = mailer.SendRegistrationOTP(req.Email, otp); err != nil {
+		_ = config.RedisClient.Del(ctx, otpKey).Err()
+		log.Printf("[REGISTER EMAIL OTP] Delivery failed for %s: %v", req.Email, err)
+		return http.StatusBadGateway, errors.New("unable to send verification email. Please try again")
+	}
+
+	return http.StatusOK, nil
 }
 
 func RegisterEmailVerifyService(ctx context.Context, req *dto.RegisterEmailVerifyRequest) (int, error) {
@@ -481,22 +485,24 @@ func RegisterEmailVerifyService(ctx context.Context, req *dto.RegisterEmailVerif
 		return http.StatusBadRequest, errors.New("email and OTP required")
 	}
 
-	storedOTP := ""
-	if config.RedisClient != nil {
-		var err error
-		storedOTP, err = config.RedisClient.Get(ctx, "register-email-otp:"+req.Email).Result()
-		if err != nil {
-			return http.StatusUnauthorized, errors.New("no OTP requested or expired")
-		}
+	if config.RedisClient == nil {
+		return http.StatusServiceUnavailable, errors.New("email verification is temporarily unavailable")
+	}
+
+	storedOTP, err := config.RedisClient.Get(ctx, "register-email-otp:"+req.Email).Result()
+	if err != nil {
+		return http.StatusUnauthorized, errors.New("no OTP requested or expired")
 	}
 
 	if subtle.ConstantTimeCompare([]byte(storedOTP), []byte(req.OTP)) != 1 {
 		return http.StatusUnauthorized, errors.New("invalid OTP")
 	}
 
-	if config.RedisClient != nil {
-		_ = config.RedisClient.Del(ctx, "register-email-otp:"+req.Email).Err()
-		_ = config.RedisClient.Set(ctx, "register-verified:email:"+req.Email, "verified", 15*time.Minute).Err()
+	if err = config.RedisClient.Del(ctx, "register-email-otp:"+req.Email).Err(); err != nil {
+		return http.StatusInternalServerError, errors.New("failed to complete email verification")
+	}
+	if err = config.RedisClient.Set(ctx, "register-verified:email:"+req.Email, "verified", 15*time.Minute).Err(); err != nil {
+		return http.StatusInternalServerError, errors.New("failed to complete email verification")
 	}
 
 	return http.StatusOK, nil

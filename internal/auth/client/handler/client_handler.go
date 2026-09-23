@@ -265,16 +265,13 @@ func RegisterEmailRequestHandler(c *gin.Context) {
 		return
 	}
 
-	otp, status, err := services.RegisterEmailRequestService(c.Request.Context(), &req)
+	status, err := services.RegisterEmailRequestService(c.Request.Context(), &req)
 	if err != nil {
 		response.Error(c, status, err.Error())
 		return
 	}
 
-	response.Success(c, status, "Registration email OTP sent successfully", gin.H{
-		"message": "Registration email OTP sent successfully",
-		"otp":     otp,
-	})
+	response.Success(c, status, "Registration email OTP sent successfully", gin.H{})
 }
 
 func RegisterEmailVerifyHandler(c *gin.Context) {
