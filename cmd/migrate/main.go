@@ -34,6 +34,9 @@ func main() {
 		if err := db.AutoMigrate(pgDB); err != nil {
 			log.Fatalf("Migration failed: %v\n", err)
 		}
+		if err := db.RunSQLMigrations(pgDB); err != nil {
+			log.Fatalf("SQL migration failed: %v\n", err)
+		}
 		_ = db.Status(pgDB)
 
 	case "down", "drop":

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -257,3 +259,104 @@ func Status(db *gorm.DB) error {
 	log.Println("================================================================")
 	return nil
 }
+
+// RunSQLMigrations discovers all *.up.sql files in migrations/ and applies any that haven't been run yet.
+func RunSQLMigrations(db *gorm.DB) error {
+	log.Println("==> Checking and running pending SQL migrations...")
+
+	// 1. Ensure schema_migrations table exists
+	createTableSQL := `
+	CREATE TABLE IF NOT EXISTS schema_migrations (
+		version VARCHAR(255) PRIMARY KEY,
+		applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);`
+	if err := db.Exec(createTableSQL).Error; err != nil {
+		return fmt.Errorf("failed to create schema_migrations table: %w", err)
+	}
+
+	// 2. Discover migrations directory
+	candidateDirs := []string{
+		"migrations",
+		"./migrations",
+		"/app/migrations",
+		"../migrations",
+	}
+	var migDir string
+	for _, d := range candidateDirs {
+		if stat, err := os.Stat(d); err == nil && stat.IsDir() {
+			migDir = d
+			break
+		}
+	}
+	if migDir == "" {
+		log.Println("==> No migrations directory found, skipping SQL migrations.")
+		return nil
+	}
+
+	// 3. Find all *.up.sql files
+	entries, err := os.ReadDir(migDir)
+	if err != nil {
+		return fmt.Errorf("failed to read migrations directory: %w", err)
+	}
+
+	var upFiles []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".up.sql") {
+			upFiles = append(upFiles, e.Name())
+		}
+	}
+	sort.Strings(upFiles)
+
+	// 4. Fetch already applied migration versions
+	var applied []string
+	if err := db.Table("schema_migrations").Pluck("version", &applied).Error; err != nil {
+		return fmt.Errorf("failed to fetch applied migrations: %w", err)
+	}
+	appliedMap := make(map[string]bool, len(applied))
+	for _, v := range applied {
+		appliedMap[v] = true
+	}
+
+	// 5. Apply any unapplied migrations in order
+	appliedCount := 0
+	for _, file := range upFiles {
+		if appliedMap[file] {
+			continue
+		}
+
+		filePath := filepath.Join(migDir, file)
+		content, err := os.ReadFile(filePath)
+		if err != nil {
+			return fmt.Errorf("failed to read migration file %s: %w", file, err)
+		}
+
+		sqlContent := string(content)
+		if strings.TrimSpace(sqlContent) == "" {
+			continue
+		}
+
+		log.Printf("==> Applying SQL migration: %s\n", file)
+		tx := db.Begin()
+		if err := tx.Exec(sqlContent).Error; err != nil {
+			tx.Rollback()
+			return fmt.Errorf("failed executing migration %s: %w", file, err)
+		}
+		if err := tx.Exec("INSERT INTO schema_migrations (version) VALUES (?)", file).Error; err != nil {
+			tx.Rollback()
+			return fmt.Errorf("failed recording migration %s: %w", file, err)
+		}
+		if err := tx.Commit().Error; err != nil {
+			return fmt.Errorf("failed committing migration %s: %w", file, err)
+		}
+		appliedCount++
+		log.Printf("==> Successfully applied migration: %s\n", file)
+	}
+
+	if appliedCount == 0 {
+		log.Println("==> All SQL migrations are already up to date.")
+	} else {
+		log.Printf("==> Completed running %d SQL migration(s).\n", appliedCount)
+	}
+	return nil
+}
+

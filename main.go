@@ -40,6 +40,11 @@ func main() {
 		log.Printf("Warning: Database AutoMigrate failed: %v\n", err)
 	}
 
+	// Run pending SQL migrations before starting server (tracked in schema_migrations)
+	if err := db.RunSQLMigrations(pgDB); err != nil {
+		log.Printf("Warning: Database SQL migrations failed: %v\n", err)
+	}
+
 	// 3. Initialize Redis connection
 	redisAddr := config.AppConfig.Redis.Endpoint()
 	redisPassword := config.AppConfig.Redis.Password
