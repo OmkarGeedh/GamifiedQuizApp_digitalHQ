@@ -3,6 +3,8 @@ package dto
 import (
 	"errors"
 	"strings"
+
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/models"
 )
 
 // --- Request DTOs ---
@@ -13,6 +15,9 @@ type CreateSessionRequestDTO struct {
 	QuestionCount int      `json:"question_count"`
 	AbandonStale  bool     `json:"abandon_stale,omitempty"`
 	QuestionCodes []string `json:"question_codes,omitempty"`
+	// GameMode selects the rules the session runs under. Omitted means "mcq",
+	// which preserves the original answer-every-question flow.
+	GameMode string `json:"game_mode,omitempty"`
 }
 
 // Validate ensures the request has sane defaults and limits.
@@ -28,6 +33,18 @@ func (r *CreateSessionRequestDTO) Validate() error {
 	}
 	if r.QuestionCount > 25 {
 		return errors.New("question_count must not exceed 25")
+	}
+
+	// Normalize and validate the mode. An empty value keeps the historical
+	// default rather than erroring, so older clients that never send the field
+	// keep working unchanged.
+	r.GameMode = strings.ToLower(strings.TrimSpace(r.GameMode))
+	switch r.GameMode {
+	case "":
+		r.GameMode = models.GameModeMCQ
+	case models.GameModeMCQ, models.GameModeSuddenDeath:
+	default:
+		return errors.New("game_mode must be 'mcq' or 'sudden_death'")
 	}
 	return nil
 }
@@ -144,6 +161,7 @@ type TopicQuestionsResponseDTO struct {
 type SessionCreatedResponseDTO struct {
 	Session        string        `json:"session"`
 	Topic          string        `json:"topic"`
+	GameMode       string        `json:"game_mode"`
 	TotalQuestions int           `json:"total_questions"`
 	TimeLimitSec   int           `json:"time_limit_sec"`
 	Questions      []QuestionDTO `json:"questions"`

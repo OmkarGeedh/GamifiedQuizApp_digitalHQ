@@ -126,8 +126,14 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 		}
 	}
 
+	// Determine target question type for this mode
+	targetType := models.GameModeMCQ
+	if req.GameMode == models.GameModeSuddenDeath {
+		targetType = models.GameModeSuddenDeath
+	}
+
 	// Validate topic has enough questions
-	count, err := repo.CountQuestionsByTopic(ctx, req.TopicID)
+	count, err := repo.CountQuestionsByTopicAndMode(ctx, req.TopicID, targetType)
 	if err != nil {
 		return nil, http.StatusInternalServerError, fmt.Errorf("failed to check question count: %w", err)
 	}
@@ -149,7 +155,7 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 	}
 	if len(questions) == 0 {
 		var err error
-		questions, err = repo.GetQuestionsByTopic(ctx, req.TopicID, req.QuestionCount)
+		questions, err = repo.GetQuestionsByTopicAndMode(ctx, req.TopicID, targetType, req.QuestionCount)
 		if err != nil {
 			return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch questions: %w", err)
 		}
@@ -172,6 +178,7 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 	session := &models.GameSession{
 		ClientID:       clientID,
 		TopicID:        req.TopicID,
+		GameMode:       req.GameMode,
 		TotalQuestions: len(sessionQuestions),
 		Status:         models.SessionStatusInProgress,
 	}
@@ -188,6 +195,7 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 	return &dto.SessionCreatedResponseDTO{
 		Session:        session.ID,
 		Topic:          session.TopicID,
+		GameMode:       session.GameMode,
 		TotalQuestions: session.TotalQuestions,
 		TimeLimitSec:   DefaultTimeLimitSec,
 		Questions:      questionDTOs,
@@ -654,20 +662,27 @@ func ShuffleQuestion(q models.Question) models.SessionQuestion {
 		}
 	}
 
-	options := []rawOption{
-		{origLetter: "a", text: q.OptionA},
-		{origLetter: "b", text: q.OptionB},
-		{origLetter: "c", text: q.OptionC},
-		{origLetter: "d", text: q.OptionD},
+	var rawOptions []rawOption
+	if strings.TrimSpace(q.OptionA) != "" {
+		rawOptions = append(rawOptions, rawOption{origLetter: "a", text: q.OptionA})
+	}
+	if strings.TrimSpace(q.OptionB) != "" {
+		rawOptions = append(rawOptions, rawOption{origLetter: "b", text: q.OptionB})
+	}
+	if strings.TrimSpace(q.OptionC) != "" {
+		rawOptions = append(rawOptions, rawOption{origLetter: "c", text: q.OptionC})
+	}
+	if strings.TrimSpace(q.OptionD) != "" {
+		rawOptions = append(rawOptions, rawOption{origLetter: "d", text: q.OptionD})
 	}
 
-	rand.Shuffle(len(options), func(i, j int) {
-		options[i], options[j] = options[j], options[i]
+	rand.Shuffle(len(rawOptions), func(i, j int) {
+		rawOptions[i], rawOptions[j] = rawOptions[j], rawOptions[i]
 	})
 
 	letters := []string{"a", "b", "c", "d"}
 	var newCorrect string
-	for i, opt := range options {
+	for i, opt := range rawOptions {
 		if strings.EqualFold(opt.origLetter, origCorrectLetter) || (correctText != "" && strings.EqualFold(strings.TrimSpace(opt.text), strings.TrimSpace(correctText))) {
 			newCorrect = letters[i]
 			break
@@ -677,13 +692,9 @@ func ShuffleQuestion(q models.Question) models.SessionQuestion {
 		newCorrect = "a"
 	}
 
-	return models.SessionQuestion{
+	sq := models.SessionQuestion{
 		QuestionCode:    q.QuestionCode,
 		Prompt:          q.Prompt,
-		OptionA:         options[0].text,
-		OptionB:         options[1].text,
-		OptionC:         options[2].text,
-		OptionD:         options[3].text,
 		CorrectOption:   newCorrect,
 		OriginalCorrect: origCorrectLetter,
 		CorrectText:     correctText,
@@ -692,6 +703,20 @@ func ShuffleQuestion(q models.Question) models.SessionQuestion {
 		Hint:            q.Hint,
 		Explanation:     q.Explanation,
 	}
+	if len(rawOptions) > 0 {
+		sq.OptionA = rawOptions[0].text
+	}
+	if len(rawOptions) > 1 {
+		sq.OptionB = rawOptions[1].text
+	}
+	if len(rawOptions) > 2 {
+		sq.OptionC = rawOptions[2].text
+	}
+	if len(rawOptions) > 3 {
+		sq.OptionD = rawOptions[3].text
+	}
+
+	return sq
 }
 
 // GradeAnswer evaluates whether a player's answer is correct.
@@ -793,17 +818,26 @@ func GradeAnswer(sq *models.SessionQuestion, q *models.Question, option string, 
 
 // SessionQuestionToDTO converts a SessionQuestion into a client-safe DTO.
 func SessionQuestionToDTO(sq models.SessionQuestion, includeCorrect bool) dto.QuestionDTO {
+	opts := make([]dto.OptionDTO, 0, 4)
+	if strings.TrimSpace(sq.OptionA) != "" {
+		opts = append(opts, dto.OptionDTO{Option: "a", Text: sq.OptionA})
+	}
+	if strings.TrimSpace(sq.OptionB) != "" {
+		opts = append(opts, dto.OptionDTO{Option: "b", Text: sq.OptionB})
+	}
+	if strings.TrimSpace(sq.OptionC) != "" {
+		opts = append(opts, dto.OptionDTO{Option: "c", Text: sq.OptionC})
+	}
+	if strings.TrimSpace(sq.OptionD) != "" {
+		opts = append(opts, dto.OptionDTO{Option: "d", Text: sq.OptionD})
+	}
+
 	d := dto.QuestionDTO{
 		Question: sq.QuestionCode,
 		Prompt:   sq.Prompt,
 		Points:   MCQCorrectAnswerPoints,
 		Hint:     sq.Hint,
-		Options: []dto.OptionDTO{
-			{Option: "a", Text: sq.OptionA},
-			{Option: "b", Text: sq.OptionB},
-			{Option: "c", Text: sq.OptionC},
-			{Option: "d", Text: sq.OptionD},
-		},
+		Options:  opts,
 	}
 	if includeCorrect {
 		d.CorrectOption = strings.ToLower(sq.CorrectOption)

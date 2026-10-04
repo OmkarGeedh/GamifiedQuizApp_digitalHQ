@@ -21,6 +21,27 @@ func GetQuestionsByTopic(ctx context.Context, topicID string, limit int) ([]mode
 	return questions, err
 }
 
+// GetQuestionsByTopicAndMode fetches random questions for a given topic and mode (question_type).
+// If no questions match the specific questionType, it falls back to GetQuestionsByTopic.
+func GetQuestionsByTopicAndMode(ctx context.Context, topicID string, questionType string, limit int) ([]models.Question, error) {
+	if questionType == "" {
+		return GetQuestionsByTopic(ctx, topicID, limit)
+	}
+	var questions []models.Question
+	err := GetDB().WithContext(ctx).
+		Where("topic_id = ? AND question_type = ?", topicID, questionType).
+		Order("RANDOM()").
+		Limit(limit).
+		Find(&questions).Error
+	if err != nil {
+		return nil, err
+	}
+	if len(questions) == 0 {
+		return GetQuestionsByTopic(ctx, topicID, limit)
+	}
+	return questions, nil
+}
+
 // GetQuestionsByCodes fetches questions matching the specified question codes,
 // preserving the caller's requested order.
 func GetQuestionsByCodes(ctx context.Context, codes []string) ([]models.Question, error) {
@@ -83,6 +104,26 @@ func CountQuestionsByTopic(ctx context.Context, topicID string) (int64, error) {
 		Where("topic_id = ?", topicID).
 		Count(&count).Error
 	return count, err
+}
+
+// CountQuestionsByTopicAndMode returns the number of questions for a topic and mode.
+// If no questions match the specific questionType, it falls back to CountQuestionsByTopic.
+func CountQuestionsByTopicAndMode(ctx context.Context, topicID string, questionType string) (int64, error) {
+	if questionType == "" {
+		return CountQuestionsByTopic(ctx, topicID)
+	}
+	var count int64
+	err := GetDB().WithContext(ctx).
+		Model(&models.Question{}).
+		Where("topic_id = ? AND question_type = ?", topicID, questionType).
+		Count(&count).Error
+	if err != nil {
+		return 0, err
+	}
+	if count == 0 {
+		return CountQuestionsByTopic(ctx, topicID)
+	}
+	return count, nil
 }
 
 // --- Session Repository ---

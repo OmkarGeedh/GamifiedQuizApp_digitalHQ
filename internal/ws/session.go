@@ -47,6 +47,11 @@ type GameSession struct {
 	fiftyFiftyUsed    bool
 	questionStartTime time.Time
 	timeRemaining     time.Duration
+
+	// endReason records why the run terminated so game_over can distinguish an
+	// elimination from a clean sweep. Empty means the set was completed.
+	// Guarded by mu, like state.
+	endReason string
 }
 
 // sessionEvent is an internal event dispatched to the session goroutine.

@@ -27,6 +27,7 @@ type SessionQuestion struct {
 type Question struct {
 	ID            string    `gorm:"column:id;type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
 	QuestionCode  string    `gorm:"column:question_code;size:20;not null;uniqueIndex" json:"question_code"`
+	QuestionType  string    `gorm:"column:question_type;size:32;not null;default:'mcq';index:idx_questions_type" json:"question_type"`
 	TopicID       string    `gorm:"column:topic_id;size:64;not null;index:idx_questions_topic" json:"topic_id"`
 	Prompt        string    `gorm:"column:prompt;type:text;not null" json:"prompt"`
 	OptionA       string    `gorm:"column:option_a;type:text;not null" json:"option_a"`
@@ -51,6 +52,7 @@ type GameSession struct {
 	ID             string     `gorm:"column:id;type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
 	ClientID       int        `gorm:"column:client_id;not null;index:idx_game_sessions_client;index:idx_game_sessions_client_status,priority:1" json:"client_id"`
 	TopicID        string     `gorm:"column:topic_id;size:64;not null;default:'general'" json:"topic_id"`
+	GameMode       string     `gorm:"column:game_mode;size:20;not null;default:'mcq'" json:"game_mode"`
 	TotalQuestions int        `gorm:"column:total_questions;not null;default:10" json:"total_questions"`
 	CurrentIdx     int        `gorm:"column:current_idx;not null;default:0" json:"current_idx"`
 	Score          int        `gorm:"column:score;not null;default:0" json:"score"`
@@ -67,6 +69,26 @@ type GameSession struct {
 
 func (GameSession) TableName() string {
 	return "game_sessions"
+}
+
+// Game mode constants. The mode is persisted on the session so a reconnecting
+// player resumes the same rules they started with.
+const (
+	// GameModeMCQ is the original survival-free flow: answer every question,
+	// wrong answers only reset the streak, and the run ends after the last one.
+	GameModeMCQ = "mcq"
+	// GameModeSuddenDeath is the elimination flow: the first wrong answer or
+	// timeout terminates the run immediately.
+	GameModeSuddenDeath = "sudden_death"
+)
+
+// IsSuddenDeath reports whether this session uses elimination rules.
+//
+// The comparison is an explicit match on purpose: rows written before the
+// game_mode column existed carry an empty string, and those must keep behaving
+// like GameModeMCQ rather than silently gaining elimination semantics.
+func (s *GameSession) IsSuddenDeath() bool {
+	return s != nil && s.GameMode == GameModeSuddenDeath
 }
 
 // SetQuestions serializes and stores the session's shuffled questions.

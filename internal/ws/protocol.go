@@ -119,7 +119,25 @@ type GameOverPayload struct {
 	NewLevel       int                   `json:"new_level"`
 	DidLevelUp     bool                  `json:"did_level_up"`
 	LevelUpReward  *LevelUpRewardPayload `json:"level_up_reward,omitempty"`
+	// GameMode echoes the session's mode so clients can render mode-specific
+	// copy without having to infer intent from the score.
+	GameMode string `json:"game_mode"`
+	// EndReason is why the run stopped. In Sudden Death it distinguishes an
+	// elimination from a clean sweep, which the score alone cannot express.
+	EndReason string `json:"end_reason"`
+	// EndedEarly is true when the run stopped before every question was
+	// answered, i.e. the player was eliminated.
+	EndedEarly bool `json:"ended_early"`
 }
+
+// End reasons for the game_over frame.
+const (
+	// EndReasonCleared means every question in the set was survived.
+	EndReasonCleared = "cleared"
+	// EndReasonEliminated means Sudden Death ended the run on the first wrong
+	// answer or timeout.
+	EndReasonEliminated = "eliminated"
+)
 
 // LevelUpRewardPayload is separate from the base MCQ reward totals.
 type LevelUpRewardPayload struct {

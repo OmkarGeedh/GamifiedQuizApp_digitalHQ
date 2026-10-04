@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/config"
@@ -175,6 +176,7 @@ func seedQuestions(ctx context.Context, db *gorm.DB) error {
 
 	type seedQuestion struct {
 		QuestionCode  string  `json:"question_code"`
+		QuestionType  string  `json:"question_type"`
 		TopicID       string  `json:"topic_id"`
 		Prompt        string  `json:"prompt"`
 		OptionA       string  `json:"option_a"`
@@ -205,8 +207,13 @@ func seedQuestions(ctx context.Context, db *gorm.DB) error {
 			e := *s.Explanation
 			explanation = &e
 		}
+		qType := strings.TrimSpace(s.QuestionType)
+		if qType == "" {
+			qType = models.GameModeMCQ
+		}
 		q := models.Question{
 			QuestionCode:  s.QuestionCode,
+			QuestionType:  qType,
 			TopicID:       s.TopicID,
 			Prompt:        s.Prompt,
 			OptionA:       s.OptionA,

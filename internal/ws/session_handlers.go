@@ -333,6 +333,15 @@ func (gs *GameSession) handleAnswer(ctx context.Context, rawData json.RawMessage
 		},
 	})
 
+	// Sudden Death: the first genuinely wrong answer ends the run. Skips are
+	// excluded on purpose — a skip is a purchased power-up that bypasses a
+	// question safely, so it must not eliminate the player.
+	if gs.Session.IsSuddenDeath() && !isCorrect && !isSkipped {
+		gs.endReason = EndReasonEliminated
+		gs.handleGameEnd(ctx)
+		return
+	}
+
 	gs.advanceQuestion(ctx, tTimer)
 }
 
@@ -376,6 +385,15 @@ func (gs *GameSession) handleTimeout(ctx context.Context, tTimer *time.Timer) {
 			IsTimeout:     true,
 		},
 	})
+
+	// Sudden Death: letting the clock run out scores exactly like a wrong
+	// answer (zero points, streak reset), so it eliminates too. The player does
+	// get the answer_result frame first and can see what they missed.
+	if gs.Session.IsSuddenDeath() {
+		gs.endReason = EndReasonEliminated
+		gs.handleGameEnd(ctx)
+		return
+	}
 
 	gs.advanceQuestion(ctx, tTimer)
 }
@@ -436,6 +454,11 @@ func (gs *GameSession) handleGameEnd(ctx context.Context) {
 		return
 	}
 	gs.state = stateEnded
+	// Default to a clean sweep; elimination paths set this before calling in.
+	if gs.endReason == "" {
+		gs.endReason = EndReasonCleared
+	}
+	endReason := gs.endReason
 	gs.mu.Unlock()
 
 	gs.Session.Score = gs.Session.CorrectCount * services.MCQCorrectAnswerPoints
@@ -494,6 +517,9 @@ func (gs *GameSession) handleGameEnd(ctx context.Context) {
 			NewLevel:       newLevel,
 			DidLevelUp:     didLevelUp,
 			LevelUpReward:  levelUpReward,
+			GameMode:       gs.Session.GameMode,
+			EndReason:      endReason,
+			EndedEarly:     endReason == EndReasonEliminated,
 		},
 	})
 
@@ -539,19 +565,28 @@ func (gs *GameSession) broadcastQuestion(remainingMs int) {
 	q := gs.Questions[idx]
 	total := gs.Session.TotalQuestions
 
+	opts := make([]OptionPayload, 0, 4)
+	if strings.TrimSpace(q.OptionA) != "" {
+		opts = append(opts, OptionPayload{Option: "a", Text: q.OptionA})
+	}
+	if strings.TrimSpace(q.OptionB) != "" {
+		opts = append(opts, OptionPayload{Option: "b", Text: q.OptionB})
+	}
+	if strings.TrimSpace(q.OptionC) != "" {
+		opts = append(opts, OptionPayload{Option: "c", Text: q.OptionC})
+	}
+	if strings.TrimSpace(q.OptionD) != "" {
+		opts = append(opts, OptionPayload{Option: "d", Text: q.OptionD})
+	}
+
 	payload := OutboundMessage{
 		Type: MsgTypeQuestion,
 		Data: QuestionPayload{
-			Question: q.QuestionCode,
-			Prompt:   q.Prompt,
-			Points:   q.Points,
-			Hint:     q.Hint,
-			Options: []OptionPayload{
-				{Option: "a", Text: q.OptionA},
-				{Option: "b", Text: q.OptionB},
-				{Option: "c", Text: q.OptionC},
-				{Option: "d", Text: q.OptionD},
-			},
+			Question:        q.QuestionCode,
+			Prompt:          q.Prompt,
+			Points:          q.Points,
+			Hint:            q.Hint,
+			Options:         opts,
 			TimeLimitMs:     questionTimeLimitSec * 1000,
 			RemainingTimeMs: remainingMs,
 			QuestionNumber:  idx + 1,
