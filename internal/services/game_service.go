@@ -193,12 +193,13 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 	RefreshSessionTTL(ctx, session.ID)
 
 	return &dto.SessionCreatedResponseDTO{
-		Session:        session.ID,
-		Topic:          session.TopicID,
-		GameMode:       session.GameMode,
-		TotalQuestions: session.TotalQuestions,
-		TimeLimitSec:   DefaultTimeLimitSec,
-		Questions:      questionDTOs,
+		Session:                 session.ID,
+		Topic:                   session.TopicID,
+		GameMode:                session.GameMode,
+		TotalQuestions:          session.TotalQuestions,
+		TimeLimitSec:            DefaultTimeLimitSec,
+		TimeLimitPerQuestionSec: DefaultTimeLimitSec,
+		Questions:               questionDTOs,
 	}, http.StatusCreated, nil
 }
 
@@ -833,11 +834,12 @@ func SessionQuestionToDTO(sq models.SessionQuestion, includeCorrect bool) dto.Qu
 	}
 
 	d := dto.QuestionDTO{
-		Question: sq.QuestionCode,
-		Prompt:   sq.Prompt,
-		Points:   MCQCorrectAnswerPoints,
-		Hint:     sq.Hint,
-		Options:  opts,
+		Question:     sq.QuestionCode,
+		Prompt:       sq.Prompt,
+		Points:       MCQCorrectAnswerPoints,
+		Hint:         sq.Hint,
+		TimeLimitSec: DefaultTimeLimitSec,
+		Options:      opts,
 	}
 	if includeCorrect {
 		d.CorrectOption = strings.ToLower(sq.CorrectOption)
@@ -873,9 +875,10 @@ func GetTopicQuestions(ctx context.Context, topicID string, limit int) (*dto.Top
 	}
 
 	return &dto.TopicQuestionsResponseDTO{
-		Topic:        topicID,
-		Total:        len(questionDTOs),
-		TimeLimitSec: DefaultTimeLimitSec,
-		Questions:    questionDTOs,
+		Topic:                   topicID,
+		Total:                   len(questionDTOs),
+		TimeLimitSec:            DefaultTimeLimitSec,
+		TimeLimitPerQuestionSec: DefaultTimeLimitSec,
+		Questions:               questionDTOs,
 	}, http.StatusOK, nil
 }

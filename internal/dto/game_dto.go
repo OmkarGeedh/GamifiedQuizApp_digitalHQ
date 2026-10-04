@@ -145,26 +145,29 @@ type QuestionDTO struct {
 	Prompt        string      `json:"prompt"`
 	Points        int         `json:"points"`
 	Hint          *string     `json:"hint,omitempty"`
+	TimeLimitSec  int         `json:"time_limit_sec,omitempty"`
 	Options       []OptionDTO `json:"options"`
 	CorrectOption string      `json:"correct_option,omitempty"`
 }
 
 // TopicQuestionsResponseDTO wraps the list of questions for a topic.
 type TopicQuestionsResponseDTO struct {
-	Topic        string        `json:"topic"`
-	Total        int           `json:"total"`
-	TimeLimitSec int           `json:"time_limit_sec"`
-	Questions    []QuestionDTO `json:"questions"`
+	Topic                   string        `json:"topic"`
+	Total                   int           `json:"total"`
+	TimeLimitSec            int           `json:"time_limit_sec"`
+	TimeLimitPerQuestionSec int           `json:"time_limit_per_question_sec,omitempty"`
+	Questions               []QuestionDTO `json:"questions"`
 }
 
 // SessionCreatedResponseDTO is returned when a new quiz session is created.
 type SessionCreatedResponseDTO struct {
-	Session        string        `json:"session"`
-	Topic          string        `json:"topic"`
-	GameMode       string        `json:"game_mode"`
-	TotalQuestions int           `json:"total_questions"`
-	TimeLimitSec   int           `json:"time_limit_sec"`
-	Questions      []QuestionDTO `json:"questions"`
+	Session                 string        `json:"session"`
+	Topic                   string        `json:"topic"`
+	GameMode                string        `json:"game_mode"`
+	TotalQuestions          int           `json:"total_questions"`
+	TimeLimitSec            int           `json:"time_limit_sec"`
+	TimeLimitPerQuestionSec int           `json:"time_limit_per_question_sec,omitempty"`
+	Questions               []QuestionDTO `json:"questions"`
 }
 
 // AnswerResultDTO is the evaluation result for a submitted answer.
