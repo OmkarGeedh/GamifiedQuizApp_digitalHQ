@@ -10,8 +10,15 @@ import (
 )
 
 func GetProfileByClientID(ctx context.Context, clientID int) (*models.Profile, error) {
+	db := GetDB()
+	if db == nil {
+		return &models.Profile{
+			ClientID: clientID,
+			Level:    1,
+		}, nil
+	}
 	var profile models.Profile
-	err := GetDB().WithContext(ctx).
+	err := db.WithContext(ctx).
 		Where("client_id = ?", clientID).
 		First(&profile).Error
 	if err != nil {
@@ -21,21 +28,33 @@ func GetProfileByClientID(ctx context.Context, clientID int) (*models.Profile, e
 }
 
 func CreateProfile(ctx context.Context, profile *models.Profile) error {
-	return GetDB().WithContext(ctx).Create(profile).Error
+	db := GetDB()
+	if db == nil {
+		return nil
+	}
+	return db.WithContext(ctx).Create(profile).Error
 }
 
 func UpdateProfile(ctx context.Context, profile *models.Profile) error {
-	return GetDB().WithContext(ctx).Save(profile).Error
+	db := GetDB()
+	if db == nil {
+		return nil
+	}
+	return db.WithContext(ctx).Save(profile).Error
 }
 
 func RecordDailyActivity(ctx context.Context, clientID int, dateStr string) error {
+	db := GetDB()
+	if db == nil {
+		return nil
+	}
 	activity := models.StreakActivity{
 		ClientID:     clientID,
 		ActivityDate: dateStr,
 		Completed:    true,
 	}
 	// Upsert on conflict
-	return GetDB().WithContext(ctx).
+	return db.WithContext(ctx).
 		Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "client_id"}, {Name: "activity_date"}},
 			DoUpdates: clause.AssignmentColumns([]string{"completed"}),
@@ -44,6 +63,10 @@ func RecordDailyActivity(ctx context.Context, clientID int, dateStr string) erro
 }
 
 func GetLast7DaysStreak(ctx context.Context, clientID int) ([]dto.DayStreakDTO, error) {
+	db := GetDB()
+	if db == nil {
+		return nil, nil
+	}
 	now := time.Now().UTC()
 	dates := make([]string, 7)
 	streakMap := make(map[string]bool)
@@ -55,7 +78,7 @@ func GetLast7DaysStreak(ctx context.Context, clientID int) ([]dto.DayStreakDTO, 
 	}
 
 	var activities []models.StreakActivity
-	err := GetDB().WithContext(ctx).
+	err := db.WithContext(ctx).
 		Where("client_id = ? AND activity_date IN ?", clientID, dates).
 		Find(&activities).Error
 	if err != nil {
@@ -84,8 +107,12 @@ func GetLast7DaysStreak(ctx context.Context, clientID int) ([]dto.DayStreakDTO, 
 }
 
 func CalculateWeeklyRank(ctx context.Context, weeklyScore int) (int, error) {
+	db := GetDB()
+	if db == nil {
+		return 1, nil
+	}
 	var count int64
-	err := GetDB().WithContext(ctx).
+	err := db.WithContext(ctx).
 		Model(&models.Profile{}).
 		Where("weekly_score > ?", weeklyScore).
 		Count(&count).Error

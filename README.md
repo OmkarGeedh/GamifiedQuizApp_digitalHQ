@@ -188,6 +188,7 @@ Pre-configured Postman collection and environment files are available in the [`p
 
 ## 📚 7. Architecture & Specifications
 
-- [Points, Scoring & Rewards Specification](docs/points_calculation.md): Comprehensive breakdown of the `CalculatePoints` algorithm (difficulty, speed, and combo multipliers), theoretical `maxScore` formula, currency economy (Coins, XP, Gems), level formula, and the 5-minute inactivity session TTL.
+- [Points, Scoring & Rewards Specification](docs/points_calculation.md): Comprehensive breakdown of the `CalculatePoints` algorithm, the theoretical `maxScore` formula, currency economy (Coins, XP, Gems), the level formula, and the 5-minute inactivity session TTL.
+- [Sudden Death WebSocket API Contract](docs/sudden_death.md): Connection and auth, message envelope, every inbound/outbound payload with examples, and the session lifecycle diagram.
 - [Authentication Specification](docs/auth.md): Complete guide to JWT lifecycle, refresh tokens, and OTP verification.
 

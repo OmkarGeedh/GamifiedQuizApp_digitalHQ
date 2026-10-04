@@ -3,9 +3,11 @@ package handlers_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/routes"
 	"github.com/gin-gonic/gin"
@@ -39,7 +41,10 @@ func TestSignupFlow_SuccessAndCooldown(t *testing.T) {
 		return
 	}
 
-	testEmail := "omkartest@example.com"
+	// The signup cooldown is keyed on email and lives in Redis with a 60s TTL, so a
+	// fixed address makes back-to-back runs fail at step 1 with HTTP 429. Scope the
+	// address to this run to keep the test hermetic.
+	testEmail := fmt.Sprintf("omkartest+%d@example.com", time.Now().UnixNano())
 	testUser := "OmkarChampion"
 
 	// 1. Send verification code

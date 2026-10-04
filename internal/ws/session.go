@@ -4,38 +4,33 @@ import (
 	"context"
 	"encoding/json"
 	"log"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/models"
-	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/repo"
-	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/services"
 	"github.com/gorilla/websocket"
 )
 
 const (
 	questionTimeLimitSec = 15
-	writeWait            = 10 * time.Second
-	pongWait             = 60 * time.Second
-	pingInterval         = (pongWait * 9) / 10
-	maxMessageSize       = 4096
+	transitionDelayMs    = 800
+	disconnectTTL        = 5 * time.Minute
 )
 
-// PlayerConn represents a connected player's WebSocket connection.
-type PlayerConn struct {
-	Conn     *websocket.Conn
-	ClientID int
-	mu       sync.Mutex
-}
+const (
+	eventAttach = "internal_attach"
+	eventDetach = "internal_detach"
+)
 
-// WriteJSON safely writes a JSON message to the client.
-func (p *PlayerConn) WriteJSON(v interface{}) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	_ = p.Conn.SetWriteDeadline(time.Now().Add(writeWait))
-	return p.Conn.WriteJSON(v)
-}
+type sessionState int
+
+const (
+	stateWaiting sessionState = iota
+	stateQuestionActive
+	stateTransitioning
+	statePaused
+	stateEnded
+)
 
 // GameSession manages a live quiz session with server-authoritative timing.
 type GameSession struct {
@@ -47,87 +42,54 @@ type GameSession struct {
 	inbox     chan sessionEvent
 	cancel    context.CancelFunc
 	mu        sync.Mutex
+
+	state             sessionState
+	fiftyFiftyUsed    bool
+	questionStartTime time.Time
+	timeRemaining     time.Duration
 }
 
 // sessionEvent is an internal event dispatched to the session goroutine.
 type sessionEvent struct {
 	eventType string
-	data      json.RawMessage
+	data      interface{}
 }
 
 // NewGameSession creates a session ready to run.
 func NewGameSession(sessionID string, clientID int, session *models.GameSession, questions []models.SessionQuestion) *GameSession {
 	return &GameSession{
-		ID:        sessionID,
-		ClientID:  clientID,
-		Session:   session,
-		Questions: questions,
-		inbox:     make(chan sessionEvent, 16),
+		ID:            sessionID,
+		ClientID:      clientID,
+		Session:       session,
+		Questions:     questions,
+		inbox:         make(chan sessionEvent, 64),
+		state:         stateWaiting,
+		timeRemaining: questionTimeLimitSec * time.Second,
 	}
 }
 
-// AttachPlayer binds a WebSocket connection to the session and immediately delivers the active question.
+// AttachPlayer binds a WebSocket connection to the session.
 func (gs *GameSession) AttachPlayer(conn *websocket.Conn, clientID int) {
-	gs.mu.Lock()
-	gs.Player = &PlayerConn{Conn: conn, ClientID: clientID}
-	gs.mu.Unlock()
-
-	// Immediately deliver current question to connected player
-	gs.broadcastQuestion()
+	gs.PushEvent(eventAttach, NewPlayerConn(conn, clientID))
 }
 
-// Run starts the session event loop. This method blocks until the session ends
-// or the context is cancelled. It must be called in its own goroutine.
-func (gs *GameSession) Run(ctx context.Context) {
-	ctx, gs.cancel = context.WithCancel(ctx)
-	defer gs.cancel()
-
-	// Set up the question timer (non-blocking via channel signal)
-	timer := time.NewTimer(questionTimeLimitSec * time.Second)
-	defer timer.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			gs.handleGameEnd(ctx)
-			return
-
-		case <-timer.C:
-			// Sudden Death: time expired for current question
-			gs.handleTimeout(ctx)
-			if gs.Session.Status != models.SessionStatusInProgress {
-				return
-			}
-			// Reset timer for next question
-			timer.Reset(questionTimeLimitSec * time.Second)
-
-		case event := <-gs.inbox:
-			switch event.eventType {
-			case MsgTypeSubmitAnswer:
-				gs.handleAnswer(ctx, event.data)
-				if gs.Session.Status != models.SessionStatusInProgress {
-					return
-				}
-				// Reset timer for next question
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
-				}
-				timer.Reset(questionTimeLimitSec * time.Second)
-			}
-		}
-	}
+// DetachPlayer notifies the session that the player's connection has closed.
+func (gs *GameSession) DetachPlayer(conn *websocket.Conn) {
+	gs.PushEvent(eventDetach, conn)
 }
 
 // PushEvent sends an event to the session event loop.
-func (gs *GameSession) PushEvent(eventType string, data json.RawMessage) {
+func (gs *GameSession) PushEvent(eventType string, data interface{}) {
 	select {
 	case gs.inbox <- sessionEvent{eventType: eventType, data: data}:
 	default:
 		log.Printf("[ws] session %s: inbox full, dropping event %s", gs.ID, eventType)
 	}
+}
+
+// SendError sends an error frame to the connected player if present.
+func (gs *GameSession) SendError(code, message string) {
+	gs.sendError(code, message)
 }
 
 // Stop cleanly cancels the session event loop.
@@ -137,255 +99,96 @@ func (gs *GameSession) Stop() {
 	}
 }
 
-// --- Internal Event Handlers ---
+// Run starts the session event loop. This method blocks until the session ends
+// or the context is cancelled. It must be called in its own goroutine.
+func (gs *GameSession) Run(ctx context.Context) {
+	ctx, gs.cancel = context.WithCancel(ctx)
+	defer gs.cancel()
 
-func (gs *GameSession) broadcastQuestion() {
-	gs.mu.Lock()
-	if gs.Session.CurrentIdx >= len(gs.Questions) {
-		gs.mu.Unlock()
-		return
-	}
-	idx := gs.Session.CurrentIdx
-	q := gs.Questions[idx]
-	total := gs.Session.TotalQuestions
-	gs.mu.Unlock()
+	qTimer := time.NewTimer(questionTimeLimitSec * time.Second)
+	stopTimer(qTimer)
+	defer qTimer.Stop()
 
-	payload := OutboundMessage{
-		Type: MsgTypeQuestion,
-		Data: QuestionPayload{
-			Question:       q.QuestionCode,
-			Prompt:         q.Prompt,
-			Points:         q.Points,
-			Hint:           q.Hint,
-			Options: []OptionPayload{
-				{Option: "a", Text: q.OptionA},
-				{Option: "b", Text: q.OptionB},
-				{Option: "c", Text: q.OptionC},
-				{Option: "d", Text: q.OptionD},
-			},
-			TimeLimitMs:    questionTimeLimitSec * 1000,
-			QuestionNumber: idx + 1,
-			TotalQuestions: total,
-		},
-	}
-	gs.sendToPlayer(payload)
-}
+	tTimer := time.NewTimer(transitionDelayMs * time.Millisecond)
+	stopTimer(tTimer)
+	defer tTimer.Stop()
 
-func (gs *GameSession) handleAnswer(ctx context.Context, rawData json.RawMessage) {
-	var data SubmitAnswerData
-	if err := json.Unmarshal(rawData, &data); err != nil {
-		gs.sendError("invalid answer payload")
-		return
-	}
+	dTimer := time.NewTimer(disconnectTTL)
+	stopTimer(dTimer)
+	defer dTimer.Stop()
 
-	// Validate option
-	cleanOption := strings.TrimSpace(data.Option)
-	if cleanOption == "" {
-		gs.sendError("option is required")
-		return
-	}
+	for {
+		select {
+		case <-ctx.Done():
+			gs.handleGameEnd(ctx)
+			return
 
-	gs.mu.Lock()
-	if gs.Session.CurrentIdx >= len(gs.Questions) {
-		gs.mu.Unlock()
-		return
-	}
-	q := gs.Questions[gs.Session.CurrentIdx]
+		case <-qTimer.C:
+			if gs.state == stateQuestionActive {
+				gs.handleTimeout(ctx, tTimer)
+				if gs.Session.Status != models.SessionStatusInProgress {
+					return
+				}
+			}
 
-	// Grade using multi-layered GradeAnswer
-	isCorrect, _, resolvedCorrect := services.GradeAnswer(&q, nil, cleanOption, data.SelectedText)
+		case <-tTimer.C:
+			if gs.state == stateTransitioning {
+				gs.handleTransitionDone(ctx, qTimer)
+				if gs.Session.Status != models.SessionStatusInProgress {
+					return
+				}
+			}
 
-	pointsEarned := services.CalculateMCQAnswerPoints(isCorrect)
-	coinsEarned := 0
+		case <-dTimer.C:
+			if gs.handleDisconnectTimeout(ctx) {
+				log.Printf("[ws] session %s: disconnected for %v, auto-terminating", gs.ID, disconnectTTL)
+				return
+			}
+			// A player reattached before eviction fired; keep serving the session.
 
-	if isCorrect {
-		gs.Session.ComboStreak++
-		if gs.Session.ComboStreak > gs.Session.BestStreak {
-			gs.Session.BestStreak = gs.Session.ComboStreak
-		}
-		coinsEarned = services.CalculateCoins(pointsEarned)
-		gs.Session.CorrectCount++
-	} else {
-		gs.Session.ComboStreak = 0
-	}
-	gs.Session.Score += pointsEarned
-	currentScore := gs.Session.Score
-	gs.mu.Unlock()
+		case event := <-gs.inbox:
+			switch event.eventType {
+			case eventAttach:
+				if player, ok := event.data.(*PlayerConn); ok {
+					gs.onPlayerAttached(ctx, player, qTimer, tTimer, dTimer)
+				}
 
-	// Record in DB
-	_ = repo.RecordAnswer(ctx, &models.UserQuestionHistory{
-		ClientID:       gs.ClientID,
-		SessionID:      gs.Session.ID,
-		QuestionCode:   q.QuestionCode,
-		SelectedOption: cleanOption,
-		IsCorrect:      isCorrect,
-		TimeTakenMs:    data.TimeTakenMs,
-		PointsAwarded:  pointsEarned,
-		CoinsAwarded:   coinsEarned,
-	})
+			case eventDetach:
+				if conn, ok := event.data.(*websocket.Conn); ok {
+					gs.onPlayerDetached(conn, qTimer, dTimer)
+				}
 
-	// Send result
-	gs.sendToPlayer(OutboundMessage{
-		Type: MsgTypeAnswerResult,
-		Data: AnswerResultPayload{
-			Question:      q.QuestionCode,
-			Option:        cleanOption,
-			CorrectOption: strings.ToLower(resolvedCorrect),
-			IsCorrect:     isCorrect,
-			Explanation:   q.Explanation,
-			PointsEarned:  pointsEarned,
-			CoinsEarned:   coinsEarned,
-			YourScore:     currentScore,
-			IsTimeout:     false,
-		},
-	})
+			case MsgTypeJoinGame:
+				if rawData, ok := event.data.(json.RawMessage); ok {
+					gs.handleJoinGame(rawData)
+				}
 
-	gs.advanceQuestion(ctx)
-}
+			case MsgTypeSubmitAnswer:
+				if rawData, ok := event.data.(json.RawMessage); ok {
+					gs.handleAnswer(ctx, rawData, qTimer, tTimer)
+					if gs.Session.Status != models.SessionStatusInProgress {
+						return
+					}
+				}
 
-func (gs *GameSession) handleTimeout(ctx context.Context) {
-	gs.mu.Lock()
-	if gs.Session.CurrentIdx >= len(gs.Questions) {
-		gs.mu.Unlock()
-		return
-	}
-	q := gs.Questions[gs.Session.CurrentIdx]
-	gs.Session.ComboStreak = 0
-	gs.mu.Unlock()
-
-	// Record timeout as unanswered
-	_ = repo.RecordAnswer(ctx, &models.UserQuestionHistory{
-		ClientID:       gs.ClientID,
-		SessionID:      gs.Session.ID,
-		QuestionCode:   q.QuestionCode,
-		SelectedOption: "timeout",
-		IsCorrect:      false,
-		TimeTakenMs:    questionTimeLimitSec * 1000,
-		PointsAwarded:  0,
-		CoinsAwarded:   0,
-	})
-
-	// Send timeout result
-	gs.sendToPlayer(OutboundMessage{
-		Type: MsgTypeAnswerResult,
-		Data: AnswerResultPayload{
-			Question:      q.QuestionCode,
-			Option:        "timeout",
-			CorrectOption: strings.ToLower(q.CorrectOption),
-			IsCorrect:     false,
-			Explanation:   q.Explanation,
-			PointsEarned:  0,
-			CoinsEarned:   0,
-			YourScore:     gs.Session.Score,
-			IsTimeout:     true,
-		},
-	})
-
-	gs.advanceQuestion(ctx)
-}
-
-func (gs *GameSession) advanceQuestion(ctx context.Context) {
-	gs.mu.Lock()
-	gs.Session.CurrentIdx++
-	idx := gs.Session.CurrentIdx
-	total := len(gs.Questions)
-	gs.mu.Unlock()
-
-	// Persist progress
-	_ = repo.UpdateSession(ctx, gs.Session)
-
-	if idx >= total {
-		gs.handleGameEnd(ctx)
-		return
-	}
-
-	// Brief delay before next question (non-blocking via goroutine)
-	go func() {
-		time.Sleep(800 * time.Millisecond)
-		gs.broadcastQuestion()
-	}()
-}
-
-func (gs *GameSession) handleGameEnd(ctx context.Context) {
-	gs.mu.Lock()
-	if gs.Session.Status != models.SessionStatusInProgress {
-		gs.mu.Unlock()
-		return
-	}
-	gs.mu.Unlock()
-
-	gs.Session.Score = gs.Session.CorrectCount * services.MCQCorrectAnswerPoints
-	reward := services.CalculateGameRewards(gs.Session.Score, gs.Session.CorrectCount, gs.Session.TotalQuestions)
-
-	// Fetch profile for level info
-	profile, err := services.GetOrCreateProfile(ctx, gs.ClientID)
-	newLevel := 1
-	didLevelUp := false
-	if err == nil {
-		oldLevel := profile.Level
-		newLevel = services.CalculateNewLevel(profile.Experience + reward.XP)
-		didLevelUp = newLevel > oldLevel
-	}
-
-	var levelUpReward *LevelUpRewardPayload
-	levelBonusCoins := 0
-	levelBonusGems := 0
-	if didLevelUp {
-		levelsGained := newLevel - profile.Level
-		levelBonusCoins = levelsGained * 50
-		levelBonusGems = levelsGained
-		levelUpReward = &LevelUpRewardPayload{
-			Coins: levelBonusCoins,
-			Gems:  levelBonusGems,
+			case MsgTypeUsePowerUp:
+				if rawData, ok := event.data.(json.RawMessage); ok {
+					gs.handleUsePowerUp(rawData)
+				}
+			}
 		}
 	}
-
-	// Atomic finalization
-	_ = repo.FinalizeSession(
-		ctx,
-		gs.Session,
-		reward.Coins+levelBonusCoins,
-		reward.XP,
-		reward.Gems+levelBonusGems,
-	)
-
-	if didLevelUp && profile != nil {
-		_ = repo.UpdateProfileLevel(ctx, gs.ClientID, newLevel)
-	}
-
-	// Send game over
-	gs.sendToPlayer(OutboundMessage{
-		Type: MsgTypeGameOver,
-		Data: GameOverPayload{
-			FinalScore:     gs.Session.Score,
-			TotalQuestions: gs.Session.TotalQuestions,
-			CorrectCount:   gs.Session.CorrectCount,
-			CoinsEarned:    reward.Coins,
-			XPEarned:       reward.XP,
-			GemsEarned:     reward.Gems,
-			NewLevel:       newLevel,
-			DidLevelUp:     didLevelUp,
-			LevelUpReward:  levelUpReward,
-		},
-	})
 }
 
-func (gs *GameSession) sendToPlayer(msg OutboundMessage) {
-	gs.mu.Lock()
-	player := gs.Player
-	gs.mu.Unlock()
-
-	if player == nil {
+// stopTimer safely stops and drains a timer channel to prevent leaks and phantom firings.
+func stopTimer(t *time.Timer) {
+	if t == nil {
 		return
 	}
-	if err := player.WriteJSON(msg); err != nil {
-		log.Printf("[ws] session %s: failed to send message: %v", gs.ID, err)
+	if !t.Stop() {
+		select {
+		case <-t.C:
+		default:
+		}
 	}
-}
-
-func (gs *GameSession) sendError(message string) {
-	gs.sendToPlayer(OutboundMessage{
-		Type: MsgTypeError,
-		Data: ErrorPayload{Message: message},
-	})
 }

@@ -149,7 +149,11 @@ func AbandonInactiveSessions(ctx context.Context, ttl time.Duration) (int64, err
 
 // RecordAnswer inserts an immutable answer history record.
 func RecordAnswer(ctx context.Context, history *models.UserQuestionHistory) error {
-	return GetDB().WithContext(ctx).Create(history).Error
+	db := GetDB()
+	if db == nil {
+		return nil
+	}
+	return db.WithContext(ctx).Create(history).Error
 }
 
 // HasAnsweredQuestion checks if a question was already answered in a given session.
@@ -190,7 +194,14 @@ func GetClientGameHistory(ctx context.Context, clientID, limit, offset int) ([]m
 // FinalizeSession atomically marks a session as finished, writes wallet ledger entries,
 // and updates the player's profile balances. This is the only path that awards rewards.
 func FinalizeSession(ctx context.Context, session *models.GameSession, coins, xp, gems int) error {
-	return GetDB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	db := GetDB()
+	if db == nil {
+		now := time.Now().UTC()
+		session.Status = models.SessionStatusFinished
+		session.EndedAt = &now
+		return nil
+	}
+	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// 1. Mark session as finished
 		now := time.Now().UTC()
 		session.Status = models.SessionStatusFinished

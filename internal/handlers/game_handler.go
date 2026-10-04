@@ -293,10 +293,10 @@ func WebSocketGameHandler(c *gin.Context) {
 	}
 	defer conn.Close()
 
-	conn.SetReadLimit(4096)
-	_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	conn.SetReadLimit(ws.MaxMessageSize)
+	_ = conn.SetReadDeadline(time.Now().Add(ws.PongWait))
 	conn.SetPongHandler(func(string) error {
-		_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(ws.PongWait))
 		return nil
 	})
 
@@ -304,11 +304,12 @@ func WebSocketGameHandler(c *gin.Context) {
 	ctx := context.Background()
 	gs, _ := Manager.GetOrCreate(ctx, sessionID, clientID, session, questions)
 	gs.AttachPlayer(conn, clientID)
+	defer gs.DetachPlayer(conn)
 
 	log.Printf("[ws] client %d connected to session %s", clientID, sessionID)
 
 	// Ping ticker to keep connection alive
-	pingTicker := time.NewTicker(54 * time.Second)
+	pingTicker := time.NewTicker(ws.PingInterval)
 	defer pingTicker.Stop()
 
 	// Read loop: decode incoming messages and push to session inbox
@@ -327,14 +328,20 @@ func WebSocketGameHandler(c *gin.Context) {
 			var msg ws.InboundMessage
 			if err := json.Unmarshal(rawMsg, &msg); err != nil {
 				log.Printf("[ws] invalid JSON from client %d: %v", clientID, err)
+				gs.SendError(ws.ErrCodeInvalidPayload, "frame could not be unmarshalled")
 				continue
 			}
 
 			switch msg.Type {
+			case ws.MsgTypeJoinGame:
+				gs.PushEvent(ws.MsgTypeJoinGame, msg.Data)
 			case ws.MsgTypeSubmitAnswer:
 				gs.PushEvent(ws.MsgTypeSubmitAnswer, msg.Data)
+			case ws.MsgTypeUsePowerUp:
+				gs.PushEvent(ws.MsgTypeUsePowerUp, msg.Data)
 			default:
 				log.Printf("[ws] unknown message type from client %d: %s", clientID, msg.Type)
+				gs.SendError(ws.ErrCodeUnsupportedType, fmt.Sprintf("unsupported message type: %s", msg.Type))
 			}
 		}
 	}()
@@ -346,7 +353,7 @@ func WebSocketGameHandler(c *gin.Context) {
 			log.Printf("[ws] client %d disconnected from session %s", clientID, sessionID)
 			return
 		case <-pingTicker.C:
-			_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			_ = conn.SetWriteDeadline(time.Now().Add(ws.WriteWait))
 			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				log.Printf("[ws] ping failed for client %d: %v", clientID, err)
 				return

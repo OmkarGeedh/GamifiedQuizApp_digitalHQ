@@ -45,15 +45,6 @@ type RedisConfig struct {
 	DB       int
 }
 
-type SMTPConfig struct {
-	Host     string
-	Port     string
-	Username string
-	Password string
-	From     string
-	FromName string
-}
-
 func (r RedisConfig) Endpoint() string {
 	if r.Addr != "" {
 		return r.Addr
@@ -65,7 +56,6 @@ type Config struct {
 	Server   ServerConfig
 	Database DatabaseConfig
 	Redis    RedisConfig
-	SMTP     SMTPConfig
 }
 
 var (
@@ -109,14 +99,6 @@ func LoadEnv() error {
 			Port:     getEnv("REDIS_PORT", "6379"),
 			Password: os.Getenv("REDIS_PASSWORD"),
 			DB:       redisDB,
-		},
-		SMTP: SMTPConfig{
-			Host:     os.Getenv("SMTP_HOST"),
-			Port:     getEnv("SMTP_PORT", "587"),
-			Username: os.Getenv("SMTP_USERNAME"),
-			Password: os.Getenv("SMTP_PASSWORD"),
-			From:     os.Getenv("SMTP_FROM"),
-			FromName: getEnv("SMTP_FROM_NAME", "Skillverse"),
 		},
 	}
 
