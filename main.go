@@ -11,6 +11,7 @@ import (
 
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/config"
 	db "github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/database"
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/models"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/routes"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/services"
 	"github.com/gin-gonic/gin"
@@ -40,11 +41,13 @@ func main() {
 		log.Printf("Warning: Database AutoMigrate failed: %v\n", err)
 	}
 
-	// Auto-seed initial demo user and questions if database is empty
+	// Auto-seed initial demo user and questions if database is empty or missing sudden death questions
 	var questionCount int64
 	pgDB.Table("questions").Count(&questionCount)
-	if questionCount == 0 {
-		log.Println("==> Fresh database detected. Running automatic seeding...")
+	var suddenDeathCount int64
+	pgDB.Table("questions").Where("question_type = ?", models.GameModeSuddenDeath).Count(&suddenDeathCount)
+	if questionCount == 0 || suddenDeathCount == 0 {
+		log.Printf("==> Running automatic seeding (total questions: %d, sudden_death questions: %d)...\n", questionCount, suddenDeathCount)
 		if err := db.Seed(pgDB); err != nil {
 			log.Printf("Warning: Auto-seed failed: %v\n", err)
 		}

@@ -36,7 +36,7 @@ func GetQuestionsByTopicAndMode(ctx context.Context, topicID string, questionTyp
 	if err != nil {
 		return nil, err
 	}
-	if len(questions) == 0 {
+	if len(questions) == 0 && questionType != models.GameModeSuddenDeath {
 		return GetQuestionsByTopic(ctx, topicID, limit)
 	}
 	return questions, nil
@@ -120,7 +120,7 @@ func CountQuestionsByTopicAndMode(ctx context.Context, topicID string, questionT
 	if err != nil {
 		return 0, err
 	}
-	if count == 0 {
+	if count == 0 && questionType != models.GameModeSuddenDeath {
 		return CountQuestionsByTopic(ctx, topicID)
 	}
 	return count, nil
