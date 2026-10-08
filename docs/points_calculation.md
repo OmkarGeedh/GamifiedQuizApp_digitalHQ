@@ -1,4 +1,4 @@
-# MCQ scoring and rewards
+# Quiz scoring and rewards
 
 ## Authority and scope
 
@@ -106,3 +106,53 @@ reward and the separate level-up reward.
 | 5 | 10 | 50 / 100 | 35 | 15 |
 | 9 | 10 | 90 / 100 | 55 | 23 |
 | 10 | 10 | 100 / 100 | 75 | 35 |
+
+## Sudden Death
+
+Sudden Death uses its own backend-authoritative scoring and reward rules. It
+does not change the MCQ formulas above.
+
+### Score
+
+| Outcome | Score effect |
+| --- | ---: |
+| Correct answer | +10 |
+| Every third consecutive correct answer | +5 additional milestone bonus |
+| Skip | 0 and reset current streak |
+| Wrong answer | 0 and end the run |
+| Timeout | 0 and end the run |
+
+Milestones occur at streaks 3, 6, 9, and so on. Previous score and best streak
+remain intact when Skip resets the current streak. There is no speed bonus.
+
+```text
+max_score = (total_questions * 10) + (floor(total_questions / 3) * 5)
+```
+
+For ten questions, the maximum score is 115.
+
+### XP
+
+```text
+xp_awarded = 10
+           + (correct_count * 5)
+           + (streak_milestones * 5)
+           + (15 if completed_successfully else 0)
+```
+
+A perfect ten-question run awards 90 XP.
+
+### Coins
+
+```text
+coins_awarded = 5
+              + (correct_count * 2)
+              + (streak_milestones * 3)
+              + (10 if completed_successfully else 0)
+```
+
+A perfect ten-question run awards 44 coins.
+
+The full-run bonus applies when the player reaches the end without a wrong
+answer or timeout. Skips are allowed, although they reset the current streak.
+Gem behavior and the separate level-up reward are unchanged.

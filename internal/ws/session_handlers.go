@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/rand/v2"
 	"strings"
 	"time"
@@ -32,10 +33,10 @@ func (gs *GameSession) onPlayerAttached(ctx context.Context, newPlayer *PlayerCo
 	switch gs.state {
 	case stateWaiting:
 		// Initial attach or resumed from transition while disconnected
-		gs.broadcastQuestion(questionTimeLimitSec * 1000)
 		gs.timeRemaining = questionTimeLimitSec * time.Second
-		gs.questionStartTime = time.Now()
-		qTimer.Reset(questionTimeLimitSec * time.Second)
+		gs.broadcastQuestion(int(gs.timeRemaining.Milliseconds()))
+		gs.questionDeadline = time.Now().Add(gs.timeRemaining)
+		resetTimer(qTimer, gs.timeRemaining)
 		gs.state = stateQuestionActive
 
 	case statePaused:
@@ -45,21 +46,18 @@ func (gs *GameSession) onPlayerAttached(ctx context.Context, newPlayer *PlayerCo
 			// The clock ran out while disconnected. Grade the timeout now; tTimer
 			// must be threaded through or the 800ms transition never re-arms and
 			// the session wedges in stateTransitioning.
+			gs.state = stateQuestionActive
 			gs.handleTimeout(ctx, tTimer)
 		} else {
+			gs.questionDeadline = time.Now().Add(gs.timeRemaining)
 			gs.broadcastQuestion(remainingMs)
-			gs.questionStartTime = time.Now()
-			qTimer.Reset(gs.timeRemaining)
+			resetTimer(qTimer, gs.timeRemaining)
 			gs.state = stateQuestionActive
 		}
 
 	case stateQuestionActive:
 		// Reconnect while already running: resync remaining time
-		elapsed := time.Since(gs.questionStartTime)
-		remaining := gs.timeRemaining - elapsed
-		if remaining < 0 {
-			remaining = 0
-		}
+		remaining := gs.remainingAt(time.Now())
 		gs.broadcastQuestion(int(remaining.Milliseconds()))
 
 	case stateTransitioning:
@@ -90,11 +88,8 @@ func (gs *GameSession) onPlayerDetached(conn *websocket.Conn, qTimer *time.Timer
 	}
 
 	if gs.state == stateQuestionActive {
-		elapsed := time.Since(gs.questionStartTime)
-		gs.timeRemaining -= elapsed
-		if gs.timeRemaining < 0 {
-			gs.timeRemaining = 0
-		}
+		gs.timeRemaining = gs.remainingAt(time.Now())
+		gs.questionDeadline = time.Time{}
 		stopTimer(qTimer)
 		gs.state = statePaused
 	}
@@ -104,7 +99,7 @@ func (gs *GameSession) onPlayerDetached(conn *websocket.Conn, qTimer *time.Timer
 }
 
 // handleJoinGame handles client resynchronization requests.
-func (gs *GameSession) handleJoinGame(rawData json.RawMessage) {
+func (gs *GameSession) handleJoinGame(ctx context.Context, rawData json.RawMessage, qTimer *time.Timer, tTimer *time.Timer) {
 	var data JoinGameData
 	if len(rawData) > 0 {
 		_ = json.Unmarshal(rawData, &data)
@@ -122,11 +117,10 @@ func (gs *GameSession) handleJoinGame(rawData json.RawMessage) {
 
 	switch gs.state {
 	case stateQuestionActive:
-		elapsed := time.Since(gs.questionStartTime)
-		remaining := gs.timeRemaining - elapsed
-		if remaining < 0 {
-			remaining = 0
+		if gs.expireIfDeadlineReached(ctx, time.Now(), qTimer, tTimer) {
+			return
 		}
+		remaining := gs.remainingAt(time.Now())
 		gs.broadcastQuestion(int(remaining.Milliseconds()))
 
 	case statePaused:
@@ -142,8 +136,9 @@ func (gs *GameSession) handleJoinGame(rawData json.RawMessage) {
 	}
 }
 
-// handleUsePowerUp processes 50:50 power-up requests with single-use restriction.
-func (gs *GameSession) handleUsePowerUp(rawData json.RawMessage) {
+// handleUsePowerUp processes mode-specific power-ups against the authoritative
+// question deadline.
+func (gs *GameSession) handleUsePowerUp(ctx context.Context, rawData json.RawMessage, qTimer *time.Timer, tTimer *time.Timer) {
 	var data UsePowerUpData
 	if err := json.Unmarshal(rawData, &data); err != nil {
 		gs.sendError(ErrCodeInvalidPayload, "frame could not be unmarshalled")
@@ -155,11 +150,6 @@ func (gs *GameSession) handleUsePowerUp(rawData json.RawMessage) {
 		return
 	}
 
-	if strings.TrimSpace(data.PowerUp) != "fifty_fifty" {
-		gs.sendError(ErrCodeUnsupportedPowerUp, "power_up is not fifty_fifty")
-		return
-	}
-
 	if gs.Session.Status != models.SessionStatusInProgress || gs.state == stateEnded {
 		gs.sendError(ErrCodeSessionNotActive, "session has finished or been abandoned")
 		return
@@ -167,6 +157,9 @@ func (gs *GameSession) handleUsePowerUp(rawData json.RawMessage) {
 
 	if gs.state != stateQuestionActive {
 		gs.sendError(ErrCodeStaleAnswer, "question is not currently active")
+		return
+	}
+	if gs.expireIfDeadlineReached(ctx, time.Now(), qTimer, tTimer) {
 		return
 	}
 
@@ -186,36 +179,74 @@ func (gs *GameSession) handleUsePowerUp(rawData json.RawMessage) {
 		return
 	}
 
-	if gs.fiftyFiftyUsed {
-		gs.sendError(ErrCodePowerUpAlreadyUsed, "fifty_fifty power-up has already been used in this session")
-		return
-	}
-
-	gs.fiftyFiftyUsed = true
-
-	// Hide two incorrect options. The correct option is never a candidate.
-	correct := strings.ToLower(strings.TrimSpace(q.CorrectOption))
-	wrongOptions := make([]string, 0, 3)
-	for _, opt := range []string{"a", "b", "c", "d"} {
-		if !strings.EqualFold(opt, correct) {
-			wrongOptions = append(wrongOptions, opt)
+	powerUp := strings.ToLower(strings.TrimSpace(data.PowerUp))
+	switch powerUp {
+	case "add_time":
+		if !gs.Session.IsSuddenDeath() {
+			gs.sendError(ErrCodeUnsupportedPowerUp, "add_time is only supported for sudden_death")
+			return
 		}
-	}
-	rand.Shuffle(len(wrongOptions), func(i, j int) {
-		wrongOptions[i], wrongOptions[j] = wrongOptions[j], wrongOptions[i]
-	})
-	hidden := wrongOptions
-	if len(wrongOptions) >= 2 {
-		hidden = wrongOptions[:2]
-	}
+		if gs.addTimeUsed {
+			gs.sendError(ErrCodePowerUpAlreadyUsed, "add_time power-up has already been used in this session")
+			return
+		}
 
-	gs.sendToPlayer(OutboundMessage{
-		Type: MsgTypePowerUpResult,
-		Data: PowerUpResultPayload{
-			Question:      q.QuestionCode,
-			HiddenOptions: hidden,
-		},
-	})
+		now := time.Now()
+		gs.questionDeadline = gs.questionDeadline.Add(addTimeDuration)
+		remaining := gs.remainingAt(now)
+		gs.timeRemaining = remaining
+		gs.addTimeUsed = true
+		resetTimer(qTimer, remaining)
+
+		gs.sendToPlayer(OutboundMessage{
+			Type: MsgTypePowerUpResult,
+			Data: PowerUpResultPayload{
+				Question:        q.QuestionCode,
+				PowerUp:         powerUp,
+				AddedTimeMs:     int(addTimeDuration.Milliseconds()),
+				RemainingTimeMs: int(remaining.Milliseconds()),
+			},
+		})
+
+	case "fifty_fifty":
+		if gs.Session.IsSuddenDeath() {
+			gs.sendError(ErrCodeUnsupportedPowerUp, "fifty_fifty is not supported for sudden_death")
+			return
+		}
+		if gs.fiftyFiftyUsed {
+			gs.sendError(ErrCodePowerUpAlreadyUsed, "fifty_fifty power-up has already been used in this session")
+			return
+		}
+		gs.fiftyFiftyUsed = true
+
+		correct := strings.ToLower(strings.TrimSpace(q.CorrectOption))
+		wrongOptions := make([]string, 0, 3)
+		options := map[string]string{"a": q.OptionA, "b": q.OptionB, "c": q.OptionC, "d": q.OptionD}
+		for _, opt := range []string{"a", "b", "c", "d"} {
+			if strings.TrimSpace(options[opt]) != "" && !strings.EqualFold(opt, correct) {
+				wrongOptions = append(wrongOptions, opt)
+			}
+		}
+		rand.Shuffle(len(wrongOptions), func(i, j int) {
+			wrongOptions[i], wrongOptions[j] = wrongOptions[j], wrongOptions[i]
+		})
+		hidden := wrongOptions
+		if len(wrongOptions) >= 2 {
+			hidden = wrongOptions[:2]
+		}
+
+		gs.sendToPlayer(OutboundMessage{
+			Type: MsgTypePowerUpResult,
+			Data: PowerUpResultPayload{
+				Question:      q.QuestionCode,
+				PowerUp:       powerUp,
+				HiddenOptions: hidden,
+			},
+		})
+
+	default:
+		gs.sendError(ErrCodeUnsupportedPowerUp, "unsupported power_up")
+	}
 }
 
 // handleAnswer evaluates client answer submissions and initiates question progression.
@@ -238,6 +269,9 @@ func (gs *GameSession) handleAnswer(ctx context.Context, rawData json.RawMessage
 
 	if gs.state != stateQuestionActive {
 		gs.sendError(ErrCodeStaleAnswer, "question is not currently active")
+		return
+	}
+	if gs.expireIfDeadlineReached(ctx, time.Now(), qTimer, tTimer) {
 		return
 	}
 
@@ -276,16 +310,26 @@ func (gs *GameSession) handleAnswer(ctx context.Context, rawData json.RawMessage
 		pointsEarned = 0
 		resolvedCorrect = q.CorrectOption
 		gs.Session.ComboStreak = 0
+		if gs.Session.IsSuddenDeath() {
+			gs.Session.SkippedCount++
+		}
 	} else {
 		isCorrect, _, resolvedCorrect = services.GradeAnswer(&q, nil, cleanOption, data.SelectedText)
 		isSkipped = false
-		pointsEarned = services.CalculateMCQAnswerPoints(isCorrect)
 		if isCorrect {
 			gs.Session.ComboStreak++
 			if gs.Session.ComboStreak > gs.Session.BestStreak {
 				gs.Session.BestStreak = gs.Session.ComboStreak
 			}
 			gs.Session.CorrectCount++
+			if gs.Session.IsSuddenDeath() {
+				pointsEarned = services.CalculateSuddenDeathAnswerPoints(true, gs.Session.ComboStreak)
+				if gs.Session.ComboStreak%services.SuddenDeathStreakSize == 0 {
+					gs.Session.StreakMilestones++
+				}
+			} else {
+				pointsEarned = services.CalculateMCQAnswerPoints(true)
+			}
 		} else {
 			gs.Session.ComboStreak = 0
 		}
@@ -301,7 +345,9 @@ func (gs *GameSession) handleAnswer(ctx context.Context, rawData json.RawMessage
 		timeTaken = 17000
 	}
 
-	// Persist answer history asynchronously to keep WebSocket loop ultra-responsive
+	// Persist history before acknowledging the authoritative answer. A failed
+	// write stops this in-memory run so rewards and progression cannot diverge
+	// from the durable audit trail.
 	historyRecord := &models.UserQuestionHistory{
 		ClientID:       gs.ClientID,
 		SessionID:      gs.Session.ID,
@@ -312,9 +358,11 @@ func (gs *GameSession) handleAnswer(ctx context.Context, rawData json.RawMessage
 		PointsAwarded:  pointsEarned,
 		CoinsAwarded:   0,
 	}
-	go func(h *models.UserQuestionHistory) {
-		_ = repo.RecordAnswer(context.Background(), h)
-	}(historyRecord)
+	if err := repo.RecordAnswer(ctx, historyRecord); err != nil {
+		log.Printf("[ws] session %s: failed to persist answer for %s: %v", gs.ID, historyRecord.QuestionCode, err)
+		gs.stopAfterPersistenceFailure("failed to persist answer")
+		return
+	}
 
 	// Send answer result frame
 	gs.sendToPlayer(OutboundMessage{
@@ -337,7 +385,7 @@ func (gs *GameSession) handleAnswer(ctx context.Context, rawData json.RawMessage
 	// excluded on purpose — a skip is a purchased power-up that bypasses a
 	// question safely, so it must not eliminate the player.
 	if gs.Session.IsSuddenDeath() && !isCorrect && !isSkipped {
-		gs.endReason = EndReasonEliminated
+		gs.endReason = EndReasonWrongAnswer
 		gs.handleGameEnd(ctx)
 		return
 	}
@@ -354,7 +402,8 @@ func (gs *GameSession) handleTimeout(ctx context.Context, tTimer *time.Timer) {
 	gs.Session.ComboStreak = 0
 	score := gs.Session.Score
 
-	// Record timeout asynchronously in DB
+	// Persist timeout before reporting/finalizing it for the same consistency
+	// guarantee as a submitted answer.
 	historyRecord := &models.UserQuestionHistory{
 		ClientID:       gs.ClientID,
 		SessionID:      gs.Session.ID,
@@ -365,9 +414,11 @@ func (gs *GameSession) handleTimeout(ctx context.Context, tTimer *time.Timer) {
 		PointsAwarded:  0,
 		CoinsAwarded:   0,
 	}
-	go func(h *models.UserQuestionHistory) {
-		_ = repo.RecordAnswer(context.Background(), h)
-	}(historyRecord)
+	if err := repo.RecordAnswer(ctx, historyRecord); err != nil {
+		log.Printf("[ws] session %s: failed to persist timeout for %s: %v", gs.ID, historyRecord.QuestionCode, err)
+		gs.stopAfterPersistenceFailure("failed to persist timeout")
+		return
+	}
 
 	// Send timeout result frame
 	gs.sendToPlayer(OutboundMessage{
@@ -390,7 +441,7 @@ func (gs *GameSession) handleTimeout(ctx context.Context, tTimer *time.Timer) {
 	// answer (zero points, streak reset), so it eliminates too. The player does
 	// get the answer_result frame first and can see what they missed.
 	if gs.Session.IsSuddenDeath() {
-		gs.endReason = EndReasonEliminated
+		gs.endReason = EndReasonTimeout
 		gs.handleGameEnd(ctx)
 		return
 	}
@@ -408,7 +459,11 @@ func (gs *GameSession) advanceQuestion(ctx context.Context, tTimer *time.Timer) 
 	// carries status=in_progress, so it must commit before handleGameEnd runs
 	// FinalizeSession; a deferred write would land after the rewards transaction
 	// and revert the finished session back to in_progress.
-	_ = repo.UpdateSession(ctx, gs.Session)
+	if err := repo.UpdateSession(ctx, gs.Session); err != nil {
+		log.Printf("[ws] session %s: failed to persist question progression: %v", gs.ID, err)
+		gs.stopAfterPersistenceFailure("failed to persist question progression")
+		return
+	}
 
 	if idx >= total {
 		gs.handleGameEnd(ctx)
@@ -441,8 +496,8 @@ func (gs *GameSession) handleTransitionDone(ctx context.Context, qTimer *time.Ti
 	// Serve next question with full 15s timer
 	gs.broadcastQuestion(questionTimeLimitSec * 1000)
 	gs.timeRemaining = questionTimeLimitSec * time.Second
-	gs.questionStartTime = time.Now()
-	qTimer.Reset(questionTimeLimitSec * time.Second)
+	gs.questionDeadline = time.Now().Add(gs.timeRemaining)
+	resetTimer(qTimer, gs.timeRemaining)
 	gs.state = stateQuestionActive
 }
 
@@ -454,25 +509,42 @@ func (gs *GameSession) handleGameEnd(ctx context.Context) {
 		return
 	}
 	gs.state = stateEnded
-	// Default to a clean sweep; elimination paths set this before calling in.
+	// Default to a clean completion; terminal failure paths set this first.
 	if gs.endReason == "" {
-		gs.endReason = EndReasonCleared
+		if gs.Session.IsSuddenDeath() {
+			gs.endReason = EndReasonCompleted
+		} else {
+			gs.endReason = EndReasonCleared
+		}
 	}
 	endReason := gs.endReason
 	gs.mu.Unlock()
 
-	gs.Session.Score = gs.Session.CorrectCount * services.MCQCorrectAnswerPoints
+	completedSuccessfully := endReason == EndReasonCompleted || endReason == EndReasonCleared
+	gs.Session.CompletedSuccessfully = completedSuccessfully
+	gs.Session.EndReason = endReason
+	if gs.Session.IsSuddenDeath() {
+		gs.Session.Score = gs.Session.CorrectCount*services.MCQCorrectAnswerPoints + gs.Session.StreakMilestones*services.SuddenDeathStreakPoints
+	} else {
+		gs.Session.Score = gs.Session.CorrectCount * services.MCQCorrectAnswerPoints
+	}
 	reward := services.CalculateGameRewards(gs.Session.Score, gs.Session.CorrectCount, gs.Session.TotalQuestions)
+	if gs.Session.IsSuddenDeath() {
+		reward = services.CalculateSuddenDeathRewards(gs.Session.CorrectCount, gs.Session.TotalQuestions, gs.Session.StreakMilestones, completedSuccessfully)
+	}
 
 	// Fetch profile for level info
 	profile, err := services.GetOrCreateProfile(ctx, gs.ClientID)
 	newLevel := 1
 	didLevelUp := false
-	if err == nil {
-		oldLevel := profile.Level
-		newLevel = services.CalculateNewLevel(profile.Experience + reward.XP)
-		didLevelUp = newLevel > oldLevel
+	if err != nil {
+		log.Printf("[ws] session %s: failed to load profile for reward calculation: %v", gs.ID, err)
+		gs.stopAfterPersistenceFailure("failed to prepare game rewards")
+		return
 	}
+	oldLevel := profile.Level
+	newLevel = services.CalculateNewLevel(profile.Experience + reward.XP)
+	didLevelUp = newLevel > oldLevel
 
 	var levelUpReward *LevelUpRewardPayload
 	levelBonusCoins := 0
@@ -492,34 +564,49 @@ func (gs *GameSession) handleGameEnd(ctx context.Context) {
 	}
 
 	// Atomic finalization in PostgreSQL
-	_ = repo.FinalizeSession(
+	if err := repo.FinalizeSession(
 		ctx,
 		gs.Session,
 		reward.Coins+levelBonusCoins,
 		reward.XP,
 		reward.Gems+levelBonusGems,
-	)
+	); err != nil {
+		log.Printf("[ws] session %s: finalization failed: %v", gs.ID, err)
+		gs.sendError(ErrCodeInternalError, "failed to finalize game session")
+		gs.mu.Lock()
+		player := gs.Player
+		gs.mu.Unlock()
+		if player != nil {
+			player.CloseGracefully("game finalization failed")
+		}
+		return
+	}
 
 	if didLevelUp && profile != nil {
-		_ = repo.UpdateProfileLevel(ctx, gs.ClientID, newLevel)
+		if err := repo.UpdateProfileLevel(ctx, gs.ClientID, newLevel); err != nil {
+			log.Printf("[ws] session %s: failed to persist level %d: %v", gs.ID, newLevel, err)
+		}
 	}
 
 	// Send final game_over summary frame
 	gs.sendToPlayer(OutboundMessage{
 		Type: MsgTypeGameOver,
 		Data: GameOverPayload{
-			FinalScore:     gs.Session.Score,
-			TotalQuestions: gs.Session.TotalQuestions,
-			CorrectCount:   gs.Session.CorrectCount,
-			CoinsEarned:    reward.Coins,
-			XPEarned:       reward.XP,
-			GemsEarned:     reward.Gems,
-			NewLevel:       newLevel,
-			DidLevelUp:     didLevelUp,
-			LevelUpReward:  levelUpReward,
-			GameMode:       gs.Session.GameMode,
-			EndReason:      endReason,
-			EndedEarly:     endReason == EndReasonEliminated,
+			FinalScore:            gs.Session.Score,
+			TotalQuestions:        gs.Session.TotalQuestions,
+			CorrectCount:          gs.Session.CorrectCount,
+			SkippedCount:          gs.Session.SkippedCount,
+			BestStreak:            gs.Session.BestStreak,
+			CoinsEarned:           reward.Coins,
+			XPEarned:              reward.XP,
+			GemsEarned:            reward.Gems,
+			NewLevel:              newLevel,
+			DidLevelUp:            didLevelUp,
+			LevelUpReward:         levelUpReward,
+			GameMode:              gs.Session.GameMode,
+			EndReason:             endReason,
+			EndedEarly:            !completedSuccessfully,
+			CompletedSuccessfully: completedSuccessfully,
 		},
 	})
 
@@ -550,10 +637,57 @@ func (gs *GameSession) handleDisconnectTimeout(ctx context.Context) bool {
 
 	now := time.Now().UTC()
 	gs.Session.Status = models.SessionStatusAbandoned
+	gs.Session.EndReason = EndReasonAbandoned
+	gs.Session.CompletedSuccessfully = false
 	gs.Session.EndedAt = &now
-	_ = repo.UpdateSession(ctx, gs.Session)
+	if err := repo.UpdateSession(ctx, gs.Session); err != nil {
+		log.Printf("[ws] session %s: failed to persist disconnect abandonment: %v", gs.ID, err)
+	}
 	services.ClearSessionTTL(ctx, gs.ID)
 	return true
+}
+
+func (gs *GameSession) remainingAt(now time.Time) time.Duration {
+	if gs.questionDeadline.IsZero() {
+		if gs.timeRemaining < 0 {
+			return 0
+		}
+		return gs.timeRemaining
+	}
+	remaining := gs.questionDeadline.Sub(now)
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
+}
+
+func (gs *GameSession) expireIfDeadlineReached(ctx context.Context, now time.Time, qTimer *time.Timer, tTimer *time.Timer) bool {
+	if gs.questionDeadline.IsZero() || now.Before(gs.questionDeadline) {
+		return false
+	}
+	stopTimer(qTimer)
+	gs.handleTimeout(ctx, tTimer)
+	return true
+}
+
+func resetTimer(timer *time.Timer, duration time.Duration) {
+	stopTimer(timer)
+	if duration < 0 {
+		duration = 0
+	}
+	timer.Reset(duration)
+}
+
+func (gs *GameSession) stopAfterPersistenceFailure(message string) {
+	gs.sendError(ErrCodeInternalError, message)
+	gs.mu.Lock()
+	gs.state = stateEnded
+	player := gs.Player
+	gs.mu.Unlock()
+	if player != nil {
+		player.CloseGracefully("game state persistence failed")
+	}
+	gs.Stop()
 }
 
 // broadcastQuestion delivers the active question payload to the connected player.

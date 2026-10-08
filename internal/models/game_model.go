@@ -13,9 +13,9 @@ type SessionQuestion struct {
 	OptionB         string  `json:"option_b"`
 	OptionC         string  `json:"option_c"`
 	OptionD         string  `json:"option_d"`
-	CorrectOption   string  `json:"correct_option"` // 'a', 'b', 'c', or 'd' matching shuffled options
+	CorrectOption   string  `json:"correct_option"`             // 'a', 'b', 'c', or 'd' matching shuffled options
 	OriginalCorrect string  `json:"original_correct,omitempty"` // original DB correct letter ('a', 'b', 'c', 'd')
-	CorrectText     string  `json:"correct_text,omitempty"`    // the actual string text of the correct answer
+	CorrectText     string  `json:"correct_text,omitempty"`     // the actual string text of the correct answer
 	Difficulty      int     `json:"difficulty"`
 	Points          int     `json:"points"`
 	Hint            *string `json:"hint,omitempty"`
@@ -49,22 +49,26 @@ func (Question) TableName() string {
 
 // GameSession tracks a single quiz session for a player.
 type GameSession struct {
-	ID             string     `gorm:"column:id;type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
-	ClientID       int        `gorm:"column:client_id;not null;index:idx_game_sessions_client;index:idx_game_sessions_client_status,priority:1" json:"client_id"`
-	TopicID        string     `gorm:"column:topic_id;size:64;not null;default:'general'" json:"topic_id"`
-	GameMode       string     `gorm:"column:game_mode;size:20;not null;default:'mcq'" json:"game_mode"`
-	TotalQuestions int        `gorm:"column:total_questions;not null;default:10" json:"total_questions"`
-	CurrentIdx     int        `gorm:"column:current_idx;not null;default:0" json:"current_idx"`
-	Score          int        `gorm:"column:score;not null;default:0" json:"score"`
-	CorrectCount   int        `gorm:"column:correct_count;not null;default:0" json:"correct_count"`
-	ComboStreak    int        `gorm:"column:combo_streak;not null;default:0" json:"combo_streak"`
-	BestStreak     int        `gorm:"column:best_streak;not null;default:0" json:"best_streak"`
-	Status         string     `gorm:"column:status;size:20;not null;default:'in_progress';index:idx_game_sessions_client_status,priority:2" json:"status"`
-	QuestionsState string     `gorm:"column:questions_state;type:text" json:"-"`
-	StartedAt      time.Time  `gorm:"column:started_at;autoCreateTime" json:"started_at"`
-	EndedAt        *time.Time `gorm:"column:ended_at" json:"ended_at,omitempty"`
-	CreatedAt      time.Time  `gorm:"column:created_at;autoCreateTime" json:"created_at"`
-	UpdatedAt      time.Time  `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
+	ID                    string     `gorm:"column:id;type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	ClientID              int        `gorm:"column:client_id;not null;index:idx_game_sessions_client;index:idx_game_sessions_client_status,priority:1" json:"client_id"`
+	TopicID               string     `gorm:"column:topic_id;size:64;not null;default:'general'" json:"topic_id"`
+	GameMode              string     `gorm:"column:game_mode;size:20;not null;default:'mcq'" json:"game_mode"`
+	TotalQuestions        int        `gorm:"column:total_questions;not null;default:10" json:"total_questions"`
+	CurrentIdx            int        `gorm:"column:current_idx;not null;default:0" json:"current_idx"`
+	Score                 int        `gorm:"column:score;not null;default:0" json:"score"`
+	CorrectCount          int        `gorm:"column:correct_count;not null;default:0" json:"correct_count"`
+	ComboStreak           int        `gorm:"column:combo_streak;not null;default:0" json:"combo_streak"`
+	BestStreak            int        `gorm:"column:best_streak;not null;default:0" json:"best_streak"`
+	StreakMilestones      int        `gorm:"column:streak_milestones;not null;default:0" json:"streak_milestones"`
+	SkippedCount          int        `gorm:"column:skipped_count;not null;default:0" json:"skipped_count"`
+	EndReason             string     `gorm:"column:end_reason;size:32;not null;default:''" json:"end_reason"`
+	CompletedSuccessfully bool       `gorm:"column:completed_successfully;not null;default:false" json:"completed_successfully"`
+	Status                string     `gorm:"column:status;size:20;not null;default:'in_progress';index:idx_game_sessions_client_status,priority:2" json:"status"`
+	QuestionsState        string     `gorm:"column:questions_state;type:text" json:"-"`
+	StartedAt             time.Time  `gorm:"column:started_at;autoCreateTime" json:"started_at"`
+	EndedAt               *time.Time `gorm:"column:ended_at" json:"ended_at,omitempty"`
+	CreatedAt             time.Time  `gorm:"column:created_at;autoCreateTime" json:"created_at"`
+	UpdatedAt             time.Time  `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
 }
 
 func (GameSession) TableName() string {
@@ -158,13 +162,13 @@ func (WalletLedger) TableName() string {
 
 // Ledger transaction type constants
 const (
-	TxTypeQuizReward       = "quiz_reward"
-	TxTypeLevelBonus       = "level_up_bonus"
-	TxTypeStreakBonus      = "streak_bonus"
-	TxTypePowerUpPurchase  = "power_up_purchase"
-	TxTypeShopPurchase     = "shop_purchase"
-	TxTypeManualDebit      = "manual_debit"
-	TxTypeManualCredit     = "manual_credit"
+	TxTypeQuizReward      = "quiz_reward"
+	TxTypeLevelBonus      = "level_up_bonus"
+	TxTypeStreakBonus     = "streak_bonus"
+	TxTypePowerUpPurchase = "power_up_purchase"
+	TxTypeShopPurchase    = "shop_purchase"
+	TxTypeManualDebit     = "manual_debit"
+	TxTypeManualCredit    = "manual_credit"
 )
 
 // Transaction direction constants

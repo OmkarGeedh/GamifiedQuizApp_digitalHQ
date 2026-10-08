@@ -15,6 +15,7 @@ const (
 	questionTimeLimitSec = 15
 	transitionDelayMs    = 800
 	disconnectTTL        = 5 * time.Minute
+	addTimeDuration      = 5 * time.Second
 )
 
 const (
@@ -43,10 +44,11 @@ type GameSession struct {
 	cancel    context.CancelFunc
 	mu        sync.Mutex
 
-	state             sessionState
-	fiftyFiftyUsed    bool
-	questionStartTime time.Time
-	timeRemaining     time.Duration
+	state            sessionState
+	fiftyFiftyUsed   bool
+	addTimeUsed      bool
+	questionDeadline time.Time
+	timeRemaining    time.Duration
 
 	// endReason records why the run terminated so game_over can distinguish an
 	// elimination from a clean sweep. Empty means the set was completed.
@@ -165,7 +167,7 @@ func (gs *GameSession) Run(ctx context.Context) {
 
 			case MsgTypeJoinGame:
 				if rawData, ok := event.data.(json.RawMessage); ok {
-					gs.handleJoinGame(rawData)
+					gs.handleJoinGame(ctx, rawData, qTimer, tTimer)
 				}
 
 			case MsgTypeSubmitAnswer:
@@ -178,7 +180,7 @@ func (gs *GameSession) Run(ctx context.Context) {
 
 			case MsgTypeUsePowerUp:
 				if rawData, ok := event.data.(json.RawMessage); ok {
-					gs.handleUsePowerUp(rawData)
+					gs.handleUsePowerUp(ctx, rawData, qTimer, tTimer)
 				}
 			}
 		}

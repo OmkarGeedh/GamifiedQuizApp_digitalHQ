@@ -273,11 +273,22 @@ func WebSocketGameHandler(c *gin.Context) {
 	// Fetch session questions from session state
 	questions, err := session.GetQuestions()
 	if err != nil || len(questions) == 0 {
-		// Fallback to DB questions if session has no persisted state
-		dbQuestions, err := repo.GetQuestionsByTopic(c.Request.Context(), session.TopicID, session.TotalQuestions)
+		// Recover from the same mode-specific pool. Sudden Death must never
+		// silently resume with MCQ questions.
+		questionType := models.GameModeMCQ
+		if session.IsSuddenDeath() {
+			questionType = models.GameModeSuddenDeath
+		}
+		dbQuestions, err := repo.GetQuestionsByTopicAndMode(c.Request.Context(), session.TopicID, questionType, session.TotalQuestions)
 		if err != nil || len(dbQuestions) == 0 {
 			response.Error(c, http.StatusInternalServerError, "Failed to load session questions")
 			return
+		}
+		if session.IsSuddenDeath() {
+			if err := services.ValidateSuddenDeathQuestions(dbQuestions); err != nil {
+				response.Error(c, http.StatusInternalServerError, "Failed to load valid Sudden Death questions")
+				return
+			}
 		}
 		questions = make([]models.SessionQuestion, 0, len(dbQuestions))
 		for _, q := range dbQuestions {

@@ -180,8 +180,10 @@ func AbandonInactiveSessions(ctx context.Context, ttl time.Duration) (int64, err
 		Where("status = ? AND (updated_at < ? OR (updated_at IS NULL AND (started_at < ? OR created_at < ?)))",
 			models.SessionStatusInProgress, cutoff, cutoff, cutoff).
 		Updates(map[string]interface{}{
-			"status":   models.SessionStatusAbandoned,
-			"ended_at": &now,
+			"status":                 models.SessionStatusAbandoned,
+			"ended_at":               &now,
+			"end_reason":             "abandoned",
+			"completed_successfully": false,
 		})
 	return res.RowsAffected, res.Error
 }

@@ -100,11 +100,14 @@ func TestSuddenDeath_WrongAnswerEliminates(t *testing.T) {
 	}
 
 	over := readGameOver(t, client)
-	if over.EndReason != ws.EndReasonEliminated {
-		t.Fatalf("expected end_reason %q, got %q", ws.EndReasonEliminated, over.EndReason)
+	if over.EndReason != ws.EndReasonWrongAnswer {
+		t.Fatalf("expected end_reason %q, got %q", ws.EndReasonWrongAnswer, over.EndReason)
 	}
 	if !over.EndedEarly {
 		t.Fatal("expected ended_early to be true on elimination")
+	}
+	if over.CompletedSuccessfully {
+		t.Fatal("wrong-answer elimination must not be completed successfully")
 	}
 	if over.GameMode != models.GameModeSuddenDeath {
 		t.Fatalf("expected game_mode echoed as %q, got %q", models.GameModeSuddenDeath, over.GameMode)
@@ -153,14 +156,17 @@ func TestSuddenDeath_ClearingAllQuestionsReportsCleared(t *testing.T) {
 	}
 
 	over := readGameOver(t, client)
-	if over.EndReason != ws.EndReasonCleared {
-		t.Fatalf("expected end_reason %q, got %q", ws.EndReasonCleared, over.EndReason)
+	if over.EndReason != ws.EndReasonCompleted {
+		t.Fatalf("expected end_reason %q, got %q", ws.EndReasonCompleted, over.EndReason)
 	}
 	if over.EndedEarly {
 		t.Fatal("expected ended_early to be false after clearing the set")
 	}
 	if over.CorrectCount != 2 || over.FinalScore != 20 {
 		t.Fatalf("expected a full 2/2 run worth 20, got %+v", over)
+	}
+	if !over.CompletedSuccessfully || over.BestStreak != 2 {
+		t.Fatalf("expected successful completion with best streak 2, got %+v", over)
 	}
 }
 
@@ -179,6 +185,15 @@ func TestSuddenDeath_SkipDoesNotEliminate(t *testing.T) {
 	msg := readNextMessage(t, client, 3*time.Second)
 	if msg.Type != ws.MsgTypeQuestion {
 		t.Fatalf("expected question 2 after a skip, got %s", msg.Type)
+	}
+
+	submitOption(t, client, "ACC002", "b")
+	if res := readAnswerResult(t, client); !res.IsCorrect {
+		t.Fatalf("expected ACC002 to be correct, got %+v", res)
+	}
+	over := readGameOver(t, client)
+	if over.SkippedCount != 1 || over.BestStreak != 1 || !over.CompletedSuccessfully {
+		t.Fatalf("unexpected final skip/streak summary: %+v", over)
 	}
 }
 
@@ -242,5 +257,83 @@ func TestMCQMode_CompletionIsNotReportedAsElimination(t *testing.T) {
 	}
 	if over.CorrectCount != 1 {
 		t.Fatalf("expected 1 correct answer, got %d", over.CorrectCount)
+	}
+}
+
+func TestSuddenDeath_AddTimeExtendsAuthoritativeTimerAndResync(t *testing.T) {
+	client := startSuddenDeath(t, "sd-add-time", models.GameModeSuddenDeath, 2)
+
+	powerUp, _ := json.Marshal(ws.UsePowerUpData{
+		Session:  "sd-add-time",
+		Question: "ACC001",
+		PowerUp:  "add_time",
+	})
+	if err := client.WriteJSON(ws.InboundMessage{Type: ws.MsgTypeUsePowerUp, Data: powerUp}); err != nil {
+		t.Fatalf("write add_time: %v", err)
+	}
+	msg := readNextMessage(t, client, 3*time.Second)
+	if msg.Type != ws.MsgTypePowerUpResult {
+		t.Fatalf("expected %s, got %s", ws.MsgTypePowerUpResult, msg.Type)
+	}
+	b, _ := json.Marshal(msg.Data)
+	var result ws.PowerUpResultPayload
+	if err := json.Unmarshal(b, &result); err != nil {
+		t.Fatalf("decode add_time result: %v", err)
+	}
+	if result.PowerUp != "add_time" || result.AddedTimeMs != 5000 {
+		t.Fatalf("unexpected add_time confirmation: %+v", result)
+	}
+	if result.RemainingTimeMs <= 15000 || result.RemainingTimeMs > 20000 {
+		t.Fatalf("expected authoritative extended time in (15000, 20000], got %d", result.RemainingTimeMs)
+	}
+
+	join, _ := json.Marshal(ws.JoinGameData{Session: "sd-add-time"})
+	if err := client.WriteJSON(ws.InboundMessage{Type: ws.MsgTypeJoinGame, Data: join}); err != nil {
+		t.Fatalf("write join_game: %v", err)
+	}
+	msg = readNextMessage(t, client, 3*time.Second)
+	if msg.Type != ws.MsgTypeQuestion {
+		t.Fatalf("expected resync question, got %s", msg.Type)
+	}
+	b, _ = json.Marshal(msg.Data)
+	var question ws.QuestionPayload
+	_ = json.Unmarshal(b, &question)
+	if question.RemainingTimeMs <= 15000 || question.RemainingTimeMs > result.RemainingTimeMs {
+		t.Fatalf("resync did not preserve extended deadline: result=%d resync=%d", result.RemainingTimeMs, question.RemainingTimeMs)
+	}
+
+	if err := client.WriteJSON(ws.InboundMessage{Type: ws.MsgTypeUsePowerUp, Data: powerUp}); err != nil {
+		t.Fatalf("write duplicate add_time: %v", err)
+	}
+	msg = readNextMessage(t, client, 3*time.Second)
+	if msg.Type != ws.MsgTypeError {
+		t.Fatalf("expected duplicate add_time error, got %s", msg.Type)
+	}
+	b, _ = json.Marshal(msg.Data)
+	var wsErr ws.ErrorPayload
+	_ = json.Unmarshal(b, &wsErr)
+	if wsErr.Code != ws.ErrCodePowerUpAlreadyUsed {
+		t.Fatalf("expected %s, got %s", ws.ErrCodePowerUpAlreadyUsed, wsErr.Code)
+	}
+}
+
+func TestSuddenDeath_FiftyFiftyIsRejected(t *testing.T) {
+	client := startSuddenDeath(t, "sd-no-fifty-fifty", models.GameModeSuddenDeath, 2)
+	powerUp, _ := json.Marshal(ws.UsePowerUpData{
+		Question: "ACC001",
+		PowerUp:  "fifty_fifty",
+	})
+	if err := client.WriteJSON(ws.InboundMessage{Type: ws.MsgTypeUsePowerUp, Data: powerUp}); err != nil {
+		t.Fatalf("write fifty_fifty: %v", err)
+	}
+	msg := readNextMessage(t, client, 3*time.Second)
+	if msg.Type != ws.MsgTypeError {
+		t.Fatalf("expected error, got %s", msg.Type)
+	}
+	b, _ := json.Marshal(msg.Data)
+	var wsErr ws.ErrorPayload
+	_ = json.Unmarshal(b, &wsErr)
+	if wsErr.Code != ws.ErrCodeUnsupportedPowerUp {
+		t.Fatalf("expected %s, got %s", ws.ErrCodeUnsupportedPowerUp, wsErr.Code)
 	}
 }

@@ -24,12 +24,19 @@ const (
 	DefaultTimeLimitSec = 15
 
 	MCQCorrectAnswerPoints = 10
-	MCQCompletionXP          = 10
-	MCQCorrectAnswerXP       = 5
-	MCQPerfectBonusXP        = 15
-	MCQCompletionCoins       = 5
-	MCQCorrectAnswerCoins    = 2
-	MCQPerfectBonusCoins     = 10
+	MCQCompletionXP        = 10
+	MCQCorrectAnswerXP     = 5
+	MCQPerfectBonusXP      = 15
+	MCQCompletionCoins     = 5
+	MCQCorrectAnswerCoins  = 2
+	MCQPerfectBonusCoins   = 10
+
+	SuddenDeathStreakSize        = 3
+	SuddenDeathStreakPoints      = 5
+	SuddenDeathStreakXP          = 5
+	SuddenDeathStreakCoins       = 3
+	SuddenDeathFullRunBonusXP    = 15
+	SuddenDeathFullRunBonusCoins = 10
 )
 
 // SessionInactivityTTL is the maximum allowed duration of inactivity (5 minutes) before a quiz session is abandoned.
@@ -54,8 +61,15 @@ func CheckAndAbandonIfExpired(ctx context.Context, session *models.GameSession) 
 	if time.Since(lastActivity) > SessionInactivityTTL {
 		now := time.Now().UTC()
 		session.Status = models.SessionStatusAbandoned
+		if session.IsSuddenDeath() {
+			session.EndReason = "abandoned"
+			session.CompletedSuccessfully = false
+		}
 		session.EndedAt = &now
-		_ = repo.UpdateSession(ctx, session)
+		if err := repo.UpdateSession(ctx, session); err != nil {
+			log.Printf("[SessionTTL] Failed to persist abandonment for session %s: %v\n", session.ID, err)
+			return false
+		}
 
 		if config.RedisClient != nil {
 			_ = config.RedisClient.Del(ctx, fmt.Sprintf("quiz:session:%s", session.ID)).Err()
@@ -118,8 +132,14 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 		} else if req.AbandonStale {
 			now := time.Now().UTC()
 			existing.Status = models.SessionStatusAbandoned
+			if existing.IsSuddenDeath() {
+				existing.EndReason = "abandoned"
+				existing.CompletedSuccessfully = false
+			}
 			existing.EndedAt = &now
-			_ = repo.UpdateSession(ctx, existing)
+			if err := repo.UpdateSession(ctx, existing); err != nil {
+				return nil, http.StatusInternalServerError, fmt.Errorf("failed to abandon active session: %w", err)
+			}
 			ClearSessionTTL(ctx, existing.ID)
 		} else {
 			return nil, http.StatusConflict, errors.New("an active session already exists; complete or abandon it first")
@@ -152,6 +172,16 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 		if err != nil {
 			return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch requested questions: %w", err)
 		}
+		if req.GameMode == models.GameModeSuddenDeath {
+			if len(questions) != len(req.QuestionCodes) {
+				return nil, http.StatusBadRequest, errors.New("all requested question_codes must exist and belong to sudden_death")
+			}
+			for _, q := range questions {
+				if q.QuestionType != models.GameModeSuddenDeath {
+					return nil, http.StatusBadRequest, fmt.Errorf("question %s is not a sudden_death question", q.QuestionCode)
+				}
+			}
+		}
 	}
 	if len(questions) == 0 {
 		var err error
@@ -165,13 +195,21 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 		})
 	}
 
+	if req.GameMode == models.GameModeSuddenDeath {
+		if err := ValidateSuddenDeathQuestions(questions); err != nil {
+			return nil, http.StatusInternalServerError, err
+		}
+	}
+
 	// Shuffle options for each question and create SessionQuestion objects
 	sessionQuestions := make([]models.SessionQuestion, 0, len(questions))
 	questionDTOs := make([]dto.QuestionDTO, 0, len(questions))
 	for _, q := range questions {
 		sq := ShuffleQuestion(q)
 		sessionQuestions = append(sessionQuestions, sq)
-		questionDTOs = append(questionDTOs, SessionQuestionToDTO(sq, true))
+		// Existing MCQ clients retain the historical response. Sudden Death never
+		// exposes its authoritative answer before the WebSocket grades it.
+		questionDTOs = append(questionDTOs, SessionQuestionToDTO(sq, req.GameMode != models.GameModeSuddenDeath))
 	}
 
 	// Create session record with serialized QuestionsState
@@ -220,6 +258,10 @@ func AbandonSession(ctx context.Context, clientID int, sessionID string) (int, e
 	}
 	now := time.Now().UTC()
 	session.Status = models.SessionStatusAbandoned
+	if session.IsSuddenDeath() {
+		session.EndReason = "abandoned"
+		session.CompletedSuccessfully = false
+	}
 	session.EndedAt = &now
 	if err := repo.UpdateSession(ctx, session); err != nil {
 		return http.StatusInternalServerError, fmt.Errorf("failed to abandon session: %w", err)
@@ -247,7 +289,6 @@ func EvaluateAnswer(ctx context.Context, clientID int, req *dto.SubmitAnswerRequ
 	if session.Status != models.SessionStatusInProgress {
 		return nil, http.StatusConflict, errors.New("session is not active")
 	}
-
 	// Check if session has expired due to 5 minutes of inactivity
 	if CheckAndAbandonIfExpired(ctx, session) {
 		return nil, http.StatusConflict, errors.New("quiz session expired due to 5 minutes of inactivity and has been abandoned")
@@ -294,7 +335,7 @@ func EvaluateAnswer(ctx context.Context, clientID int, req *dto.SubmitAnswerRequ
 	isCorrect, isSkipped, resolvedCorrectOption := GradeAnswer(matchedSQ, fallbackQ, req.Option, req.SelectedText)
 
 	// 5. Award fixed MCQ points after the backend has evaluated correctness.
-	pointsEarned := CalculateMCQAnswerPoints(isCorrect)
+	pointsEarned := 0
 	coinsEarned := 0
 
 	if isCorrect {
@@ -303,8 +344,19 @@ func EvaluateAnswer(ctx context.Context, clientID int, req *dto.SubmitAnswerRequ
 			session.BestStreak = session.ComboStreak
 		}
 		session.CorrectCount++
+		if session.IsSuddenDeath() {
+			pointsEarned = CalculateSuddenDeathAnswerPoints(true, session.ComboStreak)
+			if session.ComboStreak%SuddenDeathStreakSize == 0 {
+				session.StreakMilestones++
+			}
+		} else {
+			pointsEarned = CalculateMCQAnswerPoints(true)
+		}
 	} else {
 		session.ComboStreak = 0
+		if isSkipped && session.IsSuddenDeath() {
+			session.SkippedCount++
+		}
 	}
 
 	session.Score += pointsEarned
@@ -364,6 +416,9 @@ func ApplyFiftyFifty(ctx context.Context, clientID int, req *dto.FiftyFiftyReque
 	}
 	if session.Status != models.SessionStatusInProgress {
 		return nil, http.StatusConflict, errors.New("session is not active")
+	}
+	if session.IsSuddenDeath() {
+		return nil, http.StatusBadRequest, errors.New("fifty_fifty is not supported for sudden_death")
 	}
 
 	// Check if session has expired due to 5 minutes of inactivity
@@ -443,8 +498,19 @@ func CompleteSession(ctx context.Context, clientID int, req *dto.CompleteSession
 	// always finish under the deterministic MCQ rule, including sessions that
 	// may have started before a scoring deployment.
 	finalScore := session.CorrectCount * MCQCorrectAnswerPoints
+	completedSuccessfully := session.CurrentIdx >= session.TotalQuestions
+	if session.IsSuddenDeath() {
+		finalScore += session.StreakMilestones * SuddenDeathStreakPoints
+		session.CompletedSuccessfully = completedSuccessfully
+		if completedSuccessfully {
+			session.EndReason = "completed"
+		}
+	}
 	session.Score = finalScore
 	reward := CalculateGameRewards(finalScore, session.CorrectCount, session.TotalQuestions)
+	if session.IsSuddenDeath() {
+		reward = CalculateSuddenDeathRewards(session.CorrectCount, session.TotalQuestions, session.StreakMilestones, completedSuccessfully)
+	}
 
 	// Fetch current profile for level calculation
 	profile, err := GetOrCreateProfile(ctx, clientID)
@@ -500,7 +566,7 @@ func CompleteSession(ctx context.Context, clientID int, req *dto.CompleteSession
 		CorrectCount:       session.CorrectCount,
 		AccuracyPercentage: accuracy,
 		FinalScore:         finalScore,
-		MaxScore:           CalculateMaxScore(session.TotalQuestions),
+		MaxScore:           CalculateMaxScoreForMode(session.GameMode, session.TotalQuestions),
 		CoinsAwarded:       reward.Coins,
 		XPAwarded:          reward.XP,
 		GemsAwarded:        reward.Gems,
@@ -538,6 +604,19 @@ func CalculateMCQAnswerPoints(isCorrect bool) int {
 		return 0
 	}
 	return MCQCorrectAnswerPoints
+}
+
+// CalculateSuddenDeathAnswerPoints adds a milestone bonus on every third
+// consecutive correct answer without changing MCQ scoring.
+func CalculateSuddenDeathAnswerPoints(isCorrect bool, comboStreak int) int {
+	if !isCorrect {
+		return 0
+	}
+	points := MCQCorrectAnswerPoints
+	if comboStreak > 0 && comboStreak%SuddenDeathStreakSize == 0 {
+		points += SuddenDeathStreakPoints
+	}
+	return points
 }
 
 // CalculateCoins is retained for API compatibility. MCQ coins are awarded only
@@ -600,11 +679,70 @@ func CalculateGameRewards(_ int, correctCount, totalQuestions int) GameRewardSum
 	}
 }
 
+// CalculateSuddenDeathRewards applies only the agreed Sudden Death economy.
+// A full-run bonus is awarded for reaching the end, including runs containing
+// skips, while gems retain the existing accuracy-based behavior.
+func CalculateSuddenDeathRewards(correctCount, totalQuestions, streakMilestones int, completedSuccessfully bool) GameRewardSummary {
+	xpBreakdown := map[string]int{
+		"participation_xp":    MCQCompletionXP,
+		"correct_answer_xp":   correctCount * MCQCorrectAnswerXP,
+		"streak_milestone_xp": streakMilestones * SuddenDeathStreakXP,
+		"full_run_bonus_xp":   0,
+	}
+	coinBreakdown := map[string]int{
+		"participation_coins":    MCQCompletionCoins,
+		"correct_answer_coins":   correctCount * MCQCorrectAnswerCoins,
+		"streak_milestone_coins": streakMilestones * SuddenDeathStreakCoins,
+		"full_run_bonus_coins":   0,
+	}
+	if completedSuccessfully {
+		xpBreakdown["full_run_bonus_xp"] = SuddenDeathFullRunBonusXP
+		coinBreakdown["full_run_bonus_coins"] = SuddenDeathFullRunBonusCoins
+	}
+
+	xp := 0
+	for _, value := range xpBreakdown {
+		xp += value
+	}
+	coins := 0
+	for _, value := range coinBreakdown {
+		coins += value
+	}
+
+	gems := 0
+	if totalQuestions > 0 {
+		accuracy := float64(correctCount) / float64(totalQuestions)
+		if accuracy >= 1.0 {
+			gems = 3
+		} else if accuracy >= 0.8 {
+			gems = 1
+		}
+	}
+
+	return GameRewardSummary{
+		Coins:         coins,
+		XP:            xp,
+		Gems:          gems,
+		XPBreakdown:   xpBreakdown,
+		CoinBreakdown: coinBreakdown,
+	}
+}
+
 func CalculateMaxScore(totalQuestions int) int {
 	if totalQuestions <= 0 {
 		return 0
 	}
 	return totalQuestions * MCQCorrectAnswerPoints
+}
+
+// CalculateMaxScoreForMode preserves MCQ scoring while including Sudden Death
+// streak milestones at questions 3, 6, 9, and so on.
+func CalculateMaxScoreForMode(gameMode string, totalQuestions int) int {
+	maxScore := CalculateMaxScore(totalQuestions)
+	if gameMode == models.GameModeSuddenDeath && totalQuestions > 0 {
+		maxScore += (totalQuestions / SuddenDeathStreakSize) * SuddenDeathStreakPoints
+	}
+	return maxScore
 }
 
 // CalculateNewLevel determines the player's level based on total experience.
@@ -720,14 +858,10 @@ func ShuffleQuestion(q models.Question) models.SessionQuestion {
 	return sq
 }
 
-// GradeAnswer evaluates whether a player's answer is correct.
-// It handles:
-// 1. Shuffled option letter match ('a', 'b', 'c', 'd')
-// 2. Original unshuffled database letter match (e.g. 'a' before shuffle)
-// 3. Option text match (either submitted as option or selectedText matching CorrectText)
-// 4. Slot text match (option letter points to text matching CorrectText)
-// 5. Fallback database question matching by letter or text
-func GradeAnswer(sq *models.SessionQuestion, q *models.Question, option string, selectedText string) (isCorrect bool, isSkipped bool, resolvedCorrectOption string) {
+// GradeAnswer evaluates against the option mapping actually served to the
+// player. selectedText and OriginalCorrect never override a session option.
+// The database fallback remains for legacy sessions without persisted state.
+func GradeAnswer(sq *models.SessionQuestion, q *models.Question, option string, _ string) (isCorrect bool, isSkipped bool, resolvedCorrectOption string) {
 	cleanOption := strings.ToLower(strings.TrimSpace(option))
 	if cleanOption == "skip" {
 		if sq != nil {
@@ -739,49 +873,24 @@ func GradeAnswer(sq *models.SessionQuestion, q *models.Question, option string, 
 		return false, true, ""
 	}
 
-	cleanSelectedText := strings.TrimSpace(selectedText)
-
 	if sq != nil {
 		resolvedCorrectOption = strings.ToLower(strings.TrimSpace(sq.CorrectOption))
-		correctText := strings.TrimSpace(sq.CorrectText)
-		originalCorrect := strings.ToLower(strings.TrimSpace(sq.OriginalCorrect))
 
-		// 1. Check against shuffled session correct letter (primary match)
-		if strings.EqualFold(cleanOption, resolvedCorrectOption) {
-			return true, false, resolvedCorrectOption
+		// The served/shuffled slot is authoritative. OriginalCorrect is metadata
+		// only, and selectedText cannot override a contradictory option letter.
+		if cleanOption == "a" || cleanOption == "b" || cleanOption == "c" || cleanOption == "d" {
+			return strings.EqualFold(cleanOption, resolvedCorrectOption), false, resolvedCorrectOption
 		}
 
-		// 2. Check against original unshuffled letter
-		if originalCorrect != "" && strings.EqualFold(cleanOption, originalCorrect) {
-			return true, false, resolvedCorrectOption
-		}
-
-		// 3. Check against correct answer text (via selectedText or option containing text)
-		if correctText != "" {
-			if cleanSelectedText != "" && strings.EqualFold(cleanSelectedText, correctText) {
-				return true, false, resolvedCorrectOption
-			}
-			if strings.EqualFold(strings.TrimSpace(option), correctText) {
-				return true, false, resolvedCorrectOption
+		// Preserve the documented full-text option form safely by resolving the
+		// text back to its served slot before comparing that slot.
+		servedOptions := []string{sq.OptionA, sq.OptionB, sq.OptionC, sq.OptionD}
+		letters := []string{"a", "b", "c", "d"}
+		for i, text := range servedOptions {
+			if text != "" && strings.EqualFold(strings.TrimSpace(option), strings.TrimSpace(text)) {
+				return letters[i] == resolvedCorrectOption, false, resolvedCorrectOption
 			}
 		}
-
-		// 4. Check if the option letter maps to text that matches correctText
-		var selectedSlotText string
-		switch cleanOption {
-		case "a":
-			selectedSlotText = sq.OptionA
-		case "b":
-			selectedSlotText = sq.OptionB
-		case "c":
-			selectedSlotText = sq.OptionC
-		case "d":
-			selectedSlotText = sq.OptionD
-		}
-		if correctText != "" && selectedSlotText != "" && strings.EqualFold(strings.TrimSpace(selectedSlotText), correctText) {
-			return true, false, resolvedCorrectOption
-		}
-
 		return false, false, resolvedCorrectOption
 	}
 
@@ -799,13 +908,10 @@ func GradeAnswer(sq *models.SessionQuestion, q *models.Question, option string, 
 			correctText = q.OptionD
 		}
 
-		if strings.EqualFold(cleanOption, resolvedCorrectOption) {
-			return true, false, resolvedCorrectOption
+		if cleanOption == "a" || cleanOption == "b" || cleanOption == "c" || cleanOption == "d" {
+			return strings.EqualFold(cleanOption, resolvedCorrectOption), false, resolvedCorrectOption
 		}
 		if correctText != "" {
-			if cleanSelectedText != "" && strings.EqualFold(cleanSelectedText, strings.TrimSpace(correctText)) {
-				return true, false, resolvedCorrectOption
-			}
 			if strings.EqualFold(strings.TrimSpace(option), strings.TrimSpace(correctText)) {
 				return true, false, resolvedCorrectOption
 			}
@@ -815,6 +921,33 @@ func GradeAnswer(sq *models.SessionQuestion, q *models.Question, option string, 
 	}
 
 	return false, false, ""
+}
+
+// ValidateSuddenDeathQuestions enforces the two-option contract without
+// constraining the shared four-option MCQ model.
+func ValidateSuddenDeathQuestions(questions []models.Question) error {
+	for _, q := range questions {
+		if q.QuestionType != models.GameModeSuddenDeath {
+			return fmt.Errorf("question %s is not a sudden_death question", q.QuestionCode)
+		}
+		options := map[string]string{
+			"a": q.OptionA,
+			"b": q.OptionB,
+			"c": q.OptionC,
+			"d": q.OptionD,
+		}
+		nonEmpty := 0
+		for _, text := range options {
+			if strings.TrimSpace(text) != "" {
+				nonEmpty++
+			}
+		}
+		correct := strings.ToLower(strings.TrimSpace(q.CorrectOption))
+		if nonEmpty != 2 || strings.TrimSpace(options[correct]) == "" {
+			return fmt.Errorf("sudden_death question %s must have exactly two non-empty options and one valid correct option", q.QuestionCode)
+		}
+	}
+	return nil
 }
 
 // SessionQuestionToDTO converts a SessionQuestion into a client-safe DTO.

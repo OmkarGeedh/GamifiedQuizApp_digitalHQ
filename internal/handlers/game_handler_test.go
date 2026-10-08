@@ -630,3 +630,124 @@ func TestE2E_WebSocket_LiveGame(t *testing.T) {
 
 	t.Logf("WebSocket live test passed: Question=%s, Result=%+v", qPayload.Question, resultPayload)
 }
+
+func TestSuddenDeathSessionContractAndFiltering(t *testing.T) {
+	r, token := setupTestApp(t)
+	topic := "sd-contract-" + uuid.NewString()
+	recoveryTopic := "sd-recovery-" + uuid.NewString()
+	sdCodeA := "sd_" + strings.ReplaceAll(uuid.NewString()[:12], "-", "")
+	sdCodeB := "sd_" + strings.ReplaceAll(uuid.NewString()[:12], "-", "")
+	mcqCode := "mcq_" + strings.ReplaceAll(uuid.NewString()[:11], "-", "")
+	recoveryMCQCode := "mcq_" + strings.ReplaceAll(uuid.NewString()[:11], "-", "")
+
+	questions := []models.Question{
+		{QuestionCode: sdCodeA, QuestionType: models.GameModeSuddenDeath, TopicID: topic, Prompt: "Sudden Death A", OptionA: "Correct", OptionB: "Wrong", OptionC: "", OptionD: "", CorrectOption: "a", Points: 10, Difficulty: 1},
+		{QuestionCode: sdCodeB, QuestionType: models.GameModeSuddenDeath, TopicID: topic, Prompt: "Sudden Death B", OptionA: "Wrong", OptionB: "Correct", OptionC: "", OptionD: "", CorrectOption: "b", Points: 10, Difficulty: 1},
+		{QuestionCode: mcqCode, QuestionType: models.GameModeMCQ, TopicID: topic, Prompt: "MCQ", OptionA: "A", OptionB: "B", OptionC: "C", OptionD: "D", CorrectOption: "a", Points: 10, Difficulty: 1},
+		{QuestionCode: recoveryMCQCode, QuestionType: models.GameModeMCQ, TopicID: recoveryTopic, Prompt: "Recovery MCQ", OptionA: "A", OptionB: "B", OptionC: "C", OptionD: "D", CorrectOption: "a", Points: 10, Difficulty: 1},
+	}
+	if err := config.DB.Create(&questions).Error; err != nil {
+		t.Fatalf("create question fixtures: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = config.DB.Where("topic_id IN ?", []string{topic, recoveryTopic}).Delete(&models.Question{}).Error
+		_ = config.DB.Where("topic_id IN ?", []string{topic, recoveryTopic}).Delete(&models.GameSession{}).Error
+	})
+
+	abandonActive := func() {
+		_ = config.DB.Model(&models.GameSession{}).
+			Where("client_id = ? AND status = ?", 1, models.SessionStatusInProgress).
+			Update("status", models.SessionStatusAbandoned).Error
+	}
+	abandonActive()
+
+	t.Run("creation hides answers and returns exactly two options", func(t *testing.T) {
+		body, _ := json.Marshal(dto.CreateSessionRequestDTO{
+			TopicID:       topic,
+			QuestionCount: 2,
+			GameMode:      models.GameModeSuddenDeath,
+		})
+		req, _ := http.NewRequest(http.MethodPost, "/api/v1/quiz/sessions/create", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+		}
+		var resp struct {
+			Data dto.SessionCreatedResponseDTO `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode creation response: %v", err)
+		}
+		if len(resp.Data.Questions) != 2 {
+			t.Fatalf("expected two questions, got %d", len(resp.Data.Questions))
+		}
+		for _, q := range resp.Data.Questions {
+			if len(q.Options) != 2 || q.CorrectOption != "" {
+				t.Fatalf("Sudden Death response leaked or malformed question: %+v", q)
+			}
+		}
+		var stored models.GameSession
+		if err := config.DB.Where("id = ?", resp.Data.Session).First(&stored).Error; err != nil {
+			t.Fatalf("load stored session: %v", err)
+		}
+		storedQuestions, err := stored.GetQuestions()
+		if err != nil || len(storedQuestions) != 2 || storedQuestions[0].CorrectOption == "" {
+			t.Fatalf("backend did not retain authoritative answers: questions=%+v err=%v", storedQuestions, err)
+		}
+
+		powerUpBody, _ := json.Marshal(dto.FiftyFiftyRequestDTO{
+			Session:  resp.Data.Session,
+			Question: resp.Data.Questions[0].Question,
+		})
+		powerUpReq, _ := http.NewRequest(http.MethodPost, "/api/v1/quiz/power-ups/fifty-fifty", bytes.NewReader(powerUpBody))
+		powerUpReq.Header.Set("Authorization", "Bearer "+token)
+		powerUpReq.Header.Set("Content-Type", "application/json")
+		powerUpResponse := httptest.NewRecorder()
+		r.ServeHTTP(powerUpResponse, powerUpReq)
+		if powerUpResponse.Code != http.StatusBadRequest {
+			t.Fatalf("expected Sudden Death REST 50:50 to return 400, got %d: %s", powerUpResponse.Code, powerUpResponse.Body.String())
+		}
+		abandonActive()
+	})
+
+	t.Run("mixed explicit question codes are rejected", func(t *testing.T) {
+		body, _ := json.Marshal(dto.CreateSessionRequestDTO{
+			TopicID:       topic,
+			GameMode:      models.GameModeSuddenDeath,
+			QuestionCodes: []string{sdCodeA, mcqCode},
+		})
+		req, _ := http.NewRequest(http.MethodPost, "/api/v1/quiz/sessions/create", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected mixed-mode request to return 400, got %d: %s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("WebSocket recovery never falls back to MCQ", func(t *testing.T) {
+		abandonActive()
+		session := models.GameSession{
+			ID:             uuid.NewString(),
+			ClientID:       1,
+			TopicID:        recoveryTopic,
+			GameMode:       models.GameModeSuddenDeath,
+			TotalQuestions: 1,
+			Status:         models.SessionStatusInProgress,
+		}
+		if err := config.DB.Create(&session).Error; err != nil {
+			t.Fatalf("create recovery session: %v", err)
+		}
+		req, _ := http.NewRequest(http.MethodGet, "/api/v1/ws/game?session_id="+url.QueryEscape(session.ID), nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("expected recovery without Sudden Death questions to fail safely, got %d: %s", w.Code, w.Body.String())
+		}
+	})
+}

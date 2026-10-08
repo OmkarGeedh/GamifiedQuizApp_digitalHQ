@@ -102,10 +102,13 @@ type AnswerResultPayload struct {
 	IsTimeout     bool    `json:"is_timeout"`
 }
 
-// PowerUpResultPayload communicates hidden options after a 50:50 power-up.
+// PowerUpResultPayload confirms an authoritative power-up result.
 type PowerUpResultPayload struct {
-	Question      string   `json:"question"`
-	HiddenOptions []string `json:"hidden_options"`
+	Question        string   `json:"question"`
+	PowerUp         string   `json:"power_up,omitempty"`
+	HiddenOptions   []string `json:"hidden_options,omitempty"`
+	AddedTimeMs     int      `json:"added_time_ms,omitempty"`
+	RemainingTimeMs int      `json:"remaining_time_ms,omitempty"`
 }
 
 // GameOverPayload is the final summary sent when the quiz ends.
@@ -113,6 +116,8 @@ type GameOverPayload struct {
 	FinalScore     int                   `json:"final_score"`
 	TotalQuestions int                   `json:"total_questions"`
 	CorrectCount   int                   `json:"correct_count"`
+	SkippedCount   int                   `json:"skipped_count"`
+	BestStreak     int                   `json:"best_streak"`
 	CoinsEarned    int                   `json:"coins_earned"`
 	XPEarned       int                   `json:"xp_earned"`
 	GemsEarned     int                   `json:"gems_earned"`
@@ -125,18 +130,21 @@ type GameOverPayload struct {
 	// EndReason is why the run stopped. In Sudden Death it distinguishes an
 	// elimination from a clean sweep, which the score alone cannot express.
 	EndReason string `json:"end_reason"`
-	// EndedEarly is true when the run stopped before every question was
-	// answered, i.e. the player was eliminated.
-	EndedEarly bool `json:"ended_early"`
+	// EndedEarly is true when the run stopped on a wrong answer or timeout.
+	EndedEarly            bool `json:"ended_early"`
+	CompletedSuccessfully bool `json:"completed_successfully"`
 }
 
 // End reasons for the game_over frame.
 const (
 	// EndReasonCleared means every question in the set was survived.
 	EndReasonCleared = "cleared"
-	// EndReasonEliminated means Sudden Death ended the run on the first wrong
-	// answer or timeout.
-	EndReasonEliminated = "eliminated"
+	// EndReasonEliminated is retained for compatibility with older consumers.
+	EndReasonEliminated  = "eliminated"
+	EndReasonWrongAnswer = "wrong_answer"
+	EndReasonTimeout     = "timeout"
+	EndReasonCompleted   = "completed"
+	EndReasonAbandoned   = "abandoned"
 )
 
 // LevelUpRewardPayload is separate from the base MCQ reward totals.

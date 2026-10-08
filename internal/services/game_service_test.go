@@ -2,6 +2,8 @@ package services
 
 import (
 	"context"
+	"encoding/json"
+	"os"
 	"testing"
 	"time"
 
@@ -49,6 +51,37 @@ func TestCalculateMCQAnswerPoints(t *testing.T) {
 				t.Fatalf("expected %d points, got %d", tt.expected, got)
 			}
 		})
+	}
+}
+
+func TestSuddenDeathScoringAndRewards(t *testing.T) {
+	streaks := []struct {
+		streak int
+		want   int
+	}{
+		{streak: 1, want: 10},
+		{streak: 2, want: 10},
+		{streak: 3, want: 15},
+		{streak: 6, want: 15},
+	}
+	for _, tc := range streaks {
+		if got := CalculateSuddenDeathAnswerPoints(true, tc.streak); got != tc.want {
+			t.Fatalf("streak %d: expected %d points, got %d", tc.streak, tc.want, got)
+		}
+	}
+	if got := CalculateSuddenDeathAnswerPoints(false, 3); got != 0 {
+		t.Fatalf("wrong answer must score 0, got %d", got)
+	}
+	if got := CalculateMaxScoreForMode(models.GameModeSuddenDeath, 10); got != 115 {
+		t.Fatalf("expected Sudden Death max score 115, got %d", got)
+	}
+	if got := CalculateMaxScoreForMode(models.GameModeMCQ, 10); got != 100 {
+		t.Fatalf("expected MCQ max score to remain 100, got %d", got)
+	}
+
+	reward := CalculateSuddenDeathRewards(10, 10, 3, true)
+	if reward.XP != 90 || reward.Coins != 44 || reward.Gems != 3 {
+		t.Fatalf("unexpected perfect Sudden Death rewards: %+v", reward)
 	}
 }
 
@@ -261,81 +294,130 @@ func TestGradeAnswer_MultiLayeredEvaluation(t *testing.T) {
 		Difficulty:    1,
 	}
 
-	sq := ShuffleQuestion(orig)
-	// sq.CorrectText is "4"
-	// sq.OriginalCorrect is "a"
-	// sq.CorrectOption is whichever slot "4" was shuffled into
+	servedA := models.SessionQuestion{
+		QuestionCode:    orig.QuestionCode,
+		OptionA:         "4",
+		OptionB:         "3",
+		CorrectOption:   "a",
+		OriginalCorrect: "a",
+		CorrectText:     "4",
+	}
+	servedB := models.SessionQuestion{
+		QuestionCode:    orig.QuestionCode,
+		OptionA:         "3",
+		OptionB:         "4",
+		CorrectOption:   "b",
+		OriginalCorrect: "a",
+		CorrectText:     "4",
+	}
 
-	t.Run("Matches Shuffled Letter", func(t *testing.T) {
-		correct, skipped, res := GradeAnswer(&sq, nil, sq.CorrectOption, "")
-		if !correct || skipped || res != sq.CorrectOption {
-			t.Fatalf("Expected correct=true, skipped=false, got correct=%v, skipped=%v, res=%s", correct, skipped, res)
+	t.Run("unshuffled served A", func(t *testing.T) {
+		correct, skipped, res := GradeAnswer(&servedA, nil, "a", "")
+		if !correct || skipped || res != "a" {
+			t.Fatalf("expected served A to be correct, got correct=%v skipped=%v res=%s", correct, skipped, res)
+		}
+		wrong, _, _ := GradeAnswer(&servedA, nil, "b", "")
+		if wrong {
+			t.Fatal("served B must be wrong when served A is authoritative")
 		}
 	})
 
-	t.Run("Matches Original DB Letter", func(t *testing.T) {
-		correct, skipped, _ := GradeAnswer(&sq, nil, "a", "")
-		if !correct || skipped {
-			t.Fatalf("Expected original letter 'a' to evaluate as correct, got %v", correct)
+	t.Run("shuffled served B rejects original A", func(t *testing.T) {
+		correct, skipped, res := GradeAnswer(&servedB, nil, "b", "")
+		if !correct || skipped || res != "b" {
+			t.Fatalf("expected shuffled B to be correct, got correct=%v skipped=%v res=%s", correct, skipped, res)
+		}
+		wrong, _, _ := GradeAnswer(&servedB, nil, "a", "")
+		if wrong {
+			t.Fatal("original pre-shuffle A must not bypass served mapping")
 		}
 	})
 
-	t.Run("Matches Option Text in Option Field", func(t *testing.T) {
-		correct, skipped, _ := GradeAnswer(&sq, nil, "4", "")
-		if !correct || skipped {
-			t.Fatalf("Expected option text '4' to evaluate as correct, got %v", correct)
-		}
-	})
-
-	t.Run("Matches SelectedText when Option is Desynchronized", func(t *testing.T) {
-		// Suppose client showed option 'x' as "4", but session shuffled "4" elsewhere
-		wrongLetter := "b"
-		if sq.CorrectOption == "b" {
-			wrongLetter = "c"
-		}
-		correct, skipped, _ := GradeAnswer(&sq, nil, wrongLetter, "4")
-		if !correct || skipped {
-			t.Fatalf("Expected selected_text '4' to override mismatched option letter, got %v", correct)
-		}
-	})
-
-	t.Run("Matches Slot Text in Session Question", func(t *testing.T) {
-		// Selecting the letter that has "4"
-		correct, _, _ := GradeAnswer(&sq, nil, sq.CorrectOption, "")
-		if !correct {
-			t.Fatal("Expected slot text match to evaluate as correct")
-		}
-	})
-
-	t.Run("Rejects Incorrect Letter and Incorrect Text", func(t *testing.T) {
-		wrongLetter := "b"
-		if sq.CorrectOption == "b" {
-			wrongLetter = "c"
-		}
-		correct, skipped, _ := GradeAnswer(&sq, nil, wrongLetter, "999")
+	t.Run("contradictory selected text cannot bypass option", func(t *testing.T) {
+		correct, skipped, _ := GradeAnswer(&servedB, nil, "a", "4")
 		if correct || skipped {
-			t.Fatalf("Expected incorrect answer to be false, got correct=%v", correct)
+			t.Fatalf("wrong served slot plus correct selected_text must be wrong, got correct=%v skipped=%v", correct, skipped)
 		}
 	})
 
-	t.Run("Handles Skip", func(t *testing.T) {
-		correct, skipped, res := GradeAnswer(&sq, nil, "skip", "")
-		if correct || !skipped || res != sq.CorrectOption {
+	t.Run("full option text resolves through served mapping", func(t *testing.T) {
+		correct, skipped, _ := GradeAnswer(&servedB, nil, "4", "")
+		if !correct || skipped {
+			t.Fatal("correct full option text should resolve to served slot B")
+		}
+	})
+
+	t.Run("rejects incorrect text", func(t *testing.T) {
+		correct, skipped, _ := GradeAnswer(&servedB, nil, "999", "4")
+		if correct || skipped {
+			t.Fatalf("expected incorrect answer to be false, got correct=%v", correct)
+		}
+	})
+
+	t.Run("handles skip", func(t *testing.T) {
+		correct, skipped, res := GradeAnswer(&servedB, nil, "skip", "")
+		if correct || !skipped || res != servedB.CorrectOption {
 			t.Fatalf("Expected correct=false, skipped=true, got correct=%v, skipped=%v", correct, skipped)
 		}
 	})
 
-	t.Run("Fallback DB Question when Session State is Missing", func(t *testing.T) {
+	t.Run("database fallback keeps option authoritative", func(t *testing.T) {
 		// Evaluating directly against models.Question
 		correctLetter, _, _ := GradeAnswer(nil, &orig, "a", "")
 		if !correctLetter {
 			t.Fatal("Expected DB question letter 'a' to evaluate as correct")
 		}
-		correctText, _, _ := GradeAnswer(nil, &orig, "b", "4")
+		correctText, _, _ := GradeAnswer(nil, &orig, "4", "")
 		if !correctText {
-			t.Fatal("Expected DB question with selected_text '4' to evaluate as correct")
+			t.Fatal("Expected DB question option text '4' to evaluate as correct")
+		}
+		bypassed, _, _ := GradeAnswer(nil, &orig, "b", "4")
+		if bypassed {
+			t.Fatal("selected_text must not override a wrong database option letter")
 		}
 	})
+}
+
+func TestSuddenDeathSeedQuestionsEnforceTwoOptionContract(t *testing.T) {
+	raw, err := os.ReadFile("../data/seed_questions.json")
+	if err != nil {
+		t.Fatalf("read seed data: %v", err)
+	}
+	type seedQuestion struct {
+		models.Question
+		CorrectOption string `json:"correct_option"`
+	}
+	var all []seedQuestion
+	if err := json.Unmarshal(raw, &all); err != nil {
+		t.Fatalf("decode seed data: %v", err)
+	}
+	suddenDeath := make([]models.Question, 0, 10)
+	for _, q := range all {
+		if q.QuestionType == models.GameModeSuddenDeath {
+			q.Question.CorrectOption = q.CorrectOption
+			suddenDeath = append(suddenDeath, q.Question)
+		}
+	}
+	if len(suddenDeath) != 10 {
+		t.Fatalf("expected 10 Sudden Death seed questions, got %d", len(suddenDeath))
+	}
+	if err := ValidateSuddenDeathQuestions(suddenDeath); err != nil {
+		t.Fatalf("invalid Sudden Death seed contract: %v", err)
+	}
+	for _, q := range suddenDeath {
+		sq := ShuffleQuestion(q)
+		correct, _, _ := GradeAnswer(&sq, nil, sq.CorrectOption, "")
+		if !correct {
+			t.Fatalf("%s: shuffled correct slot %s was rejected", q.QuestionCode, sq.CorrectOption)
+		}
+		wrong := "a"
+		if sq.CorrectOption == "a" {
+			wrong = "b"
+		}
+		if accepted, _, _ := GradeAnswer(&sq, nil, wrong, sq.CorrectText); accepted {
+			t.Fatalf("%s: wrong served slot %s bypassed grading", q.QuestionCode, wrong)
+		}
+	}
 }
 
 func TestCheckAndAbandonIfExpired(t *testing.T) {
@@ -409,4 +491,3 @@ func TestCheckAndAbandonIfExpired(t *testing.T) {
 		}
 	})
 }
-
