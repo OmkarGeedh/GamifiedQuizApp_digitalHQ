@@ -28,6 +28,22 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrator:
+        condition: service_completed_successfully
+
+  migrator:
+    build:
+      context: ../SkillVerse-SQL_Migration
+      dockerfile: Dockerfile
+    container_name: quiz_migrator
+    restart: "no"
+    environment:
+      - DB_URL=postgresql://${POSTGRES_USER:-skillverse}:${POSTGRES_PASSWORD:-skillverse_secrets}@postgres:5432/${POSTGRES_DB:-gamifiedapp}?sslmode=disable
+    volumes:
+      - .:/backend
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   postgres:
     image: postgres:16-alpine
