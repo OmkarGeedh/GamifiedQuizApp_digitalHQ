@@ -26,7 +26,7 @@ func TestSessionCache_RedisNilGraceful(t *testing.T) {
 
 	ctx := context.Background()
 	session := &models.GameSession{
-		ID:             "test-session-id",
+		ID:             "test-session-id-nil-redis",
 		ClientID:       42,
 		GameMode:       models.GameModeSortItOut,
 		QuestionsState: `[{"question_code":"q1","prompt":"P1"}]`,
@@ -37,8 +37,25 @@ func TestSessionCache_RedisNilGraceful(t *testing.T) {
 	}
 
 	cached, ok := GetCachedSession(ctx, session.ID)
-	if ok || cached != nil {
-		t.Fatalf("expected ok=false and cached=nil when Redis is nil")
+	if !ok || cached == nil {
+		t.Fatalf("expected ok=true and cached!=nil from in-memory fallback when Redis is nil")
+	}
+	if cached.ClientID != 42 {
+		t.Errorf("expected clientID 42, got %d", cached.ClientID)
+	}
+
+	// Active exclusion lock test
+	if err := SetClientActiveSession(ctx, 42, session.ID, models.GameModeSortItOut); err != nil {
+		t.Fatalf("expected nil error setting active pointer: %v", err)
+	}
+	active, found := GetClientActiveSession(ctx, 42)
+	if !found || active == nil || active.SessionID != session.ID {
+		t.Fatalf("expected active session pointer found with session ID %s", session.ID)
+	}
+	_ = ClearClientActiveSession(ctx, 42)
+	_, foundAfterClear := GetClientActiveSession(ctx, 42)
+	if foundAfterClear {
+		t.Errorf("expected active pointer to be cleared")
 	}
 
 	if err := RefreshSessionCacheTTL(ctx, session.ID); err != nil {
@@ -47,6 +64,11 @@ func TestSessionCache_RedisNilGraceful(t *testing.T) {
 
 	if err := InvalidateCachedSession(ctx, session.ID); err != nil {
 		t.Fatalf("expected nil error on invalidate when Redis is nil, got %v", err)
+	}
+
+	_, okAfterDelete := GetCachedSession(ctx, session.ID)
+	if okAfterDelete {
+		t.Errorf("expected ok=false after invalidation")
 	}
 }
 

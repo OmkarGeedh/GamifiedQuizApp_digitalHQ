@@ -19,6 +19,7 @@ import (
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/repo"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/utils"
 	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/sync/errgroup"
 )
 
 // -----------------------------------------------------------------------------
@@ -205,42 +206,54 @@ func SignupSendCodeService(ctx context.Context, ip string, req *dto.SignupSendCo
 		return nil, http.StatusBadRequest, err
 	}
 
-	// 1. Check uniqueness in PostgreSQL database
-	emailExists, err := repo.CheckEmailExists(ctx, req.Email)
-	if err != nil {
-		return nil, http.StatusInternalServerError, fmt.Errorf("failed to verify email availability: %w", err)
-	}
-	if emailExists {
-		return nil, http.StatusConflict, errors.New("an account with this email already exists")
-	}
-
-	userExists, err := repo.CheckUsernameExists(ctx, req.DisplayName)
-	if err != nil {
-		return nil, http.StatusInternalServerError, fmt.Errorf("failed to verify display name availability: %w", err)
-	}
-	if userExists {
-		return nil, http.StatusConflict, errors.New("this display name is already taken")
-	}
-
-	// 2. Check Cooldown (60 seconds per email)
+	// 1. Check Cooldown & Rate Limit first to reject early without DB/CPU work
 	if remaining, onCooldown := checkSignupCooldown(ctx, req.Email); onCooldown {
 		return nil, http.StatusTooManyRequests, fmt.Errorf("please wait %d seconds before requesting another code", remaining)
 	}
-
-	// 3. Check Rate Limit (5 requests per 15-minute window)
 	if !checkAndIncrementSignupRateLimit(ctx, req.Email, 5, 15*time.Minute) {
 		return nil, http.StatusTooManyRequests, errors.New("too many verification code requests. please try again in 15 minutes")
 	}
 
-	// 4. Hash password with bcrypt and configured server secret
+	// 2. Concurrently check uniqueness in PostgreSQL and hash password with bcrypt
 	secret := ""
 	if config.AppConfig != nil {
 		secret = config.AppConfig.Server.PasswordSecret
 	}
 	combined := req.Password + secret
-	hashed, err := bcrypt.GenerateFromPassword([]byte(combined), 12)
-	if err != nil {
-		return nil, http.StatusInternalServerError, fmt.Errorf("failed to process password: %w", err)
+
+	var (
+		emailExists bool
+		userExists  bool
+		hashed      []byte
+	)
+	g, gCtx := errgroup.WithContext(ctx)
+
+	g.Go(func() error {
+		var err error
+		emailExists, err = repo.CheckEmailExists(gCtx, req.Email)
+		return err
+	})
+
+	g.Go(func() error {
+		var err error
+		userExists, err = repo.CheckUsernameExists(gCtx, req.DisplayName)
+		return err
+	})
+
+	g.Go(func() error {
+		var err error
+		hashed, err = bcrypt.GenerateFromPassword([]byte(combined), 12)
+		return err
+	})
+
+	if err := g.Wait(); err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed during signup initialization: %w", err)
+	}
+	if emailExists {
+		return nil, http.StatusConflict, errors.New("an account with this email already exists")
+	}
+	if userExists {
+		return nil, http.StatusConflict, errors.New("this display name is already taken")
 	}
 
 	// 5. Generate secure 6-digit numeric OTP
@@ -369,13 +382,23 @@ func SignupVerifyService(ctx context.Context, req *dto.SignupVerifyRequest) (str
 		return "", "", nil, http.StatusBadRequest, fmt.Errorf("invalid verification code. %d attempts remaining", remaining)
 	}
 
-	// 4. Double check unique constraints in DB before creating
-	emailExists, _ := repo.CheckEmailExists(ctx, pending.Email)
+	// 4. Double check unique constraints in DB concurrently before creating
+	var emailExists, userExists bool
+	gCheck, gCheckCtx := errgroup.WithContext(ctx)
+	gCheck.Go(func() error {
+		emailExists, _ = repo.CheckEmailExists(gCheckCtx, pending.Email)
+		return nil
+	})
+	gCheck.Go(func() error {
+		userExists, _ = repo.CheckUsernameExists(gCheckCtx, pending.Username)
+		return nil
+	})
+	_ = gCheck.Wait()
+
 	if emailExists {
 		deletePendingSignup(ctx, pending.Email)
 		return "", "", nil, http.StatusConflict, errors.New("an account with this email already exists")
 	}
-	userExists, _ := repo.CheckUsernameExists(ctx, pending.Username)
 	if userExists {
 		deletePendingSignup(ctx, pending.Email)
 		return "", "", nil, http.StatusConflict, errors.New("display name is already taken")
@@ -392,13 +415,26 @@ func SignupVerifyService(ctx context.Context, req *dto.SignupVerifyRequest) (str
 		return "", "", nil, http.StatusInternalServerError, fmt.Errorf("failed to create client account: %w", err)
 	}
 
-	// 6. Initialize starter gamification profile (XP, coins, level)
-	_, _ = GetOrCreateProfile(ctx, newClient.ID)
+	// 6 & 7. Concurrently initialize starter profile and generate tokens
+	var (
+		accessStr  string
+		refreshStr string
+	)
+	gPost, gPostCtx := errgroup.WithContext(ctx)
 
-	// 7. Generate JWT access & refresh tokens
-	accessStr, refreshStr, err := GenerateTokensForClient(ctx, &newClient)
-	if err != nil {
-		return "", "", nil, http.StatusInternalServerError, fmt.Errorf("failed to generate authentication tokens: %w", err)
+	gPost.Go(func() error {
+		_, pErr := GetOrCreateProfile(gPostCtx, newClient.ID)
+		return pErr
+	})
+
+	gPost.Go(func() error {
+		var tErr error
+		accessStr, refreshStr, tErr = GenerateTokensForClient(gPostCtx, &newClient)
+		return tErr
+	})
+
+	if err := gPost.Wait(); err != nil {
+		return "", "", nil, http.StatusInternalServerError, fmt.Errorf("failed to complete registration setup: %w", err)
 	}
 
 	// 8. Invalidate pending signup session and cooldown

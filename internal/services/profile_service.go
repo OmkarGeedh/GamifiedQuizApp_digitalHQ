@@ -13,6 +13,7 @@ import (
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/models"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/repo"
 	"github.com/google/uuid"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 	"gorm.io/gorm"
@@ -202,19 +203,43 @@ func GetMyProfile(ctx context.Context, clientID int) (*dto.ProfileResponseDTO, i
 		return nil, http.StatusInternalServerError, fmt.Errorf("failed to retrieve profile: %w", err)
 	}
 
-	client, err := repo.GetClientByID(ctx, clientID)
-	if err != nil {
-		return nil, http.StatusNotFound, errors.New("client not found")
-	}
+	var (
+		client     *models.Client
+		last7Days  []dto.DayStreakDTO
+		weeklyRank int
+	)
 
-	last7Days, err := repo.GetLast7DaysStreak(ctx, clientID)
-	if err != nil {
-		return nil, http.StatusInternalServerError, fmt.Errorf("failed to retrieve streak history: %w", err)
-	}
+	g, gCtx := errgroup.WithContext(ctx)
 
-	weeklyRank, err := repo.CalculateWeeklyRank(ctx, profile.WeeklyScore)
-	if err != nil {
-		weeklyRank = 1
+	g.Go(func() error {
+		var cErr error
+		client, cErr = repo.GetClientByID(gCtx, clientID)
+		return cErr
+	})
+
+	g.Go(func() error {
+		var sErr error
+		last7Days, sErr = repo.GetLast7DaysStreak(gCtx, clientID)
+		if sErr != nil {
+			return fmt.Errorf("failed to retrieve streak history: %w", sErr)
+		}
+		return nil
+	})
+
+	g.Go(func() error {
+		var rErr error
+		weeklyRank, rErr = repo.CalculateWeeklyRank(gCtx, profile.WeeklyScore, clientID)
+		if rErr != nil {
+			weeklyRank = 1
+		}
+		return nil
+	})
+
+	if err := g.Wait(); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, http.StatusNotFound, errors.New("client not found")
+		}
+		return nil, http.StatusInternalServerError, err
 	}
 
 	nextLevelExp := CalculateExperienceForLevel(profile.Level)

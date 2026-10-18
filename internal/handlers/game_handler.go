@@ -28,8 +28,9 @@ var Manager *ws.SessionManager
 // wsUpgrader configures the gorilla/websocket upgrader.
 // CheckOrigin is permissive for development; restrict in production.
 var wsUpgrader = websocket.Upgrader{
-	ReadBufferSize:  4096,
-	WriteBufferSize: 4096,
+	ReadBufferSize:    4096,
+	WriteBufferSize:   4096,
+	EnableCompression: false,
 	CheckOrigin: func(r *http.Request) bool {
 		return true
 	},
@@ -305,48 +306,64 @@ func WebSocketGameHandler(c *gin.Context) {
 		return
 	}
 
-	// Validate session exists and belongs to this client
-	session, err := repo.GetSessionByID(c.Request.Context(), sessionID)
-	if err != nil {
-		response.Error(c, http.StatusNotFound, "Session not found")
-		return
-	}
-	if session.ClientID != clientID {
-		response.Error(c, http.StatusForbidden, "Session does not belong to this user")
-		return
-	}
-	if session.Status != "in_progress" {
-		response.Error(c, http.StatusConflict, "Session is not active")
-		return
-	}
-	if services.CheckAndAbandonIfExpired(c.Request.Context(), session) {
-		response.Error(c, http.StatusConflict, "quiz session expired due to 5 minutes of inactivity and has been abandoned")
-		return
-	}
-
-	// Fetch session questions from session state
-	questions, err := session.GetQuestions()
-	if err != nil || len(questions) == 0 {
-		// Recover from the same mode-specific pool. Sudden Death must never
-		// silently resume with MCQ questions.
-		questionType := models.GameModeMCQ
-		if session.IsSuddenDeath() {
-			questionType = models.GameModeSuddenDeath
-		}
-		dbQuestions, err := repo.GetQuestionsByTopicAndMode(c.Request.Context(), session.TopicID, questionType, session.TotalQuestions)
-		if err != nil || len(dbQuestions) == 0 {
-			response.Error(c, http.StatusInternalServerError, "Failed to load session questions")
+	// Memory-first check: if active in SessionManager, attach in < 0.1ms without touching Redis/DB
+	var session *models.GameSession
+	var questions []models.SessionQuestion
+	if liveSession, exists := Manager.Get(sessionID); exists && liveSession != nil {
+		if liveSession.ClientID != clientID {
+			response.Error(c, http.StatusForbidden, "Session does not belong to this user")
 			return
 		}
-		if session.IsSuddenDeath() {
-			if err := services.ValidateSuddenDeathQuestions(dbQuestions); err != nil {
-				response.Error(c, http.StatusInternalServerError, "Failed to load valid Sudden Death questions")
+		if liveSession.Session.Status != "in_progress" {
+			response.Error(c, http.StatusConflict, "Session is not active")
+			return
+		}
+		session = liveSession.Session
+		questions = liveSession.Questions
+	} else {
+		var err error
+		session, err = repo.GetSessionByID(c.Request.Context(), sessionID)
+		if err != nil {
+			response.Error(c, http.StatusNotFound, "Session not found")
+			return
+		}
+		if session.ClientID != clientID {
+			response.Error(c, http.StatusForbidden, "Session does not belong to this user")
+			return
+		}
+		if session.Status != "in_progress" {
+			response.Error(c, http.StatusConflict, "Session is not active")
+			return
+		}
+		if services.CheckAndAbandonIfExpired(c.Request.Context(), session) {
+			response.Error(c, http.StatusConflict, "quiz session expired due to 5 minutes of inactivity and has been abandoned")
+			return
+		}
+
+		// Fetch session questions from session state
+		questions, err = session.GetQuestions()
+		if err != nil || len(questions) == 0 {
+			// Recover from the same mode-specific pool. Sudden Death must never
+			// silently resume with MCQ questions.
+			questionType := models.GameModeMCQ
+			if session.IsSuddenDeath() {
+				questionType = models.GameModeSuddenDeath
+			}
+			dbQuestions, err := repo.GetQuestionsByTopicAndMode(c.Request.Context(), session.TopicID, questionType, session.TotalQuestions)
+			if err != nil || len(dbQuestions) == 0 {
+				response.Error(c, http.StatusInternalServerError, "Failed to load session questions")
 				return
 			}
-		}
-		questions = make([]models.SessionQuestion, 0, len(dbQuestions))
-		for _, q := range dbQuestions {
-			questions = append(questions, services.ShuffleQuestion(q))
+			if session.IsSuddenDeath() {
+				if err := services.ValidateSuddenDeathQuestions(dbQuestions); err != nil {
+					response.Error(c, http.StatusInternalServerError, "Failed to load valid Sudden Death questions")
+					return
+				}
+			}
+			questions = make([]models.SessionQuestion, 0, len(dbQuestions))
+			for _, q := range dbQuestions {
+				questions = append(questions, services.ShuffleQuestion(q))
+			}
 		}
 	}
 
@@ -373,56 +390,35 @@ func WebSocketGameHandler(c *gin.Context) {
 
 	log.Printf("[ws] client %d connected to session %s", clientID, sessionID)
 
-	// Ping ticker to keep connection alive
-	pingTicker := time.NewTicker(ws.PingInterval)
-	defer pingTicker.Stop()
-
-	// Read loop: decode incoming messages and push to session inbox
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for {
-			_, rawMsg, err := conn.ReadMessage()
-			if err != nil {
-				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
-					log.Printf("[ws] unexpected close for client %d: %v", clientID, err)
-				}
-				return
-			}
-
-			var msg ws.InboundMessage
-			if err := json.Unmarshal(rawMsg, &msg); err != nil {
-				log.Printf("[ws] invalid JSON from client %d: %v", clientID, err)
-				gs.SendError(ws.ErrCodeInvalidPayload, "frame could not be unmarshalled")
-				continue
-			}
-
-			switch msg.Type {
-			case ws.MsgTypeJoinGame:
-				gs.PushEvent(ws.MsgTypeJoinGame, msg.Data)
-			case ws.MsgTypeSubmitAnswer:
-				gs.PushEvent(ws.MsgTypeSubmitAnswer, msg.Data)
-			case ws.MsgTypeUsePowerUp:
-				gs.PushEvent(ws.MsgTypeUsePowerUp, msg.Data)
-			default:
-				log.Printf("[ws] unknown message type from client %d: %s", clientID, msg.Type)
-				gs.SendError(ws.ErrCodeUnsupportedType, fmt.Sprintf("unsupported message type: %s", msg.Type))
-			}
-		}
-	}()
-
-	// Keep alive loop
+	// Read loop: decode incoming messages and push to session inbox.
+	// PlayerConn's dedicated writePump safely handles outgoing frames and keep-alive pings.
 	for {
-		select {
-		case <-done:
+		_, rawMsg, err := conn.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
+				log.Printf("[ws] unexpected close for client %d: %v", clientID, err)
+			}
 			log.Printf("[ws] client %d disconnected from session %s", clientID, sessionID)
 			return
-		case <-pingTicker.C:
-			_ = conn.SetWriteDeadline(time.Now().Add(ws.WriteWait))
-			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				log.Printf("[ws] ping failed for client %d: %v", clientID, err)
-				return
-			}
+		}
+
+		var msg ws.InboundMessage
+		if err := json.Unmarshal(rawMsg, &msg); err != nil {
+			log.Printf("[ws] invalid JSON from client %d: %v", clientID, err)
+			gs.SendError(ws.ErrCodeInvalidPayload, "frame could not be unmarshalled")
+			continue
+		}
+
+		switch msg.Type {
+		case ws.MsgTypeJoinGame:
+			gs.PushEvent(ws.MsgTypeJoinGame, msg.Data)
+		case ws.MsgTypeSubmitAnswer:
+			gs.PushEvent(ws.MsgTypeSubmitAnswer, msg.Data)
+		case ws.MsgTypeUsePowerUp:
+			gs.PushEvent(ws.MsgTypeUsePowerUp, msg.Data)
+		default:
+			log.Printf("[ws] unknown message type from client %d: %s", clientID, msg.Type)
+			gs.SendError(ws.ErrCodeUnsupportedType, fmt.Sprintf("unsupported message type: %s", msg.Type))
 		}
 	}
 }

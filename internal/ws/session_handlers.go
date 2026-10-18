@@ -78,13 +78,19 @@ func (gs *GameSession) onPlayerAttached(ctx context.Context, newPlayer *PlayerCo
 func (gs *GameSession) onPlayerDetached(conn *websocket.Conn, qTimer *time.Timer, dTimer *time.Timer) {
 	gs.mu.Lock()
 	isActivePlayer := gs.Player != nil && conn != nil && gs.Player.Conn == conn
+	var oldPlayer *PlayerConn
 	if isActivePlayer {
+		oldPlayer = gs.Player
 		gs.Player = nil
 	}
 	gs.mu.Unlock()
 
 	if !isActivePlayer {
 		return
+	}
+
+	if oldPlayer != nil {
+		oldPlayer.Close()
 	}
 
 	if gs.state == stateQuestionActive {
@@ -345,9 +351,6 @@ func (gs *GameSession) handleAnswer(ctx context.Context, rawData json.RawMessage
 		timeTaken = 17000
 	}
 
-	// Persist history before acknowledging the authoritative answer. A failed
-	// write stops this in-memory run so rewards and progression cannot diverge
-	// from the durable audit trail.
 	historyRecord := &models.UserQuestionHistory{
 		ClientID:       gs.ClientID,
 		SessionID:      gs.Session.ID,
@@ -358,13 +361,8 @@ func (gs *GameSession) handleAnswer(ctx context.Context, rawData json.RawMessage
 		PointsAwarded:  pointsEarned,
 		CoinsAwarded:   0,
 	}
-	if err := repo.RecordAnswer(ctx, historyRecord); err != nil {
-		log.Printf("[ws] session %s: failed to persist answer for %s: %v", gs.ID, historyRecord.QuestionCode, err)
-		gs.stopAfterPersistenceFailure("failed to persist answer")
-		return
-	}
 
-	// Send answer result frame
+	// Send answer result frame immediately to the player for zero perceived latency
 	gs.sendToPlayer(OutboundMessage{
 		Type: MsgTypeAnswerResult,
 		Data: AnswerResultPayload{
@@ -380,6 +378,15 @@ func (gs *GameSession) handleAnswer(ctx context.Context, rawData json.RawMessage
 			IsTimeout:     false,
 		},
 	})
+
+	// Asynchronously persist answer history so database disk I/O does not delay client feedback
+	go func(rec *models.UserQuestionHistory) {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := repo.RecordAnswer(bgCtx, rec); err != nil {
+			log.Printf("[ws] session %s: async persist answer failed for %s: %v", gs.ID, rec.QuestionCode, err)
+		}
+	}(historyRecord)
 
 	// Sudden Death: the first genuinely wrong answer ends the run. Skips are
 	// excluded on purpose — a skip is a purchased power-up that bypasses a
@@ -402,8 +409,6 @@ func (gs *GameSession) handleTimeout(ctx context.Context, tTimer *time.Timer) {
 	gs.Session.ComboStreak = 0
 	score := gs.Session.Score
 
-	// Persist timeout before reporting/finalizing it for the same consistency
-	// guarantee as a submitted answer.
 	historyRecord := &models.UserQuestionHistory{
 		ClientID:       gs.ClientID,
 		SessionID:      gs.Session.ID,
@@ -414,13 +419,8 @@ func (gs *GameSession) handleTimeout(ctx context.Context, tTimer *time.Timer) {
 		PointsAwarded:  0,
 		CoinsAwarded:   0,
 	}
-	if err := repo.RecordAnswer(ctx, historyRecord); err != nil {
-		log.Printf("[ws] session %s: failed to persist timeout for %s: %v", gs.ID, historyRecord.QuestionCode, err)
-		gs.stopAfterPersistenceFailure("failed to persist timeout")
-		return
-	}
 
-	// Send timeout result frame
+	// Send timeout result frame immediately to the player
 	gs.sendToPlayer(OutboundMessage{
 		Type: MsgTypeAnswerResult,
 		Data: AnswerResultPayload{
@@ -436,6 +436,15 @@ func (gs *GameSession) handleTimeout(ctx context.Context, tTimer *time.Timer) {
 			IsTimeout:     true,
 		},
 	})
+
+	// Asynchronously persist timeout
+	go func(rec *models.UserQuestionHistory) {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := repo.RecordAnswer(bgCtx, rec); err != nil {
+			log.Printf("[ws] session %s: async persist timeout failed for %s: %v", gs.ID, rec.QuestionCode, err)
+		}
+	}(historyRecord)
 
 	// Sudden Death: letting the clock run out scores exactly like a wrong
 	// answer (zero points, streak reset), so it eliminates too. The player does
@@ -696,38 +705,43 @@ func (gs *GameSession) broadcastQuestion(remainingMs int) {
 		return
 	}
 	idx := gs.Session.CurrentIdx
-	q := gs.Questions[idx]
-	total := gs.Session.TotalQuestions
+	var payload QuestionPayload
+	if idx < len(gs.cachedQuestions) {
+		payload = gs.cachedQuestions[idx]
+	} else {
+		q := gs.Questions[idx]
+		total := gs.Session.TotalQuestions
+		opts := make([]OptionPayload, 0, 4)
+		if strings.TrimSpace(q.OptionA) != "" {
+			opts = append(opts, OptionPayload{Option: "a", Text: q.OptionA})
+		}
+		if strings.TrimSpace(q.OptionB) != "" {
+			opts = append(opts, OptionPayload{Option: "b", Text: q.OptionB})
+		}
+		if strings.TrimSpace(q.OptionC) != "" {
+			opts = append(opts, OptionPayload{Option: "c", Text: q.OptionC})
+		}
+		if strings.TrimSpace(q.OptionD) != "" {
+			opts = append(opts, OptionPayload{Option: "d", Text: q.OptionD})
+		}
 
-	opts := make([]OptionPayload, 0, 4)
-	if strings.TrimSpace(q.OptionA) != "" {
-		opts = append(opts, OptionPayload{Option: "a", Text: q.OptionA})
+		payload = QuestionPayload{
+			Question:       q.QuestionCode,
+			Prompt:         q.Prompt,
+			Points:         q.Points,
+			Hint:           q.Hint,
+			Options:        opts,
+			TimeLimitMs:    questionTimeLimitSec * 1000,
+			QuestionNumber: idx + 1,
+			TotalQuestions: total,
+		}
 	}
-	if strings.TrimSpace(q.OptionB) != "" {
-		opts = append(opts, OptionPayload{Option: "b", Text: q.OptionB})
-	}
-	if strings.TrimSpace(q.OptionC) != "" {
-		opts = append(opts, OptionPayload{Option: "c", Text: q.OptionC})
-	}
-	if strings.TrimSpace(q.OptionD) != "" {
-		opts = append(opts, OptionPayload{Option: "d", Text: q.OptionD})
-	}
+	payload.RemainingTimeMs = remainingMs
 
-	payload := OutboundMessage{
+	gs.sendToPlayer(OutboundMessage{
 		Type: MsgTypeQuestion,
-		Data: QuestionPayload{
-			Question:        q.QuestionCode,
-			Prompt:          q.Prompt,
-			Points:          q.Points,
-			Hint:            q.Hint,
-			Options:         opts,
-			TimeLimitMs:     questionTimeLimitSec * 1000,
-			RemainingTimeMs: remainingMs,
-			QuestionNumber:  idx + 1,
-			TotalQuestions:  total,
-		},
-	}
-	gs.sendToPlayer(payload)
+		Data: payload,
+	})
 }
 
 // sendToPlayer safely writes an outbound frame to the attached player.

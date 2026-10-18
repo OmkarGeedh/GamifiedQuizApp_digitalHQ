@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/cache"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/models"
+	"golang.org/x/sync/errgroup"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -102,6 +104,7 @@ func DebitWalletBalance(ctx context.Context, clientID int, currency string, amou
 		return nil, 0, err
 	}
 
+	_ = cache.InvalidateCachedProfile(ctx, clientID)
 	return &ledgerEntry, remainingBalance, nil
 }
 
@@ -162,6 +165,7 @@ func CreditWalletBalance(ctx context.Context, clientID int, currency string, amo
 		return nil, 0, err
 	}
 
+	_ = cache.InvalidateCachedProfile(ctx, clientID)
 	return &ledgerEntry, newBalance, nil
 }
 
@@ -170,11 +174,21 @@ func GetWalletLedgerHistory(ctx context.Context, clientID int, limit, offset int
 	var entries []models.WalletLedger
 	var total int64
 
-	db := GetDB().WithContext(ctx).Model(&models.WalletLedger{}).Where("client_id = ?", clientID)
-	if err := db.Count(&total).Error; err != nil {
+	g, gCtx := errgroup.WithContext(ctx)
+
+	g.Go(func() error {
+		return GetDB().WithContext(gCtx).Model(&models.WalletLedger{}).
+			Where("client_id = ?", clientID).Count(&total).Error
+	})
+
+	g.Go(func() error {
+		return GetDB().WithContext(gCtx).Model(&models.WalletLedger{}).
+			Where("client_id = ?", clientID).
+			Order("created_at DESC").Limit(limit).Offset(offset).Find(&entries).Error
+	})
+
+	if err := g.Wait(); err != nil {
 		return nil, 0, err
 	}
-
-	err := db.Order("created_at DESC").Limit(limit).Offset(offset).Find(&entries).Error
-	return entries, total, err
+	return entries, total, nil
 }

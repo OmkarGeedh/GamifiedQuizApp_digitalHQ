@@ -160,8 +160,7 @@ Pre-configured Postman collection and environment files are available in the [`p
    - `postman/GamifiedQuizApp.postman_environment.json` (Environment)
 3. Select the **"Gamified Quiz App (Local Docker)"** environment from the top-right dropdown in Postman.
 4. **Login Flow**:
-   - Run `POST /auth/login/otp` &rarr; Check terminal logs (`docker compose logs -f app`) for the generated OTP.
-   - Run `POST /auth/login/verify-otp` &rarr; The test script automatically saves the `accessToken` into your Postman environment.
+   - Run `POST /auth/login` with credentials (`player@example.com` / `secretpassword123`) &rarr; The test script automatically saves the `accessToken` into your Postman environment.
    - Run `GET /profile` to inspect your gamified profile, coins, gems, level, and 7-day streak history.
 
 ---
@@ -190,5 +189,9 @@ Pre-configured Postman collection and environment files are available in the [`p
 
 - [Points, Scoring & Rewards Specification](docs/points_calculation.md): Comprehensive breakdown of the `CalculatePoints` algorithm, the theoretical `maxScore` formula, currency economy (Coins, XP, Gems), the level formula, and the 5-minute inactivity session TTL.
 - [Sudden Death WebSocket API Contract](docs/sudden_death.md): Connection and auth, message envelope, every inbound/outbound payload with examples, and the session lifecycle diagram.
-- [Authentication Specification](docs/auth.md): Complete guide to JWT lifecycle, refresh tokens, and OTP verification.
+- [WebSocket Low-Latency Optimization](docs/websocket_low_latency_optimization.md): Sub-millisecond Sudden Death optimization guide, asynchronous persistence decoupling, dedicated write pump, and pre-computed question cache.
+- [Authentication Specification](docs/auth.md): Complete guide to JWT lifecycle, refresh tokens, dual-prefix routing, and signup/password OTP verification.
+- [Match the Following Specification](docs/match_the_following_plan.md): Relational matching pair mechanics, DTOs, scoring, and session lifecycle.
+- [Sort It Out Mini-Game Specification](docs/sort_it_out_plan.md): Binary classification mini-game mode, dedicated session cache, and gameplay endpoints.
+- [Master Architecture & Optimization Blueprint](docs/ultimate_db_redis_optimization_plan.md): 3-tier high-performance architecture, pure ephemeral Redis sessions, 6 caching domains, and PostgreSQL connection pool & O(1) sampling optimizations.
 

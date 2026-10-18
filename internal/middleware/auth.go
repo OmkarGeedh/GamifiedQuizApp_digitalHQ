@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/config"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/utils"
@@ -92,19 +93,12 @@ func ClientAuthMiddleware(c *gin.Context) {
 		return
 	}
 
-	// Check if token is blacklisted in Redis
-	var jtiVal string
-	var expVal float64
+	var (
+		jtiVal string
+		expVal float64
+	)
 	if j, ok := claims["jti"].(string); ok && j != "" {
 		jtiVal = j
-		if config.RedisClient != nil {
-			isBlacklisted, err := config.RedisClient.Exists(c.Request.Context(), "blacklist:"+jtiVal).Result()
-			if err == nil && isBlacklisted > 0 {
-				ClearClientAuthCookies(c)
-				response.Error(c, http.StatusUnauthorized, "Token is revoked (logged out)")
-				return
-			}
-		}
 	}
 	if e, ok := claims["exp"].(float64); ok {
 		expVal = e
@@ -124,20 +118,50 @@ func ClientAuthMiddleware(c *gin.Context) {
 	}
 	clientID := int(clientIDFloat)
 
-	// 4. Verify client exists and is not deleted
-	var client ClientClaims
+	// Concurrently check token blacklist in Redis and client active status in PostgreSQL
+	var (
+		client        ClientClaims
+		isBlacklisted bool
+		dbErr         error
+		wg            sync.WaitGroup
+	)
+
+	if jtiVal != "" && config.RedisClient != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			count, err := config.RedisClient.Exists(c.Request.Context(), "blacklist:"+jtiVal).Result()
+			if err == nil && count > 0 {
+				isBlacklisted = true
+			}
+		}()
+	}
+
 	if config.DB != nil {
-		err = config.DB.WithContext(c.Request.Context()).
-			Table("clients").
-			Select("id, username, email, status, phone").
-			Where("id = ? AND status != ?", clientID, "deleted").
-			Limit(1).
-			Take(&client).Error
-		if err != nil {
-			ClearClientAuthCookies(c)
-			response.Error(c, http.StatusUnauthorized, "Invalid or inactive client")
-			return
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			dbErr = config.DB.WithContext(c.Request.Context()).
+				Table("clients").
+				Select("id, username, email, status, phone").
+				Where("id = ? AND status != ?", clientID, "deleted").
+				Limit(1).
+				Take(&client).Error
+		}()
+	}
+
+	wg.Wait()
+
+	if isBlacklisted {
+		ClearClientAuthCookies(c)
+		response.Error(c, http.StatusUnauthorized, "Token is revoked (logged out)")
+		return
+	}
+
+	if dbErr != nil {
+		ClearClientAuthCookies(c)
+		response.Error(c, http.StatusUnauthorized, "Invalid or inactive client")
+		return
 	}
 
 	// 5. Attach client to context

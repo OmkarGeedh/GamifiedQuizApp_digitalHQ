@@ -17,16 +17,18 @@ func Connect(databaseURL string) (*gorm.DB, error) {
 	const maxRetries = 5
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		db, err = gorm.Open(postgres.Open(databaseURL), &gorm.Config{
-			Logger: logger.Default.LogMode(logger.Info),
+			PrepareStmt:            true, // Cache pre-compiled SQL query plans on PostgreSQL
+			SkipDefaultTransaction: true, // Disables implicit BEGIN/COMMIT on single queries (saves 1 RTT per operation)
+			Logger:                 logger.Default.LogMode(logger.Warn),
 		})
 		if err == nil {
 			if sqlDB, dbErr := db.DB(); dbErr == nil {
 				if pingErr := sqlDB.Ping(); pingErr == nil {
-					sqlDB.SetMaxOpenConns(25)
-					sqlDB.SetMaxIdleConns(25)
-					sqlDB.SetConnMaxLifetime(15 * time.Minute)
-					sqlDB.SetConnMaxIdleTime(5 * time.Minute)
-					log.Println("GORM database connection established successfully")
+					sqlDB.SetMaxOpenConns(50)                  // Max pool connections
+					sqlDB.SetMaxIdleConns(25)                  // Warm idle pool to prevent connection churn
+					sqlDB.SetConnMaxLifetime(30 * time.Minute) // Connection recycling
+					sqlDB.SetConnMaxIdleTime(5 * time.Minute)  // Evict idle connections
+					log.Println("GORM database connection established successfully (PrepareStmt=true, SkipDefaultTx=true)")
 					return db, nil
 				} else {
 					err = pingErr

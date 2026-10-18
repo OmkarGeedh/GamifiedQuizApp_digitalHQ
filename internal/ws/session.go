@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -50,6 +51,9 @@ type GameSession struct {
 	questionDeadline time.Time
 	timeRemaining    time.Duration
 
+	// cachedQuestions holds pre-computed QuestionPayloads to avoid allocation on every broadcast
+	cachedQuestions []QuestionPayload
+
 	// endReason records why the run terminated so game_over can distinguish an
 	// elimination from a clean sweep. Empty means the set was completed.
 	// Guarded by mu, like state.
@@ -64,15 +68,54 @@ type sessionEvent struct {
 
 // NewGameSession creates a session ready to run.
 func NewGameSession(sessionID string, clientID int, session *models.GameSession, questions []models.SessionQuestion) *GameSession {
-	return &GameSession{
-		ID:            sessionID,
-		ClientID:      clientID,
-		Session:       session,
-		Questions:     questions,
-		inbox:         make(chan sessionEvent, 64),
-		state:         stateWaiting,
-		timeRemaining: questionTimeLimitSec * time.Second,
+	totalQuestions := len(questions)
+	if session != nil && session.TotalQuestions > 0 {
+		totalQuestions = session.TotalQuestions
 	}
+
+	return &GameSession{
+		ID:              sessionID,
+		ClientID:        clientID,
+		Session:         session,
+		Questions:       questions,
+		cachedQuestions: precomputeQuestionPayloads(questions, totalQuestions),
+		inbox:           make(chan sessionEvent, 64),
+		state:           stateWaiting,
+		timeRemaining:   questionTimeLimitSec * time.Second,
+	}
+}
+
+// precomputeQuestionPayloads builds immutable QuestionPayloads once to eliminate
+// heap allocations, string trimming, and slice formatting during live gameplay.
+func precomputeQuestionPayloads(questions []models.SessionQuestion, totalQuestions int) []QuestionPayload {
+	cached := make([]QuestionPayload, len(questions))
+	for i, q := range questions {
+		opts := make([]OptionPayload, 0, 4)
+		if trimmed := strings.TrimSpace(q.OptionA); trimmed != "" {
+			opts = append(opts, OptionPayload{Option: "a", Text: q.OptionA})
+		}
+		if trimmed := strings.TrimSpace(q.OptionB); trimmed != "" {
+			opts = append(opts, OptionPayload{Option: "b", Text: q.OptionB})
+		}
+		if trimmed := strings.TrimSpace(q.OptionC); trimmed != "" {
+			opts = append(opts, OptionPayload{Option: "c", Text: q.OptionC})
+		}
+		if trimmed := strings.TrimSpace(q.OptionD); trimmed != "" {
+			opts = append(opts, OptionPayload{Option: "d", Text: q.OptionD})
+		}
+
+		cached[i] = QuestionPayload{
+			Question:       q.QuestionCode,
+			Prompt:         q.Prompt,
+			Points:         q.Points,
+			Hint:           q.Hint,
+			Options:        opts,
+			TimeLimitMs:    questionTimeLimitSec * 1000,
+			QuestionNumber: i + 1,
+			TotalQuestions: totalQuestions,
+		}
+	}
+	return cached
 }
 
 // AttachPlayer binds a WebSocket connection to the session.

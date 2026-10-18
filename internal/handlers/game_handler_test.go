@@ -2,6 +2,7 @@ package handlers_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/dto"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/handlers"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/models"
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/repo"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/routes"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/ws"
 	"github.com/gin-gonic/gin"
@@ -45,6 +47,7 @@ func setupTestApp(t *testing.T) (*gin.Engine, string) {
 		gameTestDB, gameTestDBErr = db.Connect(dbURL)
 		if gameTestDBErr == nil {
 			_ = db.AutoMigrate(gameTestDB)
+			_ = db.Seed(gameTestDB)
 		}
 	})
 
@@ -135,9 +138,7 @@ func TestE2E_MCQ_REST_Workflow(t *testing.T) {
 	var secondQuestionCode string
 
 	// Ensure any stale active session is cleaned up before starting test
-	_ = config.DB.Model(&models.GameSession{}).
-		Where("client_id = ? AND status = ?", 1, models.SessionStatusInProgress).
-		Update("status", models.SessionStatusAbandoned).Error
+	_ = repo.ClearClientActiveSession(context.Background(), 1)
 
 	// 3. Create Quiz Session
 	t.Run("Create new quiz session", func(t *testing.T) {
@@ -402,8 +403,8 @@ func TestE2E_MCQ_REST_Workflow(t *testing.T) {
 		}
 
 		// Verify the completed session persists the authoritative score and count.
-		var dbSession models.GameSession
-		if err := config.DB.Where("id = ?", activeSessionID).First(&dbSession).Error; err != nil {
+		dbSession, err := repo.GetSessionByID(context.Background(), activeSessionID)
+		if err != nil {
 			t.Fatalf("Failed to load completed session: %v", err)
 		}
 		if dbSession.Status != models.SessionStatusFinished {
@@ -508,8 +509,10 @@ func TestE2E_MCQ_REST_Workflow(t *testing.T) {
 			t.Fatalf("Expected 200 OK on abandon, got %d: %s", w2.Code, w2.Body.String())
 		}
 
-		var dbSession models.GameSession
-		config.DB.Where("id = ?", newSessionID).First(&dbSession)
+		dbSession, err := repo.GetSessionByID(context.Background(), newSessionID)
+		if err != nil {
+			t.Fatalf("Failed to load abandoned session: %v", err)
+		}
 		if dbSession.Status != models.SessionStatusAbandoned {
 			t.Fatalf("Expected status abandoned, got %s", dbSession.Status)
 		}
@@ -528,9 +531,7 @@ func TestE2E_WebSocket_LiveGame(t *testing.T) {
 	r, token := setupTestApp(t)
 
 	// Clean up any stale sessions
-	_ = config.DB.Model(&models.GameSession{}).
-		Where("client_id = ? AND status = ?", 1, models.SessionStatusInProgress).
-		Update("status", models.SessionStatusAbandoned).Error
+	_ = repo.ClearClientActiveSession(context.Background(), 1)
 
 	// Create live HTTP server for WebSocket tests
 	server := httptest.NewServer(r)
@@ -652,13 +653,10 @@ func TestSuddenDeathSessionContractAndFiltering(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		_ = config.DB.Where("topic_id IN ?", []string{topic, recoveryTopic}).Delete(&models.Question{}).Error
-		_ = config.DB.Where("topic_id IN ?", []string{topic, recoveryTopic}).Delete(&models.GameSession{}).Error
 	})
 
 	abandonActive := func() {
-		_ = config.DB.Model(&models.GameSession{}).
-			Where("client_id = ? AND status = ?", 1, models.SessionStatusInProgress).
-			Update("status", models.SessionStatusAbandoned).Error
+		_ = repo.ClearClientActiveSession(context.Background(), 1)
 	}
 	abandonActive()
 
@@ -690,8 +688,8 @@ func TestSuddenDeathSessionContractAndFiltering(t *testing.T) {
 				t.Fatalf("Sudden Death response leaked or malformed question: %+v", q)
 			}
 		}
-		var stored models.GameSession
-		if err := config.DB.Where("id = ?", resp.Data.Session).First(&stored).Error; err != nil {
+		stored, err := repo.GetSessionByID(context.Background(), resp.Data.Session)
+		if err != nil {
 			t.Fatalf("load stored session: %v", err)
 		}
 		storedQuestions, err := stored.GetQuestions()
@@ -739,8 +737,10 @@ func TestSuddenDeathSessionContractAndFiltering(t *testing.T) {
 			GameMode:       models.GameModeSuddenDeath,
 			TotalQuestions: 1,
 			Status:         models.SessionStatusInProgress,
+			CreatedAt:      time.Now(),
+			UpdatedAt:      time.Now(),
 		}
-		if err := config.DB.Create(&session).Error; err != nil {
+		if err := repo.CreateSession(context.Background(), &session); err != nil {
 			t.Fatalf("create recovery session: %v", err)
 		}
 		req, _ := http.NewRequest(http.MethodGet, "/api/v1/ws/game?session_id="+url.QueryEscape(session.ID), nil)
@@ -856,9 +856,7 @@ func TestCompleteSortItOutHandler(t *testing.T) {
 
 	t.Run("Full Sort It Out Game Flow: Create, Upfront Answers, Batch Submit, and Audit Review", func(t *testing.T) {
 		// Clean up any stale in-progress session for client 1
-		_ = config.DB.Model(&models.GameSession{}).
-			Where("client_id = ? AND status = ?", 1, models.SessionStatusInProgress).
-			Update("status", models.SessionStatusAbandoned).Error
+		_ = repo.ClearClientActiveSession(context.Background(), 1)
 
 		// 1. Create sort_it_out session
 		createBody, _ := json.Marshal(dto.CreateSessionRequestDTO{
@@ -1047,22 +1045,20 @@ func TestCompleteMatchTheFollowingHandler(t *testing.T) {
 
 	t.Run("Full Match the Following Game Flow: Create, Solve Boards, Batch Submit, and Audit Review", func(t *testing.T) {
 		// Clean up any stale in-progress session for client 1
-		_ = config.DB.Model(&models.GameSession{}).
-			Where("client_id = ? AND status = ?", 1, models.SessionStatusInProgress).
-			Update("status", models.SessionStatusAbandoned).Error
+		_ = repo.ClearClientActiveSession(context.Background(), 1)
 
 		// Seed fixture questions and pairs for match_the_following test
 		q1ID := uuid.New().String()
 		q2ID := uuid.New().String()
 		q3ID := uuid.New().String()
-		_ = config.DB.Where("question_code LIKE ?", "mtf_test_%").Delete(&models.Question{}).Error
+		_ = config.DB.Where("question_code LIKE ?", "mtf_test_%").Delete(&models.MatchTheFollowingQuestion{}).Error
 		code1 := "mtf_test_" + uuid.New().String()[:8]
 		code2 := "mtf_test_" + uuid.New().String()[:8]
 		code3 := "mtf_test_" + uuid.New().String()[:8]
-		testQuestions := []models.Question{
-			{ID: q1ID, QuestionCode: code1, QuestionType: models.GameModeMatchTheFollowing, TopicID: "accounting", Prompt: "Board 1", OptionA: "", OptionB: "", OptionC: "", OptionD: "", CorrectOption: "a", Points: 40, Difficulty: 1},
-			{ID: q2ID, QuestionCode: code2, QuestionType: models.GameModeMatchTheFollowing, TopicID: "accounting", Prompt: "Board 2", OptionA: "", OptionB: "", OptionC: "", OptionD: "", CorrectOption: "a", Points: 40, Difficulty: 1},
-			{ID: q3ID, QuestionCode: code3, QuestionType: models.GameModeMatchTheFollowing, TopicID: "accounting", Prompt: "Board 3", OptionA: "", OptionB: "", OptionC: "", OptionD: "", CorrectOption: "a", Points: 40, Difficulty: 1},
+		testQuestions := []models.MatchTheFollowingQuestion{
+			{ID: q1ID, QuestionCode: code1, TopicID: "accounting", Prompt: "Board 1", Points: 40, Difficulty: 1, TimeLimitSec: 25},
+			{ID: q2ID, QuestionCode: code2, TopicID: "accounting", Prompt: "Board 2", Points: 40, Difficulty: 1, TimeLimitSec: 25},
+			{ID: q3ID, QuestionCode: code3, TopicID: "accounting", Prompt: "Board 3", Points: 40, Difficulty: 1, TimeLimitSec: 25},
 		}
 		testPairs := []models.MatchPair{
 			{ID: uuid.New().String(), QuestionID: q1ID, PairOrder: 1, LeftText: "L1", RightText: "R1"},
@@ -1087,8 +1083,8 @@ func TestCompleteMatchTheFollowingHandler(t *testing.T) {
 			t.Fatalf("failed to insert test pairs: %v", err)
 		}
 		t.Cleanup(func() {
-			_ = config.DB.Where("id IN ?", []string{q1ID, q2ID, q3ID}).Delete(&models.Question{}).Error
 			_ = config.DB.Where("question_id IN ?", []string{q1ID, q2ID, q3ID}).Delete(&models.MatchPair{}).Error
+			_ = config.DB.Where("id IN ?", []string{q1ID, q2ID, q3ID}).Delete(&models.MatchTheFollowingQuestion{}).Error
 		})
 
 		// 1. Create match_the_following session

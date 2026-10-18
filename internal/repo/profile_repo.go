@@ -4,12 +4,16 @@ import (
 	"context"
 	"time"
 
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/cache"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/dto"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/models"
 	"gorm.io/gorm/clause"
 )
 
 func GetProfileByClientID(ctx context.Context, clientID int) (*models.Profile, error) {
+	if cached, ok := cache.GetCachedProfile(ctx, clientID); ok && cached != nil {
+		return cached, nil
+	}
 	db := GetDB()
 	if db == nil {
 		return &models.Profile{
@@ -24,6 +28,7 @@ func GetProfileByClientID(ctx context.Context, clientID int) (*models.Profile, e
 	if err != nil {
 		return nil, err
 	}
+	_ = cache.SetCachedProfile(ctx, &profile)
 	return &profile, nil
 }
 
@@ -40,7 +45,13 @@ func UpdateProfile(ctx context.Context, profile *models.Profile) error {
 	if db == nil {
 		return nil
 	}
-	return db.WithContext(ctx).Save(profile).Error
+	if err := db.WithContext(ctx).Save(profile).Error; err != nil {
+		return err
+	}
+	if profile != nil {
+		_ = cache.InvalidateCachedProfile(ctx, profile.ClientID)
+	}
+	return nil
 }
 
 func RecordDailyActivity(ctx context.Context, clientID int, dateStr string) error {
@@ -106,7 +117,16 @@ func GetLast7DaysStreak(ctx context.Context, clientID int) ([]dto.DayStreakDTO, 
 	return result, nil
 }
 
-func CalculateWeeklyRank(ctx context.Context, weeklyScore int) (int, error) {
+// CalculateWeeklyRank returns the player's 1-based weekly leaderboard rank.
+// If clientID is provided, it attempts to read from Redis Sorted Set in < 0.2ms.
+// Falls back to PostgreSQL COUNT(*) on cache miss or when Redis is unavailable.
+func CalculateWeeklyRank(ctx context.Context, weeklyScore int, clientID ...int) (int, error) {
+	if len(clientID) > 0 && clientID[0] > 0 {
+		if rank, err := cache.GetWeeklyRank(ctx, clientID[0]); err == nil && rank > 0 {
+			return rank, nil
+		}
+	}
+
 	db := GetDB()
 	if db == nil {
 		return 1, nil
@@ -121,3 +141,47 @@ func CalculateWeeklyRank(ctx context.Context, weeklyScore int) (int, error) {
 	}
 	return int(count) + 1, nil
 }
+
+// RebuildWeeklyLeaderboardFromDB queries PostgreSQL client_profiles for all players
+// with weekly_score > 0 and repopulates the Redis WeeklyLeaderboardKey Sorted Set.
+func RebuildWeeklyLeaderboardFromDB(ctx context.Context) (int, error) {
+	db := GetDB()
+	if db == nil {
+		return 0, nil
+	}
+
+	type PlayerScore struct {
+		ClientID    int `gorm:"column:client_id"`
+		WeeklyScore int `gorm:"column:weekly_score"`
+	}
+
+	var scores []PlayerScore
+	err := db.WithContext(ctx).
+		Model(&models.Profile{}).
+		Select("client_id, weekly_score").
+		Where("weekly_score > 0").
+		Order("weekly_score DESC").
+		Find(&scores).Error
+	if err != nil {
+		return 0, err
+	}
+
+	if len(scores) == 0 {
+		return 0, nil
+	}
+
+	entries := make([]cache.LeaderboardEntry, len(scores))
+	for i, s := range scores {
+		entries[i] = cache.LeaderboardEntry{
+			ClientID: s.ClientID,
+			Score:    float64(s.WeeklyScore),
+			Rank:     i + 1,
+		}
+	}
+
+	if err := cache.RebuildWeeklyLeaderboard(ctx, entries); err != nil {
+		return 0, err
+	}
+	return len(entries), nil
+}
+

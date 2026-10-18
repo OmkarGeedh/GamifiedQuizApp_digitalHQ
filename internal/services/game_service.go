@@ -15,6 +15,7 @@ import (
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/dto"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/models"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/repo"
+	"golang.org/x/sync/errgroup"
 	"gorm.io/gorm"
 )
 
@@ -66,10 +67,9 @@ func CheckAndAbandonIfExpired(ctx context.Context, session *models.GameSession) 
 			session.CompletedSuccessfully = false
 		}
 		session.EndedAt = &now
-		if err := repo.UpdateSession(ctx, session); err != nil {
-			log.Printf("[SessionTTL] Failed to persist abandonment for session %s: %v\n", session.ID, err)
-			return false
-		}
+		_ = repo.UpdateSession(ctx, session)
+		_ = repo.ClearClientActiveSession(ctx, session.ClientID)
+		_ = repo.InvalidateCachedSession(ctx, session.ID)
 
 		if config.RedisClient != nil {
 			_ = config.RedisClient.Del(ctx, fmt.Sprintf("quiz:session:%s", session.ID)).Err()
@@ -160,20 +160,15 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 			pairType = pairTypes[rand.IntN(len(pairTypes))]
 		}
 
-		var questions []models.Question
+		var questions []models.SortItOutQuestion
 		if len(req.QuestionCodes) > 0 {
 			var err error
-			questions, err = repo.GetQuestionsByCodes(ctx, req.QuestionCodes)
+			questions, err = repo.GetSortItOutQuestionsByCodes(ctx, req.QuestionCodes)
 			if err != nil {
 				return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch requested questions: %w", err)
 			}
 			if len(questions) != len(req.QuestionCodes) {
 				return nil, http.StatusBadRequest, errors.New("all requested question_codes must exist")
-			}
-			for _, q := range questions {
-				if q.QuestionType != models.GameModeSortItOut {
-					return nil, http.StatusBadRequest, fmt.Errorf("question %s is not a sort_it_out question", q.QuestionCode)
-				}
 			}
 			if pairType == "" && len(questions) > 0 {
 				pairType = questions[0].PairType
@@ -273,20 +268,15 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 
 	// Special flow for Match the Following multi-board matching puzzle
 	if req.GameMode == models.GameModeMatchTheFollowing {
-		var questions []models.Question
+		var questions []models.MatchTheFollowingQuestion
 		if len(req.QuestionCodes) > 0 {
 			var err error
-			questions, err = repo.GetQuestionsByCodes(ctx, req.QuestionCodes)
+			questions, err = repo.GetMatchTheFollowingQuestionsByCodes(ctx, req.QuestionCodes)
 			if err != nil {
 				return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch requested questions: %w", err)
 			}
 			if len(questions) != len(req.QuestionCodes) {
 				return nil, http.StatusBadRequest, errors.New("all requested question_codes must exist")
-			}
-			for _, q := range questions {
-				if q.QuestionType != models.GameModeMatchTheFollowing {
-					return nil, http.StatusBadRequest, fmt.Errorf("question %s is not a match_the_following question", q.QuestionCode)
-				}
 			}
 		} else {
 			if req.QuestionCount <= 0 {
@@ -516,9 +506,8 @@ func AbandonSession(ctx context.Context, clientID int, sessionID string) (int, e
 		session.CompletedSuccessfully = false
 	}
 	session.EndedAt = &now
-	if err := repo.UpdateSession(ctx, session); err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("failed to abandon session: %w", err)
-	}
+	_ = repo.UpdateSession(ctx, session)
+	_ = repo.ClearClientActiveSession(ctx, clientID)
 	ClearSessionTTL(ctx, sessionID)
 	return http.StatusOK, nil
 }
@@ -528,13 +517,30 @@ func AbandonSession(ctx context.Context, clientID int, sessionID string) (int, e
 // EvaluateAnswer grades a player's answer, records it in history, updates session state,
 // and returns the result with gamification data.
 func EvaluateAnswer(ctx context.Context, clientID int, req *dto.SubmitAnswerRequestDTO) (*dto.AnswerResultDTO, int, error) {
-	// 1. Fetch and validate session ownership
-	session, err := repo.GetSessionByID(ctx, req.Session)
-	if err != nil {
+	// 1 & 2. Concurrently fetch session and check for duplicate answer
+	var (
+		session *models.GameSession
+		already bool
+	)
+	g, gCtx := errgroup.WithContext(ctx)
+
+	g.Go(func() error {
+		var sErr error
+		session, sErr = repo.GetSessionByID(gCtx, req.Session)
+		return sErr
+	})
+
+	g.Go(func() error {
+		var aErr error
+		already, aErr = repo.HasAnsweredQuestion(gCtx, req.Session, req.Question)
+		return aErr
+	})
+
+	if err := g.Wait(); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, http.StatusNotFound, errors.New("session not found")
 		}
-		return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch session: %w", err)
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to validate session: %w", err)
 	}
 	if session.ClientID != clientID {
 		return nil, http.StatusForbidden, errors.New("session does not belong to this user")
@@ -545,12 +551,6 @@ func EvaluateAnswer(ctx context.Context, clientID int, req *dto.SubmitAnswerRequ
 	// Check if session has expired due to 5 minutes of inactivity
 	if CheckAndAbandonIfExpired(ctx, session) {
 		return nil, http.StatusConflict, errors.New("quiz session expired due to 5 minutes of inactivity and has been abandoned")
-	}
-
-	// 2. Prevent duplicate answers for the same question in this session
-	already, err := repo.HasAnsweredQuestion(ctx, req.Session, req.Question)
-	if err != nil {
-		return nil, http.StatusInternalServerError, fmt.Errorf("failed to check answer history: %w", err)
 	}
 	if already {
 		return nil, http.StatusConflict, errors.New("question has already been answered in this session")
@@ -619,6 +619,7 @@ func EvaluateAnswer(ctx context.Context, clientID int, req *dto.SubmitAnswerRequ
 	historyRecord := &models.UserQuestionHistory{
 		ClientID:       clientID,
 		SessionID:      req.Session,
+		GameMode:       session.GameMode,
 		QuestionCode:   req.Question,
 		SelectedOption: req.Option,
 		IsCorrect:      isCorrect,
@@ -626,16 +627,22 @@ func EvaluateAnswer(ctx context.Context, clientID int, req *dto.SubmitAnswerRequ
 		PointsAwarded:  pointsEarned,
 		CoinsAwarded:   coinsEarned,
 	}
-	if err := repo.RecordAnswer(ctx, historyRecord); err != nil {
-		return nil, http.StatusInternalServerError, fmt.Errorf("failed to record answer: %w", err)
+	// 6 & 7. Concurrently persist answer history and updated session state
+	gPost, gPostCtx := errgroup.WithContext(ctx)
+
+	gPost.Go(func() error {
+		return repo.RecordAnswer(gPostCtx, historyRecord)
+	})
+
+	gPost.Go(func() error {
+		return repo.UpdateSession(gPostCtx, session)
+	})
+
+	if err := gPost.Wait(); err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to persist answer progress: %w", err)
 	}
 
-	// 7. Persist updated session state
-	if err := repo.UpdateSession(ctx, session); err != nil {
-		return nil, http.StatusInternalServerError, fmt.Errorf("failed to update session: %w", err)
-	}
-
-	RefreshSessionTTL(ctx, session.ID)
+	go RefreshSessionTTL(context.Background(), session.ID)
 
 	return &dto.AnswerResultDTO{
 		Question:      req.Question,
@@ -951,6 +958,7 @@ func CompleteSortItOutSession(ctx context.Context, clientID int, req *dto.Comple
 		historyRecords = append(historyRecords, &models.UserQuestionHistory{
 			ClientID:       clientID,
 			SessionID:      session.ID,
+			GameMode:       models.GameModeSortItOut,
 			QuestionCode:   sq.QuestionCode,
 			SelectedOption: selectedOption,
 			IsCorrect:      isCorrect,
@@ -971,13 +979,24 @@ func CompleteSortItOutSession(ctx context.Context, clientID int, req *dto.Comple
 
 	reward := CalculateSortItOutRewards(correctCount, session.TotalQuestions, finalScore)
 
-	if err := repo.RecordBatchAnswers(ctx, historyRecords); err != nil {
-		return nil, http.StatusInternalServerError, fmt.Errorf("failed to record answer history: %w", err)
-	}
+	var profile *models.Profile
+	g, gCtx := errgroup.WithContext(ctx)
 
-	profile, err := GetOrCreateProfile(ctx, clientID)
-	if err != nil {
-		log.Printf("[SortItOut] Notice fetching profile for client %d: %v\n", clientID, err)
+	g.Go(func() error {
+		return repo.RecordBatchAnswers(gCtx, historyRecords)
+	})
+
+	g.Go(func() error {
+		var pErr error
+		profile, pErr = GetOrCreateProfile(gCtx, clientID)
+		if pErr != nil {
+			log.Printf("[SortItOut] Notice fetching profile for client %d: %v\n", clientID, pErr)
+		}
+		return nil
+	})
+
+	if err := g.Wait(); err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to record answer history: %w", err)
 	}
 	oldLevel := 1
 	oldExperience := 0
@@ -1199,6 +1218,7 @@ func CompleteMatchTheFollowingSession(ctx context.Context, clientID int, req *dt
 		historyRecords = append(historyRecords, &models.UserQuestionHistory{
 			ClientID:       clientID,
 			SessionID:      session.ID,
+			GameMode:       models.GameModeMatchTheFollowing,
 			QuestionCode:   sq.QuestionCode,
 			SelectedOption: fmt.Sprintf("%d/%d", matchedCount, totalPairs),
 			IsCorrect:      isCleared,
@@ -1216,13 +1236,24 @@ func CompleteMatchTheFollowingSession(ctx context.Context, clientID int, req *dt
 
 	reward := CalculateMatchTheFollowingRewards(totalPairsMatched, totalPairsCount, clearedBoards, session.TotalQuestions, finalScore)
 
-	if err := repo.RecordBatchAnswers(ctx, historyRecords); err != nil {
-		return nil, http.StatusInternalServerError, fmt.Errorf("failed to record answer history: %w", err)
-	}
+	var profile *models.Profile
+	g, gCtx := errgroup.WithContext(ctx)
 
-	profile, err := GetOrCreateProfile(ctx, clientID)
-	if err != nil {
-		log.Printf("[MatchTheFollowing] Notice fetching profile for client %d: %v\n", clientID, err)
+	g.Go(func() error {
+		return repo.RecordBatchAnswers(gCtx, historyRecords)
+	})
+
+	g.Go(func() error {
+		var pErr error
+		profile, pErr = GetOrCreateProfile(gCtx, clientID)
+		if pErr != nil {
+			log.Printf("[MatchTheFollowing] Notice fetching profile for client %d: %v\n", clientID, pErr)
+		}
+		return nil
+	})
+
+	if err := g.Wait(); err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to record answer history: %w", err)
 	}
 	oldLevel := 1
 	oldExperience := 0
