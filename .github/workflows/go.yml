@@ -54,9 +54,13 @@ jobs:
           ZCATALYST_NON_INTERACTIVE: "true"
         run: |
           catalyst deploy appsail \
+            --name quiz-api \
+            --source docker://quiz-api:latest \
+            --port 8080 \
             --project "${{ secrets.CATALYST_PROJECT_ID }}" \
             --org "${{ secrets.CATALYST_ORG_ID }}" \
             --token "${{ secrets.CATALYST_TOKEN }}" \
             --dc in \
             --non-interactive
+
 
