@@ -195,6 +195,33 @@ func CompleteSortItOutHandler(c *gin.Context) {
 	response.Success(c, status, "Sort It Out completed successfully", res)
 }
 
+// CompleteMatchTheFollowingHandler finalizes a Match the Following puzzle mini-game session.
+// POST /api/v1/quiz/match-the-following/complete
+func CompleteMatchTheFollowingHandler(c *gin.Context) {
+	clientID, ok := middleware.GetAuthenticatedClientID(c)
+	if !ok {
+		response.Error(c, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	var req dto.CompleteMatchTheFollowingRequestDTO
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, http.StatusBadRequest, fmt.Sprintf("Invalid input: %s", err.Error()))
+		return
+	}
+	if err := req.Validate(); err != nil {
+		response.Error(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	res, status, err := services.CompleteMatchTheFollowingSession(c.Request.Context(), clientID, &req)
+	if err != nil {
+		response.Error(c, status, err.Error())
+		return
+	}
+	response.Success(c, status, "Match the Following completed successfully", res)
+}
+
 // AbandonSessionHandler abandons an active session.
 // POST /api/v1/quiz/sessions/abandon
 func AbandonSessionHandler(c *gin.Context) {

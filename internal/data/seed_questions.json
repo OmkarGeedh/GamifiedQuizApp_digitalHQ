@@ -2028,5 +2028,375 @@
     "points": 10,
     "hint": "When an owner withdraws money, does their stake in the business grow or shrink?",
     "explanation": "Drawings are withdrawals of cash or assets by the owner for personal use and directly reduce total Owner's Equity."
+  },
+  {
+    "question_code": "mtf_acc_001",
+    "question_type": "match_the_following",
+    "topic_id": "accounting",
+    "prompt": "Match each Account with its Nature/Classification:",
+    "option_a": "",
+    "option_b": "",
+    "option_c": "",
+    "option_d": "",
+    "correct_option": "a",
+    "difficulty": 1,
+    "points": 40,
+    "hint": "Recall the three traditional categories: Personal, Real, and Nominal accounts.",
+    "explanation": "Cash and Machinery are assets (Real Accounts), Salary is an expense (Nominal Account), and Ram's A/c represents an individual person (Personal Account).",
+    "match_pairs": [
+      {
+        "pair_order": 1,
+        "left_text": "Cash",
+        "right_text": "Real Account"
+      },
+      {
+        "pair_order": 2,
+        "left_text": "Salary",
+        "right_text": "Nominal Account"
+      },
+      {
+        "pair_order": 3,
+        "left_text": "Ram's A/c",
+        "right_text": "Personal Account"
+      },
+      {
+        "pair_order": 4,
+        "left_text": "Machinery",
+        "right_text": "Real Account"
+      }
+    ]
+  },
+  {
+    "question_code": "mtf_acc_002",
+    "question_type": "match_the_following",
+    "topic_id": "accounting",
+    "prompt": "Match each Financial Statement with its Core Purpose:",
+    "option_a": "",
+    "option_b": "",
+    "option_c": "",
+    "option_d": "",
+    "correct_option": "a",
+    "difficulty": 1,
+    "points": 40,
+    "hint": "Consider the primary financial insight each statement delivers to stakeholders.",
+    "explanation": "Balance Sheet reflects financial position, Profit & Loss shows net profit or loss, Cash Flow tracks cash inflows and outflows, and Trial Balance checks arithmetical accuracy of ledger postings.",
+    "match_pairs": [
+      {
+        "pair_order": 1,
+        "left_text": "Balance Sheet",
+        "right_text": "Financial Position"
+      },
+      {
+        "pair_order": 2,
+        "left_text": "Profit & Loss",
+        "right_text": "Net Profit/Loss"
+      },
+      {
+        "pair_order": 3,
+        "left_text": "Cash Flow",
+        "right_text": "Inflows & Outflows"
+      },
+      {
+        "pair_order": 4,
+        "left_text": "Trial Balance",
+        "right_text": "Arithmetical Accuracy"
+      }
+    ]
+  },
+  {
+    "question_code": "mtf_acc_003",
+    "question_type": "match_the_following",
+    "topic_id": "accounting",
+    "prompt": "Match each Asset with its Accounting Category:",
+    "option_a": "",
+    "option_b": "",
+    "option_c": "",
+    "option_d": "",
+    "correct_option": "a",
+    "difficulty": 1,
+    "points": 40,
+    "hint": "Classify by physical existence, liquidity, and operational lifespan.",
+    "explanation": "Goodwill has no physical form (Intangible), Stock turns to cash in under a year (Current), Building lasts multiple periods (Fixed), and Preliminary Expenses represent unwritten-off fictitious items.",
+    "match_pairs": [
+      {
+        "pair_order": 1,
+        "left_text": "Goodwill",
+        "right_text": "Intangible Asset"
+      },
+      {
+        "pair_order": 2,
+        "left_text": "Stock/Inventory",
+        "right_text": "Current Asset"
+      },
+      {
+        "pair_order": 3,
+        "left_text": "Building",
+        "right_text": "Fixed Asset"
+      },
+      {
+        "pair_order": 4,
+        "left_text": "Preliminary Expenses",
+        "right_text": "Fictitious Asset"
+      }
+    ]
+  },
+  {
+    "question_code": "mtf_acc_004",
+    "question_type": "match_the_following",
+    "topic_id": "accounting",
+    "prompt": "Match each Liability / Equity item with its Balance Sheet Classification:",
+    "option_a": "",
+    "option_b": "",
+    "option_c": "",
+    "option_d": "",
+    "correct_option": "a",
+    "difficulty": 1,
+    "points": 40,
+    "hint": "Differentiate between short-term obligations, long-term borrowings, and equity ownership.",
+    "explanation": "Creditors and Bank Overdraft are short-term liabilities payable within a year, Debentures are long-term borrowings, and Share Capital represents shareholders' equity.",
+    "match_pairs": [
+      {
+        "pair_order": 1,
+        "left_text": "Creditors",
+        "right_text": "Current Liability"
+      },
+      {
+        "pair_order": 2,
+        "left_text": "Debentures",
+        "right_text": "Long-term Liability"
+      },
+      {
+        "pair_order": 3,
+        "left_text": "Bank Overdraft",
+        "right_text": "Current Liability"
+      },
+      {
+        "pair_order": 4,
+        "left_text": "Share Capital",
+        "right_text": "Shareholders' Equity"
+      }
+    ]
+  },
+  {
+    "question_code": "mtf_acc_005",
+    "question_type": "match_the_following",
+    "topic_id": "accounting",
+    "prompt": "Match each Fundamental Accounting Concept with its Definition:",
+    "option_a": "",
+    "option_b": "",
+    "option_c": "",
+    "option_d": "",
+    "correct_option": "a",
+    "difficulty": 2,
+    "points": 40,
+    "hint": "These core GAAP conventions guide the valuation and reporting of accounts.",
+    "explanation": "Dual Aspect dictates total Debits must equal Credits, Going Concern presumes indefinite entity life, Money Measurement only records events quantifiable in money, and Conservatism anticipates potential losses.",
+    "match_pairs": [
+      {
+        "pair_order": 1,
+        "left_text": "Dual Aspect",
+        "right_text": "Debit equals Credit"
+      },
+      {
+        "pair_order": 2,
+        "left_text": "Going Concern",
+        "right_text": "Indefinite Life"
+      },
+      {
+        "pair_order": 3,
+        "left_text": "Money Measurement",
+        "right_text": "Financial Terms Only"
+      },
+      {
+        "pair_order": 4,
+        "left_text": "Conservatism",
+        "right_text": "Anticipate Losses"
+      }
+    ]
+  },
+  {
+    "question_code": "mtf_acc_006",
+    "question_type": "match_the_following",
+    "topic_id": "accounting",
+    "prompt": "Match each Golden Rule / Concept with its Core Principle:",
+    "option_a": "",
+    "option_b": "",
+    "option_c": "",
+    "option_d": "",
+    "correct_option": "a",
+    "difficulty": 1,
+    "points": 40,
+    "hint": "Recall the classic double-entry rules for personal, real, and nominal accounts.",
+    "explanation": "Personal Account: Debit the receiver, Credit the giver. Real Account: Debit what comes in, Credit what goes out. Nominal Account: Debit all expenses, Credit all incomes. Capital represents a liability of the business entity to its proprietor.",
+    "match_pairs": [
+      {
+        "pair_order": 1,
+        "left_text": "Personal Account",
+        "right_text": "Debit receiver Credit giver"
+      },
+      {
+        "pair_order": 2,
+        "left_text": "Real Account",
+        "right_text": "Debit what comes in Credit what goes out"
+      },
+      {
+        "pair_order": 3,
+        "left_text": "Nominal Account",
+        "right_text": "Debit expenses Credit incomes"
+      },
+      {
+        "pair_order": 4,
+        "left_text": "Capital",
+        "right_text": "Liability to the business"
+      }
+    ]
+  },
+  {
+    "question_code": "mtf_acc_007",
+    "question_type": "match_the_following",
+    "topic_id": "accounting",
+    "prompt": "Match each Banking Term / Instrument with its Description:",
+    "option_a": "",
+    "option_b": "",
+    "option_c": "",
+    "option_d": "",
+    "correct_option": "a",
+    "difficulty": 1,
+    "points": 40,
+    "hint": "Identify typical commercial banking instruments and records.",
+    "explanation": "A cheque is a negotiable instrument, passbook is a bank-issued copy of customer's account, overdraft is an approved credit line facility, and ATM stands for Automated Teller Machine.",
+    "match_pairs": [
+      {
+        "pair_order": 1,
+        "left_text": "Cheque",
+        "right_text": "Negotiable Instrument"
+      },
+      {
+        "pair_order": 2,
+        "left_text": "Passbook",
+        "right_text": "Bank Statement"
+      },
+      {
+        "pair_order": 3,
+        "left_text": "Overdraft",
+        "right_text": "Credit facility"
+      },
+      {
+        "pair_order": 4,
+        "left_text": "ATM",
+        "right_text": "Automated Teller Machine"
+      }
+    ]
+  },
+  {
+    "question_code": "mtf_acc_008",
+    "question_type": "match_the_following",
+    "topic_id": "accounting",
+    "prompt": "Match each Type of Accounting Error with its Characteristic:",
+    "option_a": "",
+    "option_b": "",
+    "option_c": "",
+    "option_d": "",
+    "correct_option": "a",
+    "difficulty": 2,
+    "points": 40,
+    "hint": "Consider how trial balance errors arise in recording, posting, and classification.",
+    "explanation": "Error of Omission means a transaction was left out completely, Error of Commission involves clerical mistakes like wrong amounts or cast errors, Error of Principle misapplies capital/revenue distinctions, and Compensating Errors offset each other.",
+    "match_pairs": [
+      {
+        "pair_order": 1,
+        "left_text": "Error of Omission",
+        "right_text": "Completely left out"
+      },
+      {
+        "pair_order": 2,
+        "left_text": "Error of Commission",
+        "right_text": "Wrong amount entered"
+      },
+      {
+        "pair_order": 3,
+        "left_text": "Error of Principle",
+        "right_text": "Capital treated as Revenue"
+      },
+      {
+        "pair_order": 4,
+        "left_text": "Compensating Error",
+        "right_text": "One error offsets another"
+      }
+    ]
+  },
+  {
+    "question_code": "mtf_acc_009",
+    "question_type": "match_the_following",
+    "topic_id": "accounting",
+    "prompt": "Match each Form of Business Organization with its Key Attribute:",
+    "option_a": "",
+    "option_b": "",
+    "option_c": "",
+    "option_d": "",
+    "correct_option": "a",
+    "difficulty": 1,
+    "points": 40,
+    "hint": "Look at ownership structure, legal status, and mutual association requirements.",
+    "explanation": "Sole Proprietorship is run by a single owner, Partnership requires a minimum of 2 partners, a Company is an incorporated separate legal entity, and Cooperatives are voluntary associations for mutual help.",
+    "match_pairs": [
+      {
+        "pair_order": 1,
+        "left_text": "Sole Proprietorship",
+        "right_text": "Single Owner"
+      },
+      {
+        "pair_order": 2,
+        "left_text": "Partnership",
+        "right_text": "Minimum 2 Partners"
+      },
+      {
+        "pair_order": 3,
+        "left_text": "Company",
+        "right_text": "Separate Legal Entity"
+      },
+      {
+        "pair_order": 4,
+        "left_text": "Cooperative",
+        "right_text": "Mutual Help"
+      }
+    ]
+  },
+  {
+    "question_code": "mtf_acc_010",
+    "question_type": "match_the_following",
+    "topic_id": "accounting",
+    "prompt": "Match each Depreciation Method with its Distinguishing Trait:",
+    "option_a": "",
+    "option_b": "",
+    "option_c": "",
+    "option_d": "",
+    "correct_option": "a",
+    "difficulty": 2,
+    "points": 40,
+    "hint": "Examine how depreciation expense is allocated across the asset's useful life.",
+    "explanation": "Straight Line charges equal amounts each year, Written Down Value charges decreasing amounts on book value, Sinking Fund accumulates investments to replace the asset, and Annuity Method includes interest on capital outlay.",
+    "match_pairs": [
+      {
+        "pair_order": 1,
+        "left_text": "Straight Line",
+        "right_text": "Equal annual charge"
+      },
+      {
+        "pair_order": 2,
+        "left_text": "Written Down Value",
+        "right_text": "Decreasing annual charge"
+      },
+      {
+        "pair_order": 3,
+        "left_text": "Sinking Fund",
+        "right_text": "Asset replacement fund"
+      },
+      {
+        "pair_order": 4,
+        "left_text": "Annuity Method",
+        "right_text": "Interest on investment considered"
+      }
+    ]
   }
 ]

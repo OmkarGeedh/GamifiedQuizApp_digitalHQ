@@ -100,3 +100,64 @@ func TestCachedSessionWrapper_QuestionsStatePreserved(t *testing.T) {
 		t.Errorf("expected question code sio_cd_001, got %s", questions[0].QuestionCode)
 	}
 }
+
+func TestCachedSessionWrapper_MatchPairsPreserved(t *testing.T) {
+	now := time.Now().UTC()
+	sq := models.SessionQuestion{
+		QuestionCode: "mtf_acc_001",
+		Prompt:       "Match Accounts",
+		MatchPairs: []models.MatchPair{
+			{ID: "p1", QuestionID: "q1", PairOrder: 1, LeftText: "Cash", RightText: "Real Account"},
+			{ID: "p2", QuestionID: "q1", PairOrder: 2, LeftText: "Salary", RightText: "Nominal Account"},
+		},
+	}
+	encoded, err := json.Marshal([]models.SessionQuestion{sq})
+	if err != nil {
+		t.Fatalf("failed to encode questions: %v", err)
+	}
+
+	session := models.GameSession{
+		ID:             "sess-mtf-001",
+		ClientID:       123,
+		TopicID:        "accounting",
+		GameMode:       models.GameModeMatchTheFollowing,
+		TotalQuestions: 1,
+		Status:         models.SessionStatusInProgress,
+		QuestionsState: string(encoded),
+		StartedAt:      now,
+	}
+
+	wrapper := cachedSessionWrapper{
+		Session:        session,
+		QuestionsState: session.QuestionsState,
+	}
+
+	data, err := json.Marshal(wrapper)
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+
+	var restored cachedSessionWrapper
+	if err := json.Unmarshal(data, &restored); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	restoredSession := restored.Session
+	restoredSession.QuestionsState = restored.QuestionsState
+
+	if !restoredSession.IsMatchTheFollowing() {
+		t.Fatal("expected IsMatchTheFollowing() to be true")
+	}
+
+	questions, err := restoredSession.GetQuestions()
+	if err != nil || len(questions) != 1 {
+		t.Fatalf("failed to decode questions: %v", err)
+	}
+
+	if len(questions[0].MatchPairs) != 2 {
+		t.Fatalf("expected 2 match pairs, got %d", len(questions[0].MatchPairs))
+	}
+	if questions[0].MatchPairs[0].LeftText != "Cash" || questions[0].MatchPairs[1].RightText != "Nominal Account" {
+		t.Errorf("match pair content corrupted: %+v", questions[0].MatchPairs)
+	}
+}

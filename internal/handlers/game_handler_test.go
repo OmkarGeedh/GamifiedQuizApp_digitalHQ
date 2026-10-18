@@ -999,3 +999,287 @@ func TestCompleteSortItOutHandler(t *testing.T) {
 		}
 	})
 }
+
+func TestCompleteMatchTheFollowingHandler(t *testing.T) {
+	r, token := setupTestApp(t)
+	if r == nil {
+		return
+	}
+
+	t.Run("Unauthorized request returns 401", func(t *testing.T) {
+		req, _ := http.NewRequest(http.MethodPost, "/api/v1/quiz/match-the-following/complete", bytes.NewReader([]byte("{}")))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 Unauthorized, got %d", w.Code)
+		}
+	})
+
+	t.Run("Invalid input returns 400", func(t *testing.T) {
+		req, _ := http.NewRequest(http.MethodPost, "/api/v1/quiz/match-the-following/complete", bytes.NewReader([]byte("invalid json")))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 Bad Request for malformed JSON, got %d", w.Code)
+		}
+	})
+
+	t.Run("Empty boards returns 400", func(t *testing.T) {
+		body, _ := json.Marshal(dto.CompleteMatchTheFollowingRequestDTO{
+			Session: "sess-abc",
+			Boards:  []dto.MatchBoardAnswerSubmissionDTO{},
+		})
+		req, _ := http.NewRequest(http.MethodPost, "/api/v1/quiz/match-the-following/complete", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 Bad Request for empty boards, got %d", w.Code)
+		}
+	})
+
+	t.Run("Full Match the Following Game Flow: Create, Solve Boards, Batch Submit, and Audit Review", func(t *testing.T) {
+		// Clean up any stale in-progress session for client 1
+		_ = config.DB.Model(&models.GameSession{}).
+			Where("client_id = ? AND status = ?", 1, models.SessionStatusInProgress).
+			Update("status", models.SessionStatusAbandoned).Error
+
+		// Seed fixture questions and pairs for match_the_following test
+		q1ID := uuid.New().String()
+		q2ID := uuid.New().String()
+		q3ID := uuid.New().String()
+		_ = config.DB.Where("question_code LIKE ?", "mtf_test_%").Delete(&models.Question{}).Error
+		code1 := "mtf_test_" + uuid.New().String()[:8]
+		code2 := "mtf_test_" + uuid.New().String()[:8]
+		code3 := "mtf_test_" + uuid.New().String()[:8]
+		testQuestions := []models.Question{
+			{ID: q1ID, QuestionCode: code1, QuestionType: models.GameModeMatchTheFollowing, TopicID: "accounting", Prompt: "Board 1", OptionA: "", OptionB: "", OptionC: "", OptionD: "", CorrectOption: "a", Points: 40, Difficulty: 1},
+			{ID: q2ID, QuestionCode: code2, QuestionType: models.GameModeMatchTheFollowing, TopicID: "accounting", Prompt: "Board 2", OptionA: "", OptionB: "", OptionC: "", OptionD: "", CorrectOption: "a", Points: 40, Difficulty: 1},
+			{ID: q3ID, QuestionCode: code3, QuestionType: models.GameModeMatchTheFollowing, TopicID: "accounting", Prompt: "Board 3", OptionA: "", OptionB: "", OptionC: "", OptionD: "", CorrectOption: "a", Points: 40, Difficulty: 1},
+		}
+		testPairs := []models.MatchPair{
+			{ID: uuid.New().String(), QuestionID: q1ID, PairOrder: 1, LeftText: "L1", RightText: "R1"},
+			{ID: uuid.New().String(), QuestionID: q1ID, PairOrder: 2, LeftText: "L2", RightText: "R2"},
+			{ID: uuid.New().String(), QuestionID: q1ID, PairOrder: 3, LeftText: "L3", RightText: "R3"},
+			{ID: uuid.New().String(), QuestionID: q1ID, PairOrder: 4, LeftText: "L4", RightText: "R4"},
+
+			{ID: uuid.New().String(), QuestionID: q2ID, PairOrder: 1, LeftText: "L1", RightText: "R1"},
+			{ID: uuid.New().String(), QuestionID: q2ID, PairOrder: 2, LeftText: "L2", RightText: "R2"},
+			{ID: uuid.New().String(), QuestionID: q2ID, PairOrder: 3, LeftText: "L3", RightText: "R3"},
+			{ID: uuid.New().String(), QuestionID: q2ID, PairOrder: 4, LeftText: "L4", RightText: "R4"},
+
+			{ID: uuid.New().String(), QuestionID: q3ID, PairOrder: 1, LeftText: "L1", RightText: "R1"},
+			{ID: uuid.New().String(), QuestionID: q3ID, PairOrder: 2, LeftText: "L2", RightText: "R2"},
+			{ID: uuid.New().String(), QuestionID: q3ID, PairOrder: 3, LeftText: "L3", RightText: "R3"},
+			{ID: uuid.New().String(), QuestionID: q3ID, PairOrder: 4, LeftText: "L4", RightText: "R4"},
+		}
+		if err := config.DB.Create(&testQuestions).Error; err != nil {
+			t.Fatalf("failed to insert test questions: %v", err)
+		}
+		if err := config.DB.Create(&testPairs).Error; err != nil {
+			t.Fatalf("failed to insert test pairs: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = config.DB.Where("id IN ?", []string{q1ID, q2ID, q3ID}).Delete(&models.Question{}).Error
+			_ = config.DB.Where("question_id IN ?", []string{q1ID, q2ID, q3ID}).Delete(&models.MatchPair{}).Error
+		})
+
+		// 1. Create match_the_following session
+		createBody, _ := json.Marshal(dto.CreateSessionRequestDTO{
+			TopicID:                 "accounting",
+			GameMode:                models.GameModeMatchTheFollowing,
+			QuestionCodes:           []string{code1, code2, code3},
+			QuestionCount:           3,
+			TimeLimitPerQuestionSec: 25,
+		})
+		createReq, _ := http.NewRequest(http.MethodPost, "/api/v1/quiz/sessions/create", bytes.NewReader(createBody))
+		createReq.Header.Set("Authorization", "Bearer "+token)
+		createReq.Header.Set("Content-Type", "application/json")
+		createW := httptest.NewRecorder()
+		r.ServeHTTP(createW, createReq)
+
+		if createW.Code != http.StatusCreated {
+			t.Fatalf("expected 201 Created for match_the_following session, got %d: %s", createW.Code, createW.Body.String())
+		}
+
+		var createResp struct {
+			Success bool                          `json:"success"`
+			Data    dto.SessionCreatedResponseDTO `json:"data"`
+		}
+		if err := json.Unmarshal(createW.Body.Bytes(), &createResp); err != nil {
+			t.Fatalf("failed to decode create response: %v", err)
+		}
+
+		if createResp.Data.GameMode != models.GameModeMatchTheFollowing {
+			t.Fatalf("expected game_mode match_the_following, got %s", createResp.Data.GameMode)
+		}
+		if createResp.Data.TotalQuestions != 3 {
+			t.Fatalf("expected TotalQuestions=3, got %d", createResp.Data.TotalQuestions)
+		}
+		if createResp.Data.TimeLimitPerQuestionSec != 25 {
+			t.Fatalf("expected TimeLimitPerQuestionSec=25, got %d", createResp.Data.TimeLimitPerQuestionSec)
+		}
+		if len(createResp.Data.Boards) != 3 {
+			t.Fatalf("expected 3 boards in create response, got %d", len(createResp.Data.Boards))
+		}
+
+		sessionID := createResp.Data.Session
+		var boardSubmissions []dto.MatchBoardAnswerSubmissionDTO
+
+		// Verify each board has 4 left and 4 right items and solution_map
+		for idx, board := range createResp.Data.Boards {
+			if len(board.LeftItems) != 4 || len(board.RightItems) != 4 {
+				t.Fatalf("board %s: expected 4 left and 4 right items, got left=%d, right=%d", board.QuestionCode, len(board.LeftItems), len(board.RightItems))
+			}
+			if len(board.SolutionMap) != 4 {
+				t.Fatalf("board %s: expected 4 solution pairs in solution_map, got %d", board.QuestionCode, len(board.SolutionMap))
+			}
+
+			switch idx {
+			case 0:
+				// Board 1: Flawless clear (all 4 matched, 0 mistakes, 15s)
+				matches := make(map[string]string)
+				for lID, rID := range board.SolutionMap {
+					matches[lID] = rID
+				}
+				boardSubmissions = append(boardSubmissions, dto.MatchBoardAnswerSubmissionDTO{
+					QuestionCode: board.QuestionCode,
+					Matches:      matches,
+					Mistakes:     0,
+					TimeTakenMs:  15000,
+				})
+			case 1:
+				// Board 2: Cleared with 2 mistakes (all 4 matched, 2 mistakes, 20s)
+				matches := make(map[string]string)
+				for lID, rID := range board.SolutionMap {
+					matches[lID] = rID
+				}
+				boardSubmissions = append(boardSubmissions, dto.MatchBoardAnswerSubmissionDTO{
+					QuestionCode: board.QuestionCode,
+					Matches:      matches,
+					Mistakes:     2,
+					TimeTakenMs:  20000,
+				})
+			case 2:
+				// Board 3: Partial timeout (2 matched out of 4, 1 mistake, 25s)
+				matches := make(map[string]string)
+				count := 0
+				for lID, rID := range board.SolutionMap {
+					matches[lID] = rID
+					count++
+					if count == 2 {
+						break
+					}
+				}
+				boardSubmissions = append(boardSubmissions, dto.MatchBoardAnswerSubmissionDTO{
+					QuestionCode: board.QuestionCode,
+					Matches:      matches,
+					Mistakes:     1,
+					TimeTakenMs:  25000,
+					IsTimeout:    true,
+				})
+			}
+		}
+
+		// 2. Batch Complete the Match the Following session
+		completeBody, _ := json.Marshal(dto.CompleteMatchTheFollowingRequestDTO{
+			Session: sessionID,
+			Boards:  boardSubmissions,
+		})
+		completeReq, _ := http.NewRequest(http.MethodPost, "/api/v1/quiz/match-the-following/complete", bytes.NewReader(completeBody))
+		completeReq.Header.Set("Authorization", "Bearer "+token)
+		completeReq.Header.Set("Content-Type", "application/json")
+		completeW := httptest.NewRecorder()
+		r.ServeHTTP(completeW, completeReq)
+
+		if completeW.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK from match-the-following/complete, got %d: %s", completeW.Code, completeW.Body.String())
+		}
+
+		var completeResp struct {
+			Success bool                                 `json:"success"`
+			Data    dto.CompleteMatchTheFollowingResponseDTO `json:"data"`
+		}
+		if err := json.Unmarshal(completeW.Body.Bytes(), &completeResp); err != nil {
+			t.Fatalf("failed to decode complete response: %v", err)
+		}
+
+		data := completeResp.Data
+		if data.Session != sessionID {
+			t.Fatalf("expected session ID %s, got %s", sessionID, data.Session)
+		}
+		if data.TotalBoards != 3 {
+			t.Fatalf("expected 3 total boards, got %d", data.TotalBoards)
+		}
+		if data.ClearedBoards != 2 {
+			t.Fatalf("expected 2 cleared boards, got %d", data.ClearedBoards)
+		}
+		if data.TotalPairsMatched != 10 {
+			t.Fatalf("expected 10 total pairs matched (4+4+2), got %d", data.TotalPairsMatched)
+		}
+		if data.TotalPairsCount != 12 {
+			t.Fatalf("expected 12 total pairs count (4*3), got %d", data.TotalPairsCount)
+		}
+		if data.TotalMistakes != 3 {
+			t.Fatalf("expected 3 total mistakes (0+2+1), got %d", data.TotalMistakes)
+		}
+
+		// Board 1 review: 40 base + 10 flawless + 10 speed - 0 mistake = 60
+		b1 := data.BoardsReview[0]
+		if !b1.IsFlawless || b1.TotalBoardScore != 60 {
+			t.Fatalf("board 1 review unexpected: %+v (expected score 60)", b1)
+		}
+
+		// Board 2 review: 40 base + 0 flawless + 5 speed - 4 mistake = 41
+		b2 := data.BoardsReview[1]
+		if b2.IsFlawless || b2.TotalBoardScore != 41 {
+			t.Fatalf("board 2 review unexpected: %+v (expected score 41)", b2)
+		}
+
+		// Board 3 review: 20 base + 0 flawless + 0 speed - 2 mistake = 18
+		b3 := data.BoardsReview[2]
+		if b3.TotalBoardScore != 18 {
+			t.Fatalf("board 3 review unexpected: %+v (expected score 18)", b3)
+		}
+
+		expectedFinalScore := 60 + 41 + 18
+		if data.FinalScore != expectedFinalScore {
+			t.Fatalf("expected final score %d, got %d", expectedFinalScore, data.FinalScore)
+		}
+
+		// Verify score breakdown contains expected keys
+		if data.ScoreBreakdown["final_score"] != expectedFinalScore {
+			t.Fatalf("score breakdown final_score expected %d, got %d", expectedFinalScore, data.ScoreBreakdown["final_score"])
+		}
+		if _, ok := data.ScoreBreakdown["base_points"]; !ok {
+			t.Fatal("missing base_points in score breakdown")
+		}
+		if _, ok := data.ScoreBreakdown["flawless_bonus"]; !ok {
+			t.Fatal("missing flawless_bonus in score breakdown")
+		}
+		if _, ok := data.ScoreBreakdown["speed_bonus"]; !ok {
+			t.Fatal("missing speed_bonus in score breakdown")
+		}
+		if _, ok := data.ScoreBreakdown["mistake_penalty"]; !ok {
+			t.Fatal("missing mistake_penalty in score breakdown")
+		}
+
+		// 3. Second submission should return 409 Conflict
+		repeatReq, _ := http.NewRequest(http.MethodPost, "/api/v1/quiz/match-the-following/complete", bytes.NewReader(completeBody))
+		repeatReq.Header.Set("Authorization", "Bearer "+token)
+		repeatReq.Header.Set("Content-Type", "application/json")
+		repeatW := httptest.NewRecorder()
+		r.ServeHTTP(repeatW, repeatReq)
+
+		if repeatW.Code != http.StatusConflict {
+			t.Fatalf("expected 409 Conflict on re-completion, got %d", repeatW.Code)
+		}
+	})
+}

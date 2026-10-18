@@ -24,8 +24,10 @@ func AllModels() []interface{} {
 		&models.Client{},
 		&models.Profile{},
 		&models.StreakActivity{},
-		&models.Question{},
-		&models.GameSession{},
+		&models.MCQQuestion{},
+		&models.SortItOutQuestion{},
+		&models.MatchTheFollowingQuestion{},
+		&models.MatchPair{},
 		&models.UserQuestionHistory{},
 		&models.WalletLedger{},
 	}
@@ -35,6 +37,23 @@ func AllModels() []interface{} {
 func AutoMigrate(db *gorm.DB) error {
 	log.Println("==> Running database auto-migrations...")
 
+	// 1. Rename legacy questions table if mcq_questions doesn't exist
+	if db.Migrator().HasTable("questions") && !db.Migrator().HasTable("mcq_questions") {
+		log.Println("==> Migrating legacy 'questions' table to 'mcq_questions'...")
+		_ = db.Migrator().RenameTable("questions", "mcq_questions")
+	}
+
+	// 2. Drop obsolete game_sessions table if it exists (sessions live purely in Redis)
+	if db.Migrator().HasTable("game_sessions") {
+		log.Println("==> Dropping obsolete 'game_sessions' table (sessions now live purely in Redis)...")
+		_ = db.Migrator().DropTable("game_sessions")
+	}
+
+	// 3. Drop legacy questions table if both exist
+	if db.Migrator().HasTable("questions") && db.Migrator().HasTable("mcq_questions") {
+		_ = db.Migrator().DropTable("questions")
+	}
+
 	models := AllModels()
 	for _, m := range models {
 		if err := db.AutoMigrate(m); err != nil {
@@ -42,7 +61,7 @@ func AutoMigrate(db *gorm.DB) error {
 		}
 	}
 
-	log.Println("==> Database auto-migrations completed successfully! [clients, client_profiles, client_streak_activities, questions, game_sessions, user_question_history, wallet_ledger]")
+	log.Println("==> Database auto-migrations completed successfully! [clients, client_profiles, client_streak_activities, mcq_questions, sort_it_out_questions, match_the_following_questions, match_pairs, user_question_history, wallet_ledger]")
 	return nil
 }
 
@@ -143,12 +162,15 @@ func Seed(db *gorm.DB) error {
 	return nil
 }
 
-// seedQuestions loads 100 MCQ questions from the embedded JSON seed file.
+// seedQuestions loads questions from the embedded JSON seed file.
 func seedQuestions(ctx context.Context, db *gorm.DB) error {
 	var existingCount int64
 	db.WithContext(ctx).Model(&models.Question{}).Count(&existingCount)
 	if existingCount > 0 {
 		log.Printf("==> Refreshing questions table (%d existing rows with latest seed data)...\n", existingCount)
+		if db.Migrator().HasTable("match_pairs") {
+			_ = db.WithContext(ctx).Exec("TRUNCATE TABLE match_pairs RESTART IDENTITY CASCADE").Error
+		}
 		if err := db.WithContext(ctx).Exec("TRUNCATE TABLE questions RESTART IDENTITY CASCADE").Error; err != nil {
 			return fmt.Errorf("failed to clear existing questions: %w", err)
 		}
@@ -176,21 +198,28 @@ func seedQuestions(ctx context.Context, db *gorm.DB) error {
 		return fmt.Errorf("failed to read seed_questions.json: %w", readErr)
 	}
 
+	type seedPair struct {
+		PairOrder int    `json:"pair_order"`
+		LeftText  string `json:"left_text"`
+		RightText string `json:"right_text"`
+	}
+
 	type seedQuestion struct {
-		QuestionCode  string  `json:"question_code"`
-		QuestionType  string  `json:"question_type"`
-		TopicID       string  `json:"topic_id"`
-		PairType      string  `json:"pair_type,omitempty"`
-		Prompt        string  `json:"prompt"`
-		OptionA       string  `json:"option_a"`
-		OptionB       string  `json:"option_b"`
-		OptionC       string  `json:"option_c"`
-		OptionD       string  `json:"option_d"`
-		CorrectOption string  `json:"correct_option"`
-		Difficulty    int     `json:"difficulty"`
-		Points        int     `json:"points"`
-		Hint          *string `json:"hint"`
-		Explanation   *string `json:"explanation"`
+		QuestionCode  string     `json:"question_code"`
+		QuestionType  string     `json:"question_type"`
+		TopicID       string     `json:"topic_id"`
+		PairType      string     `json:"pair_type,omitempty"`
+		Prompt        string     `json:"prompt"`
+		OptionA       string     `json:"option_a"`
+		OptionB       string     `json:"option_b"`
+		OptionC       string     `json:"option_c"`
+		OptionD       string     `json:"option_d"`
+		CorrectOption string     `json:"correct_option"`
+		Difficulty    int        `json:"difficulty"`
+		Points        int        `json:"points"`
+		Hint          *string    `json:"hint"`
+		Explanation   *string    `json:"explanation"`
+		MatchPairs    []seedPair `json:"match_pairs,omitempty"`
 	}
 
 	var seeds []seedQuestion
@@ -199,6 +228,7 @@ func seedQuestions(ctx context.Context, db *gorm.DB) error {
 	}
 
 	questions := make([]models.Question, 0, len(seeds))
+	var matchPairs []models.MatchPair
 	for _, s := range seeds {
 		var hint *string
 		if s.Hint != nil && *s.Hint != "" {
@@ -214,7 +244,13 @@ func seedQuestions(ctx context.Context, db *gorm.DB) error {
 		if qType == "" {
 			qType = models.GameModeMCQ
 		}
+		correctOpt := s.CorrectOption
+		if correctOpt == "" && qType == models.GameModeMatchTheFollowing {
+			correctOpt = "a"
+		}
+		qID := uuid.New().String()
 		q := models.Question{
+			ID:            qID,
 			QuestionCode:  s.QuestionCode,
 			QuestionType:  qType,
 			TopicID:       s.TopicID,
@@ -224,20 +260,37 @@ func seedQuestions(ctx context.Context, db *gorm.DB) error {
 			OptionB:       s.OptionB,
 			OptionC:       s.OptionC,
 			OptionD:       s.OptionD,
-			CorrectOption: s.CorrectOption,
+			CorrectOption: correctOpt,
 			Difficulty:    s.Difficulty,
 			Points:        s.Points,
 			Hint:          hint,
 			Explanation:   explanation,
 		}
 		questions = append(questions, q)
+
+		for _, p := range s.MatchPairs {
+			matchPairs = append(matchPairs, models.MatchPair{
+				ID:         uuid.New().String(),
+				QuestionID: qID,
+				PairOrder:  p.PairOrder,
+				LeftText:   p.LeftText,
+				RightText:  p.RightText,
+			})
+		}
 	}
 
 	if err := db.WithContext(ctx).CreateInBatches(questions, 50).Error; err != nil {
 		return fmt.Errorf("failed to seed questions: %w", err)
 	}
 
-	log.Printf("==> Seeded %d MCQ questions successfully.\n", len(questions))
+	if len(matchPairs) > 0 {
+		if err := db.WithContext(ctx).CreateInBatches(matchPairs, 50).Error; err != nil {
+			return fmt.Errorf("failed to seed match pairs: %w", err)
+		}
+		log.Printf("==> Seeded %d match pairs successfully.\n", len(matchPairs))
+	}
+
+	log.Printf("==> Seeded %d questions successfully.\n", len(questions))
 	return nil
 }
 
@@ -247,7 +300,7 @@ func Status(db *gorm.DB) error {
 	log.Println("                    DATABASE SCHEMA STATUS                      ")
 	log.Println("================================================================")
 
-	tables := []string{"clients", "client_profiles", "client_streak_activities", "questions", "game_sessions", "user_question_history", "wallet_ledger"}
+	tables := []string{"clients", "client_profiles", "client_streak_activities", "questions", "game_sessions", "user_question_history", "wallet_ledger", "match_pairs"}
 	for _, t := range tables {
 		hasTable := db.Migrator().HasTable(t)
 		if hasTable {

@@ -824,3 +824,207 @@ func TestSortItOutSeedQuestionsConsistency(t *testing.T) {
 	}
 }
 
+func TestCalculateMatchBoardPoints(t *testing.T) {
+	tests := []struct {
+		name                   string
+		matchedCount           int
+		totalPairs             int
+		mistakes               int
+		timeLimitSec           int
+		timeTakenMs            int
+		expectedBase           int
+		expectedFlawlessBonus  int
+		expectedSpeedBonus     int
+		expectedMistakePenalty int
+		expectedTotal          int
+	}{
+		{
+			name:                   "Flawless board clear with 10s remaining",
+			matchedCount:           4,
+			totalPairs:             4,
+			mistakes:               0,
+			timeLimitSec:           25,
+			timeTakenMs:            15000,
+			expectedBase:           40,
+			expectedFlawlessBonus:  10,
+			expectedSpeedBonus:     10,
+			expectedMistakePenalty: 0,
+			expectedTotal:          60,
+		},
+		{
+			name:                   "Board clear with 2 mistakes and 5s remaining",
+			matchedCount:           4,
+			totalPairs:             4,
+			mistakes:               2,
+			timeLimitSec:           25,
+			timeTakenMs:            20000,
+			expectedBase:           40,
+			expectedFlawlessBonus:  0,
+			expectedSpeedBonus:     5,
+			expectedMistakePenalty: 4,
+			expectedTotal:          41,
+		},
+		{
+			name:                   "Partial timeout with 2 pairs matched and 1 mistake",
+			matchedCount:           2,
+			totalPairs:             4,
+			mistakes:               1,
+			timeLimitSec:           25,
+			timeTakenMs:            25000,
+			expectedBase:           20,
+			expectedFlawlessBonus:  0,
+			expectedSpeedBonus:     0,
+			expectedMistakePenalty: 2,
+			expectedTotal:          18,
+		},
+		{
+			name:                   "Zero matched and multiple mistakes clamped to zero",
+			matchedCount:           0,
+			totalPairs:             4,
+			mistakes:               5,
+			timeLimitSec:           25,
+			timeTakenMs:            25000,
+			expectedBase:           0,
+			expectedFlawlessBonus:  0,
+			expectedSpeedBonus:     0,
+			expectedMistakePenalty: 10,
+			expectedTotal:          0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base, flawless, speed, mistake, total := CalculateMatchBoardPoints(
+				tt.matchedCount,
+				tt.totalPairs,
+				tt.mistakes,
+				tt.timeLimitSec,
+				tt.timeTakenMs,
+			)
+			if base != tt.expectedBase {
+				t.Errorf("base points: expected %d, got %d", tt.expectedBase, base)
+			}
+			if flawless != tt.expectedFlawlessBonus {
+				t.Errorf("flawless bonus: expected %d, got %d", tt.expectedFlawlessBonus, flawless)
+			}
+			if speed != tt.expectedSpeedBonus {
+				t.Errorf("speed bonus: expected %d, got %d", tt.expectedSpeedBonus, speed)
+			}
+			if mistake != tt.expectedMistakePenalty {
+				t.Errorf("mistake penalty: expected %d, got %d", tt.expectedMistakePenalty, mistake)
+			}
+			if total != tt.expectedTotal {
+				t.Errorf("total board score: expected %d, got %d", tt.expectedTotal, total)
+			}
+		})
+	}
+}
+
+func TestCalculateMatchTheFollowingRewards(t *testing.T) {
+	t.Run("100% accuracy awards perfect bonuses and 3 gems", func(t *testing.T) {
+		reward := CalculateMatchTheFollowingRewards(12, 12, 3, 3, 150)
+		if reward.Coins != 39 {
+			t.Errorf("expected 39 coins, got %d", reward.Coins)
+		}
+		if reward.XP != 85 {
+			t.Errorf("expected 85 XP, got %d", reward.XP)
+		}
+		if reward.Gems != 3 {
+			t.Errorf("expected 3 gems, got %d", reward.Gems)
+		}
+		if reward.CoinBreakdown["perfect_bonus_coins"] != 10 {
+			t.Errorf("expected 10 perfect bonus coins, got %d", reward.CoinBreakdown["perfect_bonus_coins"])
+		}
+		if reward.XPBreakdown["perfect_bonus_xp"] != 15 {
+			t.Errorf("expected 15 perfect bonus XP, got %d", reward.XPBreakdown["perfect_bonus_xp"])
+		}
+	})
+
+	t.Run("83.3% accuracy awards 1 gem and no perfect bonus", func(t *testing.T) {
+		reward := CalculateMatchTheFollowingRewards(10, 12, 2, 3, 100)
+		if reward.Coins != 25 {
+			t.Errorf("expected 25 coins, got %d", reward.Coins)
+		}
+		if reward.XP != 60 {
+			t.Errorf("expected 60 XP, got %d", reward.XP)
+		}
+		if reward.Gems != 1 {
+			t.Errorf("expected 1 gem, got %d", reward.Gems)
+		}
+		if reward.CoinBreakdown["perfect_bonus_coins"] != 0 {
+			t.Errorf("expected 0 perfect bonus coins, got %d", reward.CoinBreakdown["perfect_bonus_coins"])
+		}
+	})
+
+	t.Run("50% accuracy awards 0 gems", func(t *testing.T) {
+		reward := CalculateMatchTheFollowingRewards(6, 12, 1, 3, 50)
+		if reward.Gems != 0 {
+			t.Errorf("expected 0 gems, got %d", reward.Gems)
+		}
+	})
+}
+
+func TestGameSessionIsMatchTheFollowing(t *testing.T) {
+	s := &models.GameSession{GameMode: models.GameModeMatchTheFollowing}
+	if !s.IsMatchTheFollowing() {
+		t.Fatal("expected IsMatchTheFollowing() to return true")
+	}
+	s2 := &models.GameSession{GameMode: models.GameModeMCQ}
+	if s2.IsMatchTheFollowing() {
+		t.Fatal("expected IsMatchTheFollowing() to return false for MCQ")
+	}
+	var nilSession *models.GameSession
+	if nilSession.IsMatchTheFollowing() {
+		t.Fatal("expected nil session IsMatchTheFollowing() to return false")
+	}
+}
+
+func TestMatchTheFollowingSeedQuestionsConsistency(t *testing.T) {
+	raw, err := os.ReadFile("../data/seed_questions.json")
+	if err != nil {
+		t.Fatalf("failed to read seed_questions.json: %v", err)
+	}
+
+	type seedPair struct {
+		PairOrder int    `json:"pair_order"`
+		LeftText  string `json:"left_text"`
+		RightText string `json:"right_text"`
+	}
+
+	type seedItem struct {
+		models.Question
+		MatchPairs []seedPair `json:"match_pairs"`
+	}
+
+	var all []seedItem
+	if err := json.Unmarshal(raw, &all); err != nil {
+		t.Fatalf("failed to unmarshal seed_questions.json: %v", err)
+	}
+
+	var matchBoards []seedItem
+	for _, item := range all {
+		if item.QuestionType == models.GameModeMatchTheFollowing {
+			matchBoards = append(matchBoards, item)
+		}
+	}
+
+	if len(matchBoards) < 10 {
+		t.Fatalf("expected at least 10 match_the_following boards, got %d", len(matchBoards))
+	}
+
+	for _, b := range matchBoards {
+		if len(b.MatchPairs) != 4 {
+			t.Fatalf("board %s must have exactly 4 match pairs, got %d", b.QuestionCode, len(b.MatchPairs))
+		}
+		for i, p := range b.MatchPairs {
+			expectedOrder := i + 1
+			if p.PairOrder != expectedOrder {
+				t.Fatalf("board %s pair %d order expected %d, got %d", b.QuestionCode, i, expectedOrder, p.PairOrder)
+			}
+			if p.LeftText == "" || p.RightText == "" {
+				t.Fatalf("board %s pair %d must have non-empty left and right text", b.QuestionCode, i)
+			}
+		}
+	}
+}
+

@@ -122,3 +122,157 @@ func TestGameSession_IsSuddenDeathNilSafe(t *testing.T) {
 		t.Fatal("a nil session must not report sudden death")
 	}
 }
+
+func TestCreateSessionRequest_ValidateMatchTheFollowing(t *testing.T) {
+	t.Run("default question_count and time_limit", func(t *testing.T) {
+		req := &CreateSessionRequestDTO{
+			TopicID:  "accounting",
+			GameMode: models.GameModeMatchTheFollowing,
+		}
+		if err := req.Validate(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if req.QuestionCount != 3 {
+			t.Fatalf("expected default question_count=3, got %d", req.QuestionCount)
+		}
+		if req.TimeLimitPerQuestionSec != 25 {
+			t.Fatalf("expected default time_limit=25, got %d", req.TimeLimitPerQuestionSec)
+		}
+	})
+
+	t.Run("valid custom boards and time_limit", func(t *testing.T) {
+		req := &CreateSessionRequestDTO{
+			TopicID:                 "accounting",
+			GameMode:                models.GameModeMatchTheFollowing,
+			QuestionCount:           5,
+			TimeLimitPerQuestionSec: 30,
+		}
+		if err := req.Validate(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if req.QuestionCount != 5 {
+			t.Fatalf("expected question_count=5, got %d", req.QuestionCount)
+		}
+		if req.TimeLimitPerQuestionSec != 30 {
+			t.Fatalf("expected time_limit=30, got %d", req.TimeLimitPerQuestionSec)
+		}
+	})
+
+	t.Run("question_count out of range rejected", func(t *testing.T) {
+		tooFew := &CreateSessionRequestDTO{
+			TopicID:       "accounting",
+			GameMode:      models.GameModeMatchTheFollowing,
+			QuestionCount: -1, // will default to 3 in Validate, but explicit 0 or negative
+		}
+		_ = tooFew.Validate()
+		if tooFew.QuestionCount != 3 {
+			t.Fatalf("expected 0 to default to 3, got %d", tooFew.QuestionCount)
+		}
+
+		tooMany := &CreateSessionRequestDTO{
+			TopicID:       "accounting",
+			GameMode:      models.GameModeMatchTheFollowing,
+			QuestionCount: 6,
+		}
+		if err := tooMany.Validate(); err == nil {
+			t.Fatal("expected error for question_count > 5")
+		}
+	})
+
+	t.Run("time_limit out of range rejected", func(t *testing.T) {
+		tooLow := &CreateSessionRequestDTO{
+			TopicID:                 "accounting",
+			GameMode:                models.GameModeMatchTheFollowing,
+			TimeLimitPerQuestionSec: 10,
+		}
+		if err := tooLow.Validate(); err == nil {
+			t.Fatal("expected error for time_limit < 15")
+		}
+
+		tooHigh := &CreateSessionRequestDTO{
+			TopicID:                 "accounting",
+			GameMode:                models.GameModeMatchTheFollowing,
+			TimeLimitPerQuestionSec: 50,
+		}
+		if err := tooHigh.Validate(); err == nil {
+			t.Fatal("expected error for time_limit > 45")
+		}
+	})
+}
+
+func TestCompleteMatchTheFollowingRequestDTO_Validate(t *testing.T) {
+	t.Run("empty session rejected", func(t *testing.T) {
+		req := CompleteMatchTheFollowingRequestDTO{
+			Session: "",
+			Boards: []MatchBoardAnswerSubmissionDTO{
+				{QuestionCode: "mtf_001"},
+			},
+		}
+		if err := req.Validate(); err == nil {
+			t.Fatal("expected error for empty session")
+		}
+	})
+
+	t.Run("empty boards rejected", func(t *testing.T) {
+		req := CompleteMatchTheFollowingRequestDTO{
+			Session: "sess-123",
+			Boards:  []MatchBoardAnswerSubmissionDTO{},
+		}
+		if err := req.Validate(); err == nil {
+			t.Fatal("expected error for empty boards")
+		}
+	})
+
+	t.Run("missing question_code rejected", func(t *testing.T) {
+		req := CompleteMatchTheFollowingRequestDTO{
+			Session: "sess-123",
+			Boards: []MatchBoardAnswerSubmissionDTO{
+				{QuestionCode: ""},
+			},
+		}
+		if err := req.Validate(); err == nil {
+			t.Fatal("expected error for missing question_code")
+		}
+	})
+
+	t.Run("negative mistakes rejected", func(t *testing.T) {
+		req := CompleteMatchTheFollowingRequestDTO{
+			Session: "sess-123",
+			Boards: []MatchBoardAnswerSubmissionDTO{
+				{QuestionCode: "mtf_001", Mistakes: -1},
+			},
+		}
+		if err := req.Validate(); err == nil {
+			t.Fatal("expected error for negative mistakes")
+		}
+	})
+
+	t.Run("negative time rejected", func(t *testing.T) {
+		req := CompleteMatchTheFollowingRequestDTO{
+			Session: "sess-123",
+			Boards: []MatchBoardAnswerSubmissionDTO{
+				{QuestionCode: "mtf_001", TimeTakenMs: -50},
+			},
+		}
+		if err := req.Validate(); err == nil {
+			t.Fatal("expected error for negative time_taken_ms")
+		}
+	})
+
+	t.Run("valid payload passes", func(t *testing.T) {
+		req := CompleteMatchTheFollowingRequestDTO{
+			Session: "sess-123",
+			Boards: []MatchBoardAnswerSubmissionDTO{
+				{
+					QuestionCode: "mtf_001",
+					Matches:      map[string]string{"left_1": "right_1"},
+					Mistakes:     0,
+					TimeTakenMs:  12000,
+				},
+			},
+		}
+		if err := req.Validate(); err != nil {
+			t.Fatalf("unexpected error for valid payload: %v", err)
+		}
+	})
+}

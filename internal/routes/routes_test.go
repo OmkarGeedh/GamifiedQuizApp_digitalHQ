@@ -143,6 +143,19 @@ func TestRouteRegistrationBothPrefixes(t *testing.T) {
 			t.Errorf("expected route %s to exist (not 404), got 404", path)
 		}
 	}
+
+	// Test match-the-following completion endpoint exists under both /quiz and /api/v1/quiz (not 404)
+	for _, path := range []string{"/quiz/match-the-following/complete", "/api/v1/quiz/match-the-following/complete"} {
+		req, _ := http.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", "http://localhost:3000")
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		if w.Code == http.StatusNotFound {
+			t.Errorf("expected route %s to exist (not 404), got 404", path)
+		}
+	}
 }
 
 func TestMethodNotAllowedReturns405(t *testing.T) {

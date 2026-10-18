@@ -14,7 +14,7 @@ import (
 func GetQuestionsByTopic(ctx context.Context, topicID string, limit int) ([]models.Question, error) {
 	var questions []models.Question
 	err := GetDB().WithContext(ctx).
-		Where("topic_id = ?", topicID).
+		Where("topic_id = ? AND (question_type = ? OR question_type = '' OR question_type IS NULL)", topicID, models.GameModeMCQ).
 		Order("RANDOM()").
 		Limit(limit).
 		Find(&questions).Error
@@ -101,7 +101,7 @@ func CountQuestionsByTopic(ctx context.Context, topicID string) (int64, error) {
 	var count int64
 	err := GetDB().WithContext(ctx).
 		Model(&models.Question{}).
-		Where("topic_id = ?", topicID).
+		Where("topic_id = ? AND (question_type = ? OR question_type = '' OR question_type IS NULL)", topicID, models.GameModeMCQ).
 		Count(&count).Error
 	return count, err
 }
@@ -408,4 +408,58 @@ func RecordBatchAnswers(ctx context.Context, history []*models.UserQuestionHisto
 		return nil
 	}
 	return db.WithContext(ctx).CreateInBatches(history, 50).Error
+}
+
+// --- Match the Following Helpers ---
+
+// GetMatchPairsByQuestionIDs fetches all pairs belonging to the given question IDs, ordered by pair_order ASC.
+func GetMatchPairsByQuestionIDs(ctx context.Context, questionIDs []string) (map[string][]models.MatchPair, error) {
+	result := make(map[string][]models.MatchPair)
+	if len(questionIDs) == 0 {
+		return result, nil
+	}
+	db := GetDB()
+	if db == nil {
+		return result, nil
+	}
+	var pairs []models.MatchPair
+	err := db.WithContext(ctx).
+		Where("question_id IN ?", questionIDs).
+		Order("pair_order ASC").
+		Find(&pairs).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range pairs {
+		result[p.QuestionID] = append(result[p.QuestionID], p)
+	}
+	return result, nil
+}
+
+// CreateMatchPairs inserts a batch of match pairs into the database.
+func CreateMatchPairs(ctx context.Context, pairs []models.MatchPair) error {
+	if len(pairs) == 0 {
+		return nil
+	}
+	db := GetDB()
+	if db == nil {
+		return nil
+	}
+	return db.WithContext(ctx).CreateInBatches(pairs, 50).Error
+}
+
+// GetMatchTheFollowingQuestions fetches questions matching the match_the_following game mode and topic.
+func GetMatchTheFollowingQuestions(ctx context.Context, topicID string, limit int) ([]models.Question, error) {
+	db := GetDB()
+	if db == nil {
+		return nil, nil
+	}
+	var questions []models.Question
+	query := db.WithContext(ctx).
+		Where("question_type = ?", models.GameModeMatchTheFollowing)
+	if topicID != "" {
+		query = query.Where("topic_id = ?", topicID)
+	}
+	err := query.Order("RANDOM()").Limit(limit).Find(&questions).Error
+	return questions, err
 }

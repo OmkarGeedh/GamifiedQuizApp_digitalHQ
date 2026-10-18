@@ -271,6 +271,134 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 		}, http.StatusCreated, nil
 	}
 
+	// Special flow for Match the Following multi-board matching puzzle
+	if req.GameMode == models.GameModeMatchTheFollowing {
+		var questions []models.Question
+		if len(req.QuestionCodes) > 0 {
+			var err error
+			questions, err = repo.GetQuestionsByCodes(ctx, req.QuestionCodes)
+			if err != nil {
+				return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch requested questions: %w", err)
+			}
+			if len(questions) != len(req.QuestionCodes) {
+				return nil, http.StatusBadRequest, errors.New("all requested question_codes must exist")
+			}
+			for _, q := range questions {
+				if q.QuestionType != models.GameModeMatchTheFollowing {
+					return nil, http.StatusBadRequest, fmt.Errorf("question %s is not a match_the_following question", q.QuestionCode)
+				}
+			}
+		} else {
+			if req.QuestionCount <= 0 {
+				req.QuestionCount = 3
+			}
+			var err error
+			questions, err = repo.GetMatchTheFollowingQuestions(ctx, req.TopicID, req.QuestionCount)
+			if err != nil {
+				return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch questions: %w", err)
+			}
+			if len(questions) == 0 {
+				return nil, http.StatusNotFound, errors.New("no match_the_following questions found for the selected topic")
+			}
+			rand.Shuffle(len(questions), func(i, j int) {
+				questions[i], questions[j] = questions[j], questions[i]
+			})
+			if len(questions) > req.QuestionCount {
+				questions = questions[:req.QuestionCount]
+			}
+		}
+
+		timeLimitPerQuestion := req.TimeLimitPerQuestionSec
+		if timeLimitPerQuestion < 15 || timeLimitPerQuestion > 45 {
+			timeLimitPerQuestion = 25
+		}
+
+		questionIDs := make([]string, len(questions))
+		for i, q := range questions {
+			questionIDs[i] = q.ID
+		}
+		pairsMap, err := repo.GetMatchPairsByQuestionIDs(ctx, questionIDs)
+		if err != nil {
+			return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch match pairs: %w", err)
+		}
+
+		sessionQuestions := make([]models.SessionQuestion, 0, len(questions))
+		boardDTOs := make([]dto.MatchBoardDTO, 0, len(questions))
+
+		for _, q := range questions {
+			pairs := pairsMap[q.ID]
+			leftItems := make([]dto.MatchPairItemDTO, 0, len(pairs))
+			rightItems := make([]dto.MatchPairItemDTO, 0, len(pairs))
+			solMap := make(map[string]string, len(pairs))
+
+			for _, p := range pairs {
+				leftID := fmt.Sprintf("%s_l", p.ID)
+				rightID := fmt.Sprintf("%s_r", p.ID)
+				leftItems = append(leftItems, dto.MatchPairItemDTO{
+					ID:   leftID,
+					Text: p.LeftText,
+				})
+				rightItems = append(rightItems, dto.MatchPairItemDTO{
+					ID:   rightID,
+					Text: p.RightText,
+				})
+				solMap[leftID] = rightID
+			}
+
+			// Shuffle right items to prevent across-the-row matching
+			rand.Shuffle(len(rightItems), func(i, j int) {
+				rightItems[i], rightItems[j] = rightItems[j], rightItems[i]
+			})
+
+			sq := models.SessionQuestion{
+				QuestionCode: q.QuestionCode,
+				Prompt:       q.Prompt,
+				Difficulty:   q.Difficulty,
+				Points:       40,
+				Hint:         q.Hint,
+				Explanation:  q.Explanation,
+				MatchPairs:   pairs,
+			}
+			sessionQuestions = append(sessionQuestions, sq)
+
+			boardDTOs = append(boardDTOs, dto.MatchBoardDTO{
+				QuestionCode: q.QuestionCode,
+				Prompt:       q.Prompt,
+				TimeLimitSec: timeLimitPerQuestion,
+				LeftItems:    leftItems,
+				RightItems:   rightItems,
+				SolutionMap:  solMap,
+				Hint:         q.Hint,
+				Explanation:  q.Explanation,
+			})
+		}
+
+		session := &models.GameSession{
+			ClientID:       clientID,
+			TopicID:        req.TopicID,
+			GameMode:       req.GameMode,
+			TotalQuestions: len(sessionQuestions),
+			Status:         models.SessionStatusInProgress,
+		}
+		if err := session.SetQuestions(sessionQuestions); err != nil {
+			return nil, http.StatusInternalServerError, fmt.Errorf("failed to serialize session questions: %w", err)
+		}
+		if err := repo.CreateSession(ctx, session); err != nil {
+			return nil, http.StatusInternalServerError, fmt.Errorf("failed to create session: %w", err)
+		}
+		RefreshSessionTTL(ctx, session.ID)
+
+		return &dto.SessionCreatedResponseDTO{
+			Session:                 session.ID,
+			Topic:                   session.TopicID,
+			GameMode:                session.GameMode,
+			TotalQuestions:          session.TotalQuestions,
+			TimeLimitSec:            timeLimitPerQuestion * len(sessionQuestions),
+			TimeLimitPerQuestionSec: timeLimitPerQuestion,
+			Boards:                  boardDTOs,
+		}, http.StatusCreated, nil
+	}
+
 	// Determine target question type for this mode
 	targetType := models.GameModeMCQ
 	if req.GameMode == models.GameModeSuddenDeath {
@@ -934,6 +1062,252 @@ func CompleteSortItOutSession(ctx context.Context, clientID int, req *dto.Comple
 	}, http.StatusOK, nil
 }
 
+// CompleteMatchTheFollowingSession processes batch board submissions for a Match the Following session,
+// applies authoritative pair verification and scoring, awards economy rewards, logs history, and finalizes the session.
+func CompleteMatchTheFollowingSession(ctx context.Context, clientID int, req *dto.CompleteMatchTheFollowingRequestDTO) (*dto.CompleteMatchTheFollowingResponseDTO, int, error) {
+	if req == nil {
+		return nil, http.StatusBadRequest, errors.New("request body is required")
+	}
+	if err := req.Validate(); err != nil {
+		return nil, http.StatusBadRequest, err
+	}
+
+	session, err := repo.GetSessionByID(ctx, req.Session)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, http.StatusNotFound, errors.New("session not found")
+		}
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch session: %w", err)
+	}
+	if session.ClientID != clientID {
+		return nil, http.StatusForbidden, errors.New("session does not belong to this user")
+	}
+	if session.GameMode != models.GameModeMatchTheFollowing {
+		return nil, http.StatusBadRequest, errors.New("session is not a match_the_following game mode")
+	}
+	if session.Status != models.SessionStatusInProgress {
+		return nil, http.StatusConflict, errors.New("session is already completed or abandoned")
+	}
+	if CheckAndAbandonIfExpired(ctx, session) {
+		return nil, http.StatusConflict, errors.New("quiz session expired due to 5 minutes of inactivity and has been abandoned")
+	}
+
+	sessionQuestions, err := session.GetQuestions()
+	if err != nil || len(sessionQuestions) == 0 {
+		return nil, http.StatusInternalServerError, errors.New("failed to load session questions")
+	}
+
+	sqMap := make(map[string]models.SessionQuestion, len(sessionQuestions))
+	for _, sq := range sessionQuestions {
+		sqMap[sq.QuestionCode] = sq
+	}
+
+	clearedBoards := 0
+	totalPairsMatched := 0
+	totalPairsCount := 0
+	totalMistakes := 0
+	totalBasePts := 0
+	totalFlawlessBonus := 0
+	totalSpeedBonus := 0
+	totalMistakePenalty := 0
+	finalScore := 0
+
+	boardsReview := make([]dto.MatchBoardReviewDTO, 0, len(req.Boards))
+	historyRecords := make([]*models.UserQuestionHistory, 0, len(req.Boards))
+	seenBoards := make(map[string]bool, len(req.Boards))
+
+	timeLimitSec := 25
+
+	for _, boardSub := range req.Boards {
+		sq, ok := sqMap[boardSub.QuestionCode]
+		if !ok {
+			return nil, http.StatusBadRequest, fmt.Errorf("question %s does not belong to session", boardSub.QuestionCode)
+		}
+		if seenBoards[boardSub.QuestionCode] {
+			return nil, http.StatusConflict, fmt.Errorf("duplicate submission for board %s", boardSub.QuestionCode)
+		}
+		seenBoards[boardSub.QuestionCode] = true
+
+		solMap := make(map[string]string)
+		for _, p := range sq.MatchPairs {
+			leftID := fmt.Sprintf("%s_l", p.ID)
+			rightID := fmt.Sprintf("%s_r", p.ID)
+			solMap[leftID] = rightID
+			solMap[p.ID] = p.ID
+		}
+
+		totalPairs := len(sq.MatchPairs)
+		matchedCount := 0
+		usedRightIDs := make(map[string]bool)
+
+		for leftID, rightID := range boardSub.Matches {
+			if usedRightIDs[rightID] {
+				continue
+			}
+			expectedRight, ok := solMap[leftID]
+			if !ok {
+				expectedRight, ok = solMap[strings.TrimSuffix(leftID, "_l")]
+			}
+			if ok && (expectedRight == rightID || strings.TrimSuffix(expectedRight, "_r") == strings.TrimSuffix(rightID, "_r")) {
+				usedRightIDs[rightID] = true
+				matchedCount++
+			}
+		}
+
+		isCleared := totalPairs > 0 && matchedCount == totalPairs
+		if isCleared {
+			clearedBoards++
+		}
+		isFlawless := isCleared && boardSub.Mistakes == 0
+		isTimeout := boardSub.IsTimeout
+
+		basePts, flawlessBonus, speedBonus, mistakePenalty, totalBoardScore := CalculateMatchBoardPoints(
+			matchedCount,
+			totalPairs,
+			boardSub.Mistakes,
+			timeLimitSec,
+			boardSub.TimeTakenMs,
+		)
+
+		totalBasePts += basePts
+		totalFlawlessBonus += flawlessBonus
+		totalSpeedBonus += speedBonus
+		totalMistakePenalty += mistakePenalty
+		finalScore += totalBoardScore
+
+		totalPairsMatched += matchedCount
+		totalPairsCount += totalPairs
+		totalMistakes += boardSub.Mistakes
+
+		boardsReview = append(boardsReview, dto.MatchBoardReviewDTO{
+			QuestionCode:    sq.QuestionCode,
+			Prompt:          sq.Prompt,
+			PairsMatched:    matchedCount,
+			TotalPairs:      totalPairs,
+			Mistakes:        boardSub.Mistakes,
+			TimeTakenMs:     boardSub.TimeTakenMs,
+			IsFlawless:      isFlawless,
+			IsTimeout:       isTimeout,
+			BasePoints:      basePts,
+			FlawlessBonus:   flawlessBonus,
+			SpeedBonus:      speedBonus,
+			MistakePenalty:  mistakePenalty,
+			TotalBoardScore: totalBoardScore,
+			Explanation:     sq.Explanation,
+		})
+
+		historyRecords = append(historyRecords, &models.UserQuestionHistory{
+			ClientID:       clientID,
+			SessionID:      session.ID,
+			QuestionCode:   sq.QuestionCode,
+			SelectedOption: fmt.Sprintf("%d/%d", matchedCount, totalPairs),
+			IsCorrect:      isCleared,
+			TimeTakenMs:    boardSub.TimeTakenMs,
+			PointsAwarded:  totalBoardScore,
+			CoinsAwarded:   0,
+		})
+	}
+
+	session.Score = finalScore
+	session.CorrectCount = clearedBoards
+	session.CurrentIdx = len(req.Boards)
+	session.CompletedSuccessfully = len(req.Boards) >= session.TotalQuestions
+	session.EndReason = "completed"
+
+	reward := CalculateMatchTheFollowingRewards(totalPairsMatched, totalPairsCount, clearedBoards, session.TotalQuestions, finalScore)
+
+	if err := repo.RecordBatchAnswers(ctx, historyRecords); err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to record answer history: %w", err)
+	}
+
+	profile, err := GetOrCreateProfile(ctx, clientID)
+	if err != nil {
+		log.Printf("[MatchTheFollowing] Notice fetching profile for client %d: %v\n", clientID, err)
+	}
+	oldLevel := 1
+	oldExperience := 0
+	currentStreak := 0
+	if profile != nil {
+		oldLevel = profile.Level
+		oldExperience = profile.Experience
+		currentStreak = profile.CurrentStreak
+	}
+
+	newExperience := oldExperience + reward.XP
+	newLevel := CalculateNewLevel(newExperience)
+	didLevelUp := newLevel > oldLevel
+
+	var levelUpReward *dto.LevelUpRewardDTO
+	levelBonusCoins := 0
+	levelBonusGems := 0
+	if didLevelUp {
+		levelsGained := newLevel - oldLevel
+		levelBonusCoins = levelsGained * 50
+		levelBonusGems = levelsGained
+		levelUpReward = &dto.LevelUpRewardDTO{
+			Coins: levelBonusCoins,
+			Gems:  levelBonusGems,
+		}
+	}
+
+	if err := repo.FinalizeSession(
+		ctx,
+		session,
+		reward.Coins+levelBonusCoins,
+		reward.XP,
+		reward.Gems+levelBonusGems,
+	); err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to finalize session: %w", err)
+	}
+	ClearSessionTTL(ctx, session.ID)
+
+	if didLevelUp && profile != nil {
+		profile.Level = newLevel
+		_ = updateProfileLevel(ctx, clientID, newLevel)
+	}
+
+	accuracy := 0.0
+	if totalPairsCount > 0 {
+		accuracy = math.Round(float64(totalPairsMatched)/float64(totalPairsCount)*10000) / 100
+	}
+	nextLevelExp := CalculateExperienceForLevel(newLevel)
+
+	return &dto.CompleteMatchTheFollowingResponseDTO{
+		Session:            session.ID,
+		TotalBoards:        session.TotalQuestions,
+		ClearedBoards:      clearedBoards,
+		TotalPairsMatched:  totalPairsMatched,
+		TotalPairsCount:    totalPairsCount,
+		TotalMistakes:      totalMistakes,
+		AccuracyPercentage: accuracy,
+		FinalScore:         finalScore,
+		CoinsAwarded:       reward.Coins,
+		XPAwarded:          reward.XP,
+		GemsAwarded:        reward.Gems,
+		ScoreBreakdown: map[string]int{
+			"base_points":     totalBasePts,
+			"flawless_bonus":  totalFlawlessBonus,
+			"speed_bonus":     totalSpeedBonus,
+			"mistake_penalty": totalMistakePenalty,
+			"final_score":     finalScore,
+		},
+		CoinBreakdown: reward.CoinBreakdown,
+		XPBreakdown:   reward.XPBreakdown,
+		LevelUpReward: levelUpReward,
+		Level: dto.LevelInfoDTO{
+			Current:      newLevel,
+			DidLevelUp:   didLevelUp,
+			Experience:   newExperience,
+			NextLevelExp: nextLevelExp,
+		},
+		Streak: dto.StreakInfoDTO{
+			CurrentStreak:  currentStreak,
+			TodayCompleted: true,
+		},
+		BoardsReview: boardsReview,
+	}, http.StatusOK, nil
+}
+
 // --- Scoring Formulas ---
 
 // CalculatePoints computes deterministic MVP points for a correct answer.
@@ -1143,6 +1517,89 @@ func CalculateSortItOutRewards(correctCount, totalQuestions, _ int) GameRewardSu
 	}
 }
 
+// CalculateMatchBoardPoints computes authoritative score components for a Match the Following board.
+// Base Points: 10 pts per correctly matched pair (40 pts max base per board with 4 pairs).
+// Flawless Bonus: +10 pts if cleared with 0 mistakes.
+// Speed Bonus: +1 pt per second remaining on the board timer upon board clearance.
+// Mistake Penalty: -2 pts per wrong attempt.
+// Clamped so board score cannot drop below 0.
+func CalculateMatchBoardPoints(matchedCount int, totalPairs int, mistakes int, timeLimitSec int, timeTakenMs int) (basePts, flawlessBonus, speedBonus, mistakePenalty, totalPts int) {
+	if matchedCount < 0 {
+		matchedCount = 0
+	}
+	basePts = matchedCount * 10
+
+	isCleared := totalPairs > 0 && matchedCount == totalPairs
+	if isCleared && mistakes == 0 {
+		flawlessBonus = 10
+	}
+
+	if isCleared && timeLimitSec > 0 {
+		remSec := timeLimitSec - (timeTakenMs / 1000)
+		if remSec > 0 {
+			speedBonus = remSec
+		}
+	}
+
+	if mistakes > 0 {
+		mistakePenalty = mistakes * 2
+	}
+
+	rawScore := basePts + flawlessBonus + speedBonus - mistakePenalty
+	if rawScore < 0 {
+		totalPts = 0
+	} else {
+		totalPts = rawScore
+	}
+	return basePts, flawlessBonus, speedBonus, mistakePenalty, totalPts
+}
+
+// CalculateMatchTheFollowingRewards computes economy rewards for completed Match the Following puzzle sessions.
+func CalculateMatchTheFollowingRewards(pairsMatched, totalPairs, clearedBoards, totalBoards, finalScore int) GameRewardSummary {
+	xpBreakdown := map[string]int{
+		"completion_xp":     MCQCompletionXP,
+		"correct_answer_xp": pairsMatched * MCQCorrectAnswerXP,
+		"perfect_bonus_xp":  0,
+	}
+	coinBreakdown := map[string]int{
+		"completion_coins":     MCQCompletionCoins,
+		"correct_answer_coins": pairsMatched * MCQCorrectAnswerCoins,
+		"perfect_bonus_coins":  0,
+	}
+
+	if totalPairs > 0 && pairsMatched == totalPairs {
+		xpBreakdown["perfect_bonus_xp"] = MCQPerfectBonusXP
+		coinBreakdown["perfect_bonus_coins"] = MCQPerfectBonusCoins
+	}
+
+	xp := 0
+	for _, v := range xpBreakdown {
+		xp += v
+	}
+	coins := 0
+	for _, v := range coinBreakdown {
+		coins += v
+	}
+
+	gems := 0
+	if totalPairs > 0 {
+		accuracy := float64(pairsMatched) / float64(totalPairs)
+		if accuracy >= 1.0 {
+			gems = 3
+		} else if accuracy >= 0.8 {
+			gems = 1
+		}
+	}
+
+	return GameRewardSummary{
+		Coins:         coins,
+		XP:            xp,
+		Gems:          gems,
+		XPBreakdown:   xpBreakdown,
+		CoinBreakdown: coinBreakdown,
+	}
+}
+
 func CalculateMaxScore(totalQuestions int) int {
 	if totalQuestions <= 0 {
 		return 0
@@ -1151,7 +1608,7 @@ func CalculateMaxScore(totalQuestions int) int {
 }
 
 // CalculateMaxScoreForMode preserves MCQ scoring while including Sudden Death
-// streak milestones and Sort It Out max speed and combo potential.
+// streak milestones, Sort It Out speed/combo potential, and Match the Following bonuses.
 func CalculateMaxScoreForMode(gameMode string, totalQuestions int) int {
 	maxScore := CalculateMaxScore(totalQuestions)
 	if gameMode == models.GameModeSuddenDeath && totalQuestions > 0 {
@@ -1166,6 +1623,9 @@ func CalculateMaxScoreForMode(gameMode string, totalQuestions int) int {
 			comboTotal += cb
 		}
 		maxScore = (totalQuestions * 10) + (totalQuestions * 5) + comboTotal
+	} else if gameMode == models.GameModeMatchTheFollowing && totalQuestions > 0 {
+		// 40 base + 10 flawless + 25 speed bonus (at 25s limit) = 75 per board
+		maxScore = totalQuestions * 75
 	}
 	return maxScore
 }
