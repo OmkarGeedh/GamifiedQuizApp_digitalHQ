@@ -52,15 +52,22 @@ jobs:
       - name: Deploy to Zoho Catalyst AppSail
         env:
           ZCATALYST_NON_INTERACTIVE: "true"
+          CATALYST_RAW_TOKEN: "${{ secrets.CATALYST_TOKEN }}"
+          CATALYST_RAW_PROJECT: "${{ secrets.CATALYST_PROJECT_ID }}"
+          CATALYST_RAW_ORG: "${{ secrets.CATALYST_ORG_ID }}"
         run: |
-          catalyst deploy appsail \
-            --name quiz-api \
-            --source docker://quiz-api:latest \
-            --port 8080 \
-            --project "${{ secrets.CATALYST_PROJECT_ID }}" \
-            --org "${{ secrets.CATALYST_ORG_ID }}" \
-            --token "${{ secrets.CATALYST_TOKEN }}" \
-            --dc in \
-            --non-interactive
+          CLEAN_TOKEN=$(echo -n "$CATALYST_RAW_TOKEN" | tr -d '[:space:]')
+          CLEAN_PROJECT=$(echo -n "$CATALYST_RAW_PROJECT" | tr -d '[:space:]')
+          CLEAN_ORG=$(echo -n "$CATALYST_RAW_ORG" | tr -d '[:space:]')
+
+          CMD="catalyst deploy appsail --name quiz-api --source docker://quiz-api:latest --port 8080 --dc in --non-interactive --token $CLEAN_TOKEN"
+          if [ -n "$CLEAN_PROJECT" ]; then
+            CMD="$CMD --project $CLEAN_PROJECT"
+          fi
+          if [ -n "$CLEAN_ORG" ]; then
+            CMD="$CMD --org $CLEAN_ORG"
+          fi
+
+          eval "$CMD"
 
 
