@@ -180,6 +180,7 @@ func seedQuestions(ctx context.Context, db *gorm.DB) error {
 		QuestionCode  string  `json:"question_code"`
 		QuestionType  string  `json:"question_type"`
 		TopicID       string  `json:"topic_id"`
+		PairType      string  `json:"pair_type,omitempty"`
 		Prompt        string  `json:"prompt"`
 		OptionA       string  `json:"option_a"`
 		OptionB       string  `json:"option_b"`
@@ -217,6 +218,7 @@ func seedQuestions(ctx context.Context, db *gorm.DB) error {
 			QuestionCode:  s.QuestionCode,
 			QuestionType:  qType,
 			TopicID:       s.TopicID,
+			PairType:      strings.TrimSpace(s.PairType),
 			Prompt:        s.Prompt,
 			OptionA:       s.OptionA,
 			OptionB:       s.OptionB,

@@ -146,6 +146,131 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 		}
 	}
 
+	// Special flow for Sort It Out rapid-fire swipe mini-game
+	if req.GameMode == models.GameModeSortItOut {
+		pairType := req.PairType
+		if pairType == "" {
+			pairTypes, err := repo.GetDistinctPairTypes(ctx, req.TopicID, models.GameModeSortItOut)
+			if err != nil {
+				return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch pair types: %w", err)
+			}
+			if len(pairTypes) == 0 {
+				return nil, http.StatusNotFound, errors.New("no sort_it_out questions available for the selected topic")
+			}
+			pairType = pairTypes[rand.IntN(len(pairTypes))]
+		}
+
+		var questions []models.Question
+		if len(req.QuestionCodes) > 0 {
+			var err error
+			questions, err = repo.GetQuestionsByCodes(ctx, req.QuestionCodes)
+			if err != nil {
+				return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch requested questions: %w", err)
+			}
+			if len(questions) != len(req.QuestionCodes) {
+				return nil, http.StatusBadRequest, errors.New("all requested question_codes must exist")
+			}
+			for _, q := range questions {
+				if q.QuestionType != models.GameModeSortItOut {
+					return nil, http.StatusBadRequest, fmt.Errorf("question %s is not a sort_it_out question", q.QuestionCode)
+				}
+			}
+			if pairType == "" && len(questions) > 0 {
+				pairType = questions[0].PairType
+			}
+		} else {
+			if req.QuestionCount <= 0 {
+				req.QuestionCount = 10
+			}
+			var err error
+			questions, err = repo.GetSortItOutQuestions(ctx, req.TopicID, pairType, req.QuestionCount)
+			if err != nil {
+				return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch questions: %w", err)
+			}
+			if len(questions) == 0 {
+				return nil, http.StatusNotFound, fmt.Errorf("no sort_it_out questions found for pair type '%s'", pairType)
+			}
+			rand.Shuffle(len(questions), func(i, j int) {
+				questions[i], questions[j] = questions[j], questions[i]
+			})
+		}
+
+		timeLimitPerQuestion := req.TimeLimitPerQuestionSec
+		if timeLimitPerQuestion < 5 || timeLimitPerQuestion > 10 {
+			timeLimitPerQuestion = 7
+		}
+
+		sessionQuestions := make([]models.SessionQuestion, 0, len(questions))
+		questionDTOs := make([]dto.QuestionDTO, 0, len(questions))
+		for _, q := range questions {
+			correctOpt := strings.ToLower(strings.TrimSpace(q.CorrectOption))
+			var correctText string
+			if correctOpt == "a" {
+				correctText = q.OptionA
+			} else if correctOpt == "b" {
+				correctText = q.OptionB
+			}
+			sq := models.SessionQuestion{
+				QuestionCode:    q.QuestionCode,
+				Prompt:          q.Prompt,
+				OptionA:         q.OptionA,
+				OptionB:         q.OptionB,
+				PairType:        q.PairType,
+				CorrectOption:   correctOpt,
+				OriginalCorrect: correctOpt,
+				CorrectText:     correctText,
+				Difficulty:      q.Difficulty,
+				Points:          MCQCorrectAnswerPoints,
+				Hint:            q.Hint,
+				Explanation:     q.Explanation,
+			}
+			sessionQuestions = append(sessionQuestions, sq)
+
+			opts := []dto.OptionDTO{
+				{Option: "a", Text: sq.OptionA},
+				{Option: "b", Text: sq.OptionB},
+			}
+			questionDTOs = append(questionDTOs, dto.QuestionDTO{
+				Question:      sq.QuestionCode,
+				Prompt:        sq.Prompt,
+				Points:        MCQCorrectAnswerPoints,
+				Hint:          sq.Hint,
+				TimeLimitSec:  timeLimitPerQuestion,
+				Options:       opts,
+				CorrectOption: sq.CorrectOption,
+				PairType:      sq.PairType,
+				Explanation:   sq.Explanation,
+			})
+		}
+
+		session := &models.GameSession{
+			ClientID:       clientID,
+			TopicID:        req.TopicID,
+			GameMode:       req.GameMode,
+			PairType:       pairType,
+			TotalQuestions: len(sessionQuestions),
+			Status:         models.SessionStatusInProgress,
+		}
+		if err := session.SetQuestions(sessionQuestions); err != nil {
+			return nil, http.StatusInternalServerError, fmt.Errorf("failed to serialize session questions: %w", err)
+		}
+		if err := repo.CreateSession(ctx, session); err != nil {
+			return nil, http.StatusInternalServerError, fmt.Errorf("failed to create session: %w", err)
+		}
+		RefreshSessionTTL(ctx, session.ID)
+
+		return &dto.SessionCreatedResponseDTO{
+			Session:                 session.ID,
+			Topic:                   session.TopicID,
+			GameMode:                session.GameMode,
+			PairType:                session.PairType,
+			TotalQuestions:          session.TotalQuestions,
+			TimeLimitSec:            timeLimitPerQuestion * len(sessionQuestions),
+			TimeLimitPerQuestionSec: timeLimitPerQuestion,
+			Questions:               questionDTOs,
+		}, http.StatusCreated, nil
+	}
+
 	// Determine target question type for this mode
 	targetType := models.GameModeMCQ
 	if req.GameMode == models.GameModeSuddenDeath {
@@ -589,6 +714,226 @@ func CompleteSession(ctx context.Context, clientID int, req *dto.CompleteSession
 	}, http.StatusOK, nil
 }
 
+// CompleteSortItOutSession processes batch answer submissions for a Sort It Out swipe session,
+// applies authoritative Speed + Combo scoring, awards economy rewards, logs history, and finalizes the session.
+func CompleteSortItOutSession(ctx context.Context, clientID int, req *dto.CompleteSortItOutRequestDTO) (*dto.CompleteSortItOutResponseDTO, int, error) {
+	if req == nil {
+		return nil, http.StatusBadRequest, errors.New("request body is required")
+	}
+	if err := req.Validate(); err != nil {
+		return nil, http.StatusBadRequest, err
+	}
+
+	session, err := repo.GetSessionByID(ctx, req.Session)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, http.StatusNotFound, errors.New("session not found")
+		}
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch session: %w", err)
+	}
+	if session.ClientID != clientID {
+		return nil, http.StatusForbidden, errors.New("session does not belong to this user")
+	}
+	if session.GameMode != models.GameModeSortItOut {
+		return nil, http.StatusBadRequest, errors.New("session is not a sort_it_out game mode")
+	}
+	if session.Status != models.SessionStatusInProgress {
+		return nil, http.StatusConflict, errors.New("session is already completed or abandoned")
+	}
+	if CheckAndAbandonIfExpired(ctx, session) {
+		return nil, http.StatusConflict, errors.New("quiz session expired due to 5 minutes of inactivity and has been abandoned")
+	}
+
+	sessionQuestions, err := session.GetQuestions()
+	if err != nil || len(sessionQuestions) == 0 {
+		return nil, http.StatusInternalServerError, errors.New("failed to load session questions")
+	}
+
+	sqMap := make(map[string]models.SessionQuestion, len(sessionQuestions))
+	for _, sq := range sessionQuestions {
+		sqMap[sq.QuestionCode] = sq
+	}
+
+	comboStreak := 0
+	bestStreak := 0
+	correctCount := 0
+	timeoutCount := 0
+	totalBasePts := 0
+	totalSpeedBonus := 0
+	totalComboBonus := 0
+	cardsReview := make([]dto.SortItOutCardReviewDTO, 0, len(req.Answers))
+	historyRecords := make([]*models.UserQuestionHistory, 0, len(req.Answers))
+	seenQuestions := make(map[string]bool, len(req.Answers))
+
+	for _, ans := range req.Answers {
+		sq, ok := sqMap[ans.Question]
+		if !ok {
+			return nil, http.StatusBadRequest, fmt.Errorf("question %s does not belong to session", ans.Question)
+		}
+		if seenQuestions[ans.Question] {
+			return nil, http.StatusConflict, fmt.Errorf("duplicate answer for question %s", ans.Question)
+		}
+		seenQuestions[ans.Question] = true
+
+		isTimeout := ans.IsTimeout || strings.EqualFold(ans.Option, "timeout") || strings.EqualFold(ans.Option, "skip")
+		selectedOption := strings.ToLower(strings.TrimSpace(ans.Option))
+		correctOption := strings.ToLower(strings.TrimSpace(sq.CorrectOption))
+		isCorrect := false
+
+		if !isTimeout {
+			if selectedOption == correctOption {
+				isCorrect = true
+			} else if sq.CorrectText != "" && strings.EqualFold(selectedOption, strings.TrimSpace(sq.CorrectText)) {
+				isCorrect = true
+			}
+		} else {
+			timeoutCount++
+		}
+
+		if isCorrect {
+			comboStreak++
+			if comboStreak > bestStreak {
+				bestStreak = comboStreak
+			}
+			correctCount++
+		} else {
+			comboStreak = 0
+		}
+
+		basePts, speedBonus, comboBonus, ptsEarned := CalculateSortItOutPoints(isCorrect, ans.TimeTakenMs, comboStreak)
+		totalBasePts += basePts
+		totalSpeedBonus += speedBonus
+		totalComboBonus += comboBonus
+
+		cardsReview = append(cardsReview, dto.SortItOutCardReviewDTO{
+			Question:       sq.QuestionCode,
+			Prompt:         sq.Prompt,
+			SelectedOption: selectedOption,
+			CorrectOption:  correctOption,
+			IsCorrect:      isCorrect,
+			IsTimeout:      isTimeout,
+			TimeTakenMs:    ans.TimeTakenMs,
+			BasePoints:     basePts,
+			SpeedBonus:     speedBonus,
+			ComboBonus:     comboBonus,
+			PointsEarned:   ptsEarned,
+			Explanation:    sq.Explanation,
+		})
+
+		historyRecords = append(historyRecords, &models.UserQuestionHistory{
+			ClientID:       clientID,
+			SessionID:      session.ID,
+			QuestionCode:   sq.QuestionCode,
+			SelectedOption: selectedOption,
+			IsCorrect:      isCorrect,
+			TimeTakenMs:    ans.TimeTakenMs,
+			PointsAwarded:  ptsEarned,
+			CoinsAwarded:   0,
+		})
+	}
+
+	finalScore := totalBasePts + totalSpeedBonus + totalComboBonus
+	session.Score = finalScore
+	session.CorrectCount = correctCount
+	session.ComboStreak = comboStreak
+	session.BestStreak = bestStreak
+	session.CurrentIdx = len(req.Answers)
+	session.CompletedSuccessfully = len(req.Answers) >= session.TotalQuestions
+	session.EndReason = "completed"
+
+	reward := CalculateSortItOutRewards(correctCount, session.TotalQuestions, finalScore)
+
+	if err := repo.RecordBatchAnswers(ctx, historyRecords); err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to record answer history: %w", err)
+	}
+
+	profile, err := GetOrCreateProfile(ctx, clientID)
+	if err != nil {
+		log.Printf("[SortItOut] Notice fetching profile for client %d: %v\n", clientID, err)
+	}
+	oldLevel := 1
+	oldExperience := 0
+	currentStreak := 0
+	if profile != nil {
+		oldLevel = profile.Level
+		oldExperience = profile.Experience
+		currentStreak = profile.CurrentStreak
+	}
+
+	newExperience := oldExperience + reward.XP
+	newLevel := CalculateNewLevel(newExperience)
+	didLevelUp := newLevel > oldLevel
+
+	var levelUpReward *dto.LevelUpRewardDTO
+	levelBonusCoins := 0
+	levelBonusGems := 0
+	if didLevelUp {
+		levelsGained := newLevel - oldLevel
+		levelBonusCoins = levelsGained * 50
+		levelBonusGems = levelsGained
+		levelUpReward = &dto.LevelUpRewardDTO{
+			Coins: levelBonusCoins,
+			Gems:  levelBonusGems,
+		}
+	}
+
+	if err := repo.FinalizeSession(
+		ctx,
+		session,
+		reward.Coins+levelBonusCoins,
+		reward.XP,
+		reward.Gems+levelBonusGems,
+	); err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to finalize session: %w", err)
+	}
+	ClearSessionTTL(ctx, session.ID)
+
+	if didLevelUp && profile != nil {
+		profile.Level = newLevel
+		_ = updateProfileLevel(ctx, clientID, newLevel)
+	}
+
+	accuracy := 0.0
+	if session.TotalQuestions > 0 {
+		accuracy = math.Round(float64(correctCount)/float64(session.TotalQuestions)*10000) / 100
+	}
+	nextLevelExp := CalculateExperienceForLevel(newLevel)
+
+	return &dto.CompleteSortItOutResponseDTO{
+		Session:            session.ID,
+		PairType:           session.PairType,
+		TotalQuestions:     session.TotalQuestions,
+		CorrectCount:       correctCount,
+		TimeoutCount:       timeoutCount,
+		BestStreak:         bestStreak,
+		AccuracyPercentage: accuracy,
+		FinalScore:         finalScore,
+		CoinsAwarded:       reward.Coins,
+		XPAwarded:          reward.XP,
+		GemsAwarded:        reward.Gems,
+		ScoreBreakdown: map[string]int{
+			"base_points": totalBasePts,
+			"speed_bonus": totalSpeedBonus,
+			"combo_bonus": totalComboBonus,
+			"final_score": finalScore,
+		},
+		CoinBreakdown: reward.CoinBreakdown,
+		XPBreakdown:   reward.XPBreakdown,
+		LevelUpReward: levelUpReward,
+		Level: dto.LevelInfoDTO{
+			Current:      newLevel,
+			DidLevelUp:   didLevelUp,
+			Experience:   newExperience,
+			NextLevelExp: nextLevelExp,
+		},
+		Streak: dto.StreakInfoDTO{
+			CurrentStreak:  currentStreak,
+			TodayCompleted: true,
+		},
+		CardsReview: cardsReview,
+	}, http.StatusOK, nil
+}
+
 // --- Scoring Formulas ---
 
 // CalculatePoints computes deterministic MVP points for a correct answer.
@@ -617,6 +962,30 @@ func CalculateSuddenDeathAnswerPoints(isCorrect bool, comboStreak int) int {
 		points += SuddenDeathStreakPoints
 	}
 	return points
+}
+
+// CalculateSortItOutPoints computes authoritative Speed + Combo points for a Sort It Out swipe.
+// Base Points: 10 pts per correct answer
+// Speed Bonus: +5 pts if < 2.0s (2000ms), +2 pts if < 4.0s (4000ms)
+// Combo Streak Bonus: +2 pts per consecutive streak step (capped at +10 pts)
+func CalculateSortItOutPoints(isCorrect bool, timeTakenMs int, comboStreak int) (basePts, speedBonus, comboBonus, totalPts int) {
+	if !isCorrect {
+		return 0, 0, 0, 0
+	}
+	basePts = 10
+	if timeTakenMs > 0 && timeTakenMs < 2000 {
+		speedBonus = 5
+	} else if timeTakenMs >= 2000 && timeTakenMs < 4000 {
+		speedBonus = 2
+	}
+	if comboStreak > 0 {
+		comboBonus = comboStreak * 2
+		if comboBonus > 10 {
+			comboBonus = 10
+		}
+	}
+	totalPts = basePts + speedBonus + comboBonus
+	return basePts, speedBonus, comboBonus, totalPts
 }
 
 // CalculateCoins is retained for API compatibility. MCQ coins are awarded only
@@ -728,6 +1097,52 @@ func CalculateSuddenDeathRewards(correctCount, totalQuestions, streakMilestones 
 	}
 }
 
+// CalculateSortItOutRewards computes economy rewards for completed Sort It Out swipe rounds.
+func CalculateSortItOutRewards(correctCount, totalQuestions, _ int) GameRewardSummary {
+	xpBreakdown := map[string]int{
+		"completion_xp":     MCQCompletionXP,
+		"correct_answer_xp": correctCount * MCQCorrectAnswerXP,
+		"perfect_bonus_xp":  0,
+	}
+	coinBreakdown := map[string]int{
+		"completion_coins":     MCQCompletionCoins,
+		"correct_answer_coins": correctCount * MCQCorrectAnswerCoins,
+		"perfect_bonus_coins":  0,
+	}
+
+	if totalQuestions > 0 && correctCount == totalQuestions {
+		xpBreakdown["perfect_bonus_xp"] = MCQPerfectBonusXP
+		coinBreakdown["perfect_bonus_coins"] = MCQPerfectBonusCoins
+	}
+
+	xp := 0
+	for _, v := range xpBreakdown {
+		xp += v
+	}
+	coins := 0
+	for _, v := range coinBreakdown {
+		coins += v
+	}
+
+	gems := 0
+	if totalQuestions > 0 {
+		accuracy := float64(correctCount) / float64(totalQuestions)
+		if accuracy >= 1.0 {
+			gems = 3
+		} else if accuracy >= 0.8 {
+			gems = 1
+		}
+	}
+
+	return GameRewardSummary{
+		Coins:         coins,
+		XP:            xp,
+		Gems:          gems,
+		XPBreakdown:   xpBreakdown,
+		CoinBreakdown: coinBreakdown,
+	}
+}
+
 func CalculateMaxScore(totalQuestions int) int {
 	if totalQuestions <= 0 {
 		return 0
@@ -736,11 +1151,21 @@ func CalculateMaxScore(totalQuestions int) int {
 }
 
 // CalculateMaxScoreForMode preserves MCQ scoring while including Sudden Death
-// streak milestones at questions 3, 6, 9, and so on.
+// streak milestones and Sort It Out max speed and combo potential.
 func CalculateMaxScoreForMode(gameMode string, totalQuestions int) int {
 	maxScore := CalculateMaxScore(totalQuestions)
 	if gameMode == models.GameModeSuddenDeath && totalQuestions > 0 {
 		maxScore += (totalQuestions / SuddenDeathStreakSize) * SuddenDeathStreakPoints
+	} else if gameMode == models.GameModeSortItOut && totalQuestions > 0 {
+		comboTotal := 0
+		for i := 1; i <= totalQuestions; i++ {
+			cb := i * 2
+			if cb > 10 {
+				cb = 10
+			}
+			comboTotal += cb
+		}
+		maxScore = (totalQuestions * 10) + (totalQuestions * 5) + comboTotal
 	}
 	return maxScore
 }
@@ -973,9 +1398,11 @@ func SessionQuestionToDTO(sq models.SessionQuestion, includeCorrect bool) dto.Qu
 		Hint:         sq.Hint,
 		TimeLimitSec: DefaultTimeLimitSec,
 		Options:      opts,
+		PairType:     sq.PairType,
 	}
 	if includeCorrect {
 		d.CorrectOption = strings.ToLower(sq.CorrectOption)
+		d.Explanation = sq.Explanation
 	}
 	return d
 }

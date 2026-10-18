@@ -128,20 +128,38 @@ func CountQuestionsByTopicAndMode(ctx context.Context, topicID string, questionT
 
 // --- Session Repository ---
 
-// CreateSession inserts a new game session.
+// CreateSession inserts a new game session and caches it in Redis.
 func CreateSession(ctx context.Context, session *models.GameSession) error {
-	return GetDB().WithContext(ctx).Create(session).Error
+	db := GetDB()
+	if db != nil {
+		if err := db.WithContext(ctx).Create(session).Error; err != nil {
+			return err
+		}
+	}
+	_ = CacheSession(ctx, session)
+	return nil
 }
 
 // GetSessionByID fetches a session by its UUID.
+// It checks Redis cache first, falling back to PostgreSQL on miss.
 func GetSessionByID(ctx context.Context, sessionID string) (*models.GameSession, error) {
+	if cached, ok := GetCachedSession(ctx, sessionID); ok && cached != nil {
+		return cached, nil
+	}
+
+	db := GetDB()
+	if db == nil {
+		return nil, gorm.ErrRecordNotFound
+	}
+
 	var s models.GameSession
-	err := GetDB().WithContext(ctx).
+	err := db.WithContext(ctx).
 		Where("id = ?", sessionID).
 		First(&s).Error
 	if err != nil {
 		return nil, err
 	}
+	_ = CacheSession(ctx, &s)
 	return &s, nil
 }
 
@@ -158,13 +176,16 @@ func GetActiveSessionByClientID(ctx context.Context, clientID int) (*models.Game
 	return &s, nil
 }
 
-// UpdateSession persists updated session fields.
+// UpdateSession persists updated session fields to the database and Redis cache.
 func UpdateSession(ctx context.Context, session *models.GameSession) error {
 	db := GetDB()
-	if db == nil {
-		return nil
+	if db != nil {
+		if err := db.WithContext(ctx).Save(session).Error; err != nil {
+			return err
+		}
 	}
-	return db.WithContext(ctx).Save(session).Error
+	_ = CacheSession(ctx, session)
+	return nil
 }
 
 // AbandonInactiveSessions marks all in_progress sessions inactive for longer than ttl as abandoned.
@@ -242,9 +263,10 @@ func FinalizeSession(ctx context.Context, session *models.GameSession, coins, xp
 		now := time.Now().UTC()
 		session.Status = models.SessionStatusFinished
 		session.EndedAt = &now
+		_ = InvalidateCachedSession(ctx, session.ID)
 		return nil
 	}
-	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// 1. Mark session as finished
 		now := time.Now().UTC()
 		session.Status = models.SessionStatusFinished
@@ -307,6 +329,10 @@ func FinalizeSession(ctx context.Context, session *models.GameSession, coins, xp
 
 		return nil
 	})
+	if err == nil {
+		_ = InvalidateCachedSession(ctx, session.ID)
+	}
+	return err
 }
 
 // --- Seed Helpers ---
@@ -329,4 +355,57 @@ func UpdateProfileLevel(ctx context.Context, clientID, newLevel int) error {
 		Table("client_profiles").
 		Where("client_id = ?", clientID).
 		Update("level", newLevel).Error
+}
+
+// --- Sort It Out Helpers ---
+
+// GetDistinctPairTypes fetches available pair types for a topic and game mode.
+func GetDistinctPairTypes(ctx context.Context, topicID, mode string) ([]string, error) {
+	db := GetDB()
+	if db == nil {
+		return nil, nil
+	}
+	var pairTypes []string
+	query := db.WithContext(ctx).
+		Model(&models.Question{}).
+		Where("pair_type IS NOT NULL AND pair_type != ''")
+	if topicID != "" {
+		query = query.Where("topic_id = ?", topicID)
+	}
+	if mode != "" {
+		query = query.Where("question_type = ?", mode)
+	}
+	err := query.Distinct("pair_type").Pluck("pair_type", &pairTypes).Error
+	return pairTypes, err
+}
+
+// GetSortItOutQuestions fetches questions matching the specified topic and pair type.
+func GetSortItOutQuestions(ctx context.Context, topicID, pairType string, limit int) ([]models.Question, error) {
+	db := GetDB()
+	if db == nil {
+		return nil, nil
+	}
+	var questions []models.Question
+	query := db.WithContext(ctx).
+		Where("question_type = ?", models.GameModeSortItOut)
+	if topicID != "" {
+		query = query.Where("topic_id = ?", topicID)
+	}
+	if pairType != "" {
+		query = query.Where("pair_type = ?", pairType)
+	}
+	err := query.Order("RANDOM()").Limit(limit).Find(&questions).Error
+	return questions, err
+}
+
+// RecordBatchAnswers performs efficient batch insertion into user_question_history.
+func RecordBatchAnswers(ctx context.Context, history []*models.UserQuestionHistory) error {
+	if len(history) == 0 {
+		return nil
+	}
+	db := GetDB()
+	if db == nil {
+		return nil
+	}
+	return db.WithContext(ctx).CreateInBatches(history, 50).Error
 }

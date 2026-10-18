@@ -15,6 +15,7 @@ import (
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/config"
 	db "github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/database"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/dto"
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/handlers"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/models"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/routes"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/ws"
@@ -748,6 +749,253 @@ func TestSuddenDeathSessionContractAndFiltering(t *testing.T) {
 		r.ServeHTTP(w, req)
 		if w.Code != http.StatusInternalServerError {
 			t.Fatalf("expected recovery without Sudden Death questions to fail safely, got %d: %s", w.Code, w.Body.String())
+		}
+	})
+}
+
+func TestCompleteSortItOutHandler_Unit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("Unauthorized when clientID not in context", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request, _ = http.NewRequest(http.MethodPost, "/api/v1/quiz/sort-it-out/complete", bytes.NewReader([]byte(`{}`)))
+		c.Request.Header.Set("Content-Type", "application/json")
+
+		handlers.CompleteSortItOutHandler(c)
+
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 Unauthorized, got %d", w.Code)
+		}
+	})
+
+	t.Run("Bad Request on malformed JSON payload", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Set("client_id", 1)
+		c.Request, _ = http.NewRequest(http.MethodPost, "/api/v1/quiz/sort-it-out/complete", bytes.NewReader([]byte(`invalid-json`)))
+		c.Request.Header.Set("Content-Type", "application/json")
+
+		handlers.CompleteSortItOutHandler(c)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 Bad Request, got %d", w.Code)
+		}
+	})
+
+	t.Run("Bad Request on invalid validation payload (empty answers)", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Set("client_id", 1)
+		payload := dto.CompleteSortItOutRequestDTO{
+			Session: "sess-1",
+			Answers: []dto.SortItOutAnswerSubmissionDTO{},
+		}
+		data, _ := json.Marshal(payload)
+		c.Request, _ = http.NewRequest(http.MethodPost, "/api/v1/quiz/sort-it-out/complete", bytes.NewReader(data))
+		c.Request.Header.Set("Content-Type", "application/json")
+
+		handlers.CompleteSortItOutHandler(c)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 Bad Request, got %d", w.Code)
+		}
+	})
+}
+
+func TestCompleteSortItOutHandler(t *testing.T) {
+	r, token := setupTestApp(t)
+	if r == nil {
+		return
+	}
+
+	t.Run("Unauthorized request returns 401", func(t *testing.T) {
+		body, _ := json.Marshal(dto.CompleteSortItOutRequestDTO{
+			Session: "any-session",
+			Answers: []dto.SortItOutAnswerSubmissionDTO{
+				{Question: "q1", Option: "a"},
+			},
+		})
+		req, _ := http.NewRequest(http.MethodPost, "/api/v1/quiz/sort-it-out/complete", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 Unauthorized, got %d", w.Code)
+		}
+	})
+
+	t.Run("Invalid input returns 400", func(t *testing.T) {
+		req, _ := http.NewRequest(http.MethodPost, "/api/v1/quiz/sort-it-out/complete", bytes.NewReader([]byte(`invalid-json`)))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 Bad Request, got %d", w.Code)
+		}
+	})
+
+	t.Run("Empty answers returns 400", func(t *testing.T) {
+		body, _ := json.Marshal(dto.CompleteSortItOutRequestDTO{
+			Session: "sess-123",
+			Answers: []dto.SortItOutAnswerSubmissionDTO{},
+		})
+		req, _ := http.NewRequest(http.MethodPost, "/api/v1/quiz/sort-it-out/complete", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 Bad Request for empty answers, got %d", w.Code)
+		}
+	})
+
+	t.Run("Full Sort It Out Game Flow: Create, Upfront Answers, Batch Submit, and Audit Review", func(t *testing.T) {
+		// Clean up any stale in-progress session for client 1
+		_ = config.DB.Model(&models.GameSession{}).
+			Where("client_id = ? AND status = ?", 1, models.SessionStatusInProgress).
+			Update("status", models.SessionStatusAbandoned).Error
+
+		// 1. Create sort_it_out session
+		createBody, _ := json.Marshal(dto.CreateSessionRequestDTO{
+			TopicID:                 "accounting",
+			GameMode:                models.GameModeSortItOut,
+			PairType:                "credit_debit",
+			QuestionCount:           5,
+			TimeLimitPerQuestionSec: 7,
+		})
+		createReq, _ := http.NewRequest(http.MethodPost, "/api/v1/quiz/sessions/create", bytes.NewReader(createBody))
+		createReq.Header.Set("Authorization", "Bearer "+token)
+		createReq.Header.Set("Content-Type", "application/json")
+		createW := httptest.NewRecorder()
+		r.ServeHTTP(createW, createReq)
+
+		if createW.Code != http.StatusCreated {
+			t.Fatalf("expected 201 Created for sort_it_out session, got %d: %s", createW.Code, createW.Body.String())
+		}
+
+		var createResp struct {
+			Success bool                          `json:"success"`
+			Data    dto.SessionCreatedResponseDTO `json:"data"`
+		}
+		if err := json.Unmarshal(createW.Body.Bytes(), &createResp); err != nil {
+			t.Fatalf("failed to decode create response: %v", err)
+		}
+
+		if createResp.Data.GameMode != models.GameModeSortItOut {
+			t.Fatalf("expected game_mode sort_it_out, got %s", createResp.Data.GameMode)
+		}
+		if createResp.Data.PairType != "credit_debit" {
+			t.Fatalf("expected pair_type credit_debit, got %s", createResp.Data.PairType)
+		}
+		if createResp.Data.TimeLimitPerQuestionSec != 7 {
+			t.Fatalf("expected TimeLimitPerQuestionSec=7, got %d", createResp.Data.TimeLimitPerQuestionSec)
+		}
+		if len(createResp.Data.Questions) == 0 {
+			t.Fatalf("expected questions in create response, got 0")
+		}
+
+		sessionID := createResp.Data.Session
+		var answers []dto.SortItOutAnswerSubmissionDTO
+
+		// Verify all questions have upfront correct_option and pair_type
+		for i, q := range createResp.Data.Questions {
+			if q.PairType != "credit_debit" {
+				t.Fatalf("question %s: expected pair_type credit_debit, got %s", q.Question, q.PairType)
+			}
+			if q.CorrectOption == "" {
+				t.Fatalf("question %s: expected upfront correct_option, got empty", q.Question)
+			}
+			if len(q.Options) != 2 || q.Options[0].Text != "Debit" || q.Options[1].Text != "Credit" {
+				t.Fatalf("question %s: expected binary Debit/Credit options, got %+v", q.Question, q.Options)
+			}
+
+			// Simulate fast swipe answer
+			answers = append(answers, dto.SortItOutAnswerSubmissionDTO{
+				Question:    q.Question,
+				Option:      q.CorrectOption,
+				TimeTakenMs: 1200 + i*100, // fast swipes < 2s
+			})
+		}
+
+		// 2. Batch Complete the Sort It Out session
+		completeBody, _ := json.Marshal(dto.CompleteSortItOutRequestDTO{
+			Session: sessionID,
+			Answers: answers,
+		})
+		completeReq, _ := http.NewRequest(http.MethodPost, "/api/v1/quiz/sort-it-out/complete", bytes.NewReader(completeBody))
+		completeReq.Header.Set("Authorization", "Bearer "+token)
+		completeReq.Header.Set("Content-Type", "application/json")
+		completeW := httptest.NewRecorder()
+		r.ServeHTTP(completeW, completeReq)
+
+		if completeW.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK from sort-it-out/complete, got %d: %s", completeW.Code, completeW.Body.String())
+		}
+
+		var completeResp struct {
+			Success bool                             `json:"success"`
+			Data    dto.CompleteSortItOutResponseDTO `json:"data"`
+		}
+		if err := json.Unmarshal(completeW.Body.Bytes(), &completeResp); err != nil {
+			t.Fatalf("failed to decode complete response: %v", err)
+		}
+
+		data := completeResp.Data
+		if data.Session != sessionID {
+			t.Fatalf("expected session ID %s, got %s", sessionID, data.Session)
+		}
+		if data.PairType != "credit_debit" {
+			t.Fatalf("expected pair_type credit_debit, got %s", data.PairType)
+		}
+		if data.CorrectCount != len(answers) {
+			t.Fatalf("expected %d correct answers, got %d", len(answers), data.CorrectCount)
+		}
+		if data.BestStreak != len(answers) {
+			t.Fatalf("expected best streak %d, got %d", len(answers), data.BestStreak)
+		}
+		if data.FinalScore <= 0 {
+			t.Fatalf("expected positive final score, got %d", data.FinalScore)
+		}
+		if len(data.CardsReview) != len(answers) {
+			t.Fatalf("expected %d card reviews, got %d", len(answers), len(data.CardsReview))
+		}
+		for _, card := range data.CardsReview {
+			if !card.IsCorrect {
+				t.Fatalf("card %s should be correct", card.Question)
+			}
+			if card.BasePoints != 10 {
+				t.Fatalf("card %s base points should be 10, got %d", card.Question, card.BasePoints)
+			}
+			if card.SpeedBonus != 5 {
+				t.Fatalf("card %s speed bonus (<2s) should be 5, got %d", card.Question, card.SpeedBonus)
+			}
+		}
+
+		// Verify score breakdown contains expected keys
+		if _, ok := data.ScoreBreakdown["base_points"]; !ok {
+			t.Fatal("missing base_points in score breakdown")
+		}
+		if _, ok := data.ScoreBreakdown["speed_bonus"]; !ok {
+			t.Fatal("missing speed_bonus in score breakdown")
+		}
+		if _, ok := data.ScoreBreakdown["combo_bonus"]; !ok {
+			t.Fatal("missing combo_bonus in score breakdown")
+		}
+
+		// 3. Second submission should return 409 Conflict
+		repeatReq, _ := http.NewRequest(http.MethodPost, "/api/v1/quiz/sort-it-out/complete", bytes.NewReader(completeBody))
+		repeatReq.Header.Set("Authorization", "Bearer "+token)
+		repeatReq.Header.Set("Content-Type", "application/json")
+		repeatW := httptest.NewRecorder()
+		r.ServeHTTP(repeatW, repeatReq)
+
+		if repeatW.Code != http.StatusConflict {
+			t.Fatalf("expected 409 Conflict on re-completion, got %d", repeatW.Code)
 		}
 	})
 }

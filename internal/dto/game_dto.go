@@ -11,13 +11,15 @@ import (
 
 // CreateSessionRequestDTO validates input for starting a new quiz session.
 type CreateSessionRequestDTO struct {
-	TopicID       string   `json:"topic" binding:"required"`
-	QuestionCount int      `json:"question_count"`
-	AbandonStale  bool     `json:"abandon_stale,omitempty"`
-	QuestionCodes []string `json:"question_codes,omitempty"`
+	TopicID                 string   `json:"topic" binding:"required"`
+	QuestionCount           int      `json:"question_count"`
+	AbandonStale            bool     `json:"abandon_stale,omitempty"`
+	QuestionCodes           []string `json:"question_codes,omitempty"`
 	// GameMode selects the rules the session runs under. Omitted means "mcq",
 	// which preserves the original answer-every-question flow.
-	GameMode string `json:"game_mode,omitempty"`
+	GameMode                string   `json:"game_mode,omitempty"`
+	PairType                string   `json:"pair_type,omitempty"`
+	TimeLimitPerQuestionSec int      `json:"time_limit_per_question_sec,omitempty"`
 }
 
 // Validate ensures the request has sane defaults and limits.
@@ -42,9 +44,18 @@ func (r *CreateSessionRequestDTO) Validate() error {
 	switch r.GameMode {
 	case "":
 		r.GameMode = models.GameModeMCQ
-	case models.GameModeMCQ, models.GameModeSuddenDeath:
+	case models.GameModeMCQ, models.GameModeSuddenDeath, models.GameModeSortItOut:
 	default:
-		return errors.New("game_mode must be 'mcq' or 'sudden_death'")
+		return errors.New("game_mode must be 'mcq', 'sudden_death', or 'sort_it_out'")
+	}
+
+	r.PairType = strings.TrimSpace(r.PairType)
+	if r.GameMode == models.GameModeSortItOut {
+		if r.TimeLimitPerQuestionSec == 0 {
+			r.TimeLimitPerQuestionSec = 7
+		} else if r.TimeLimitPerQuestionSec < 5 || r.TimeLimitPerQuestionSec > 10 {
+			return errors.New("time_limit_per_question_sec for sort_it_out must be between 5 and 10 seconds")
+		}
 	}
 	return nil
 }
@@ -139,7 +150,7 @@ type OptionDTO struct {
 }
 
 // QuestionDTO is a question payload safe for client delivery.
-// CorrectOption is included only when the client needs it for power-ups.
+// CorrectOption is included only when the client needs it for power-ups or sort-it-out.
 type QuestionDTO struct {
 	Question      string      `json:"question"`
 	Prompt        string      `json:"prompt"`
@@ -148,6 +159,8 @@ type QuestionDTO struct {
 	TimeLimitSec  int         `json:"time_limit_sec,omitempty"`
 	Options       []OptionDTO `json:"options"`
 	CorrectOption string      `json:"correct_option,omitempty"`
+	PairType      string      `json:"pair_type,omitempty"`
+	Explanation   *string     `json:"explanation,omitempty"`
 }
 
 // TopicQuestionsResponseDTO wraps the list of questions for a topic.
@@ -164,6 +177,7 @@ type SessionCreatedResponseDTO struct {
 	Session                 string        `json:"session"`
 	Topic                   string        `json:"topic"`
 	GameMode                string        `json:"game_mode"`
+	PairType                string        `json:"pair_type,omitempty"`
 	TotalQuestions          int           `json:"total_questions"`
 	TimeLimitSec            int           `json:"time_limit_sec"`
 	TimeLimitPerQuestionSec int           `json:"time_limit_per_question_sec,omitempty"`
@@ -229,4 +243,83 @@ type SessionCompleteResponseDTO struct {
 	LevelUpReward      *LevelUpRewardDTO `json:"level_up_reward,omitempty"`
 	Level              LevelInfoDTO      `json:"level"`
 	Streak             StreakInfoDTO     `json:"streak"`
+}
+
+// --- Sort It Out Mini-Game DTOs ---
+
+// SortItOutAnswerSubmissionDTO represents a single answered card in a batch submission.
+type SortItOutAnswerSubmissionDTO struct {
+	Question    string `json:"question" binding:"required"`
+	Option      string `json:"option"` // "a", "b", or "skip"/"timeout"
+	TimeTakenMs int    `json:"time_taken_ms"`
+	IsTimeout   bool   `json:"is_timeout,omitempty"`
+}
+
+// CompleteSortItOutRequestDTO is the batch payload sent at the end of a Sort It Out run.
+type CompleteSortItOutRequestDTO struct {
+	Session string                         `json:"session" binding:"required"`
+	Answers []SortItOutAnswerSubmissionDTO `json:"answers" binding:"required"`
+}
+
+// Validate validates the batch submission payload.
+func (r *CompleteSortItOutRequestDTO) Validate() error {
+	r.Session = strings.TrimSpace(r.Session)
+	if r.Session == "" {
+		return errors.New("session is required")
+	}
+	if len(r.Answers) == 0 {
+		return errors.New("answers cannot be empty")
+	}
+	for i := range r.Answers {
+		r.Answers[i].Question = strings.TrimSpace(r.Answers[i].Question)
+		if r.Answers[i].Question == "" {
+			return errors.New("question is required for all answers")
+		}
+		r.Answers[i].Option = strings.ToLower(strings.TrimSpace(r.Answers[i].Option))
+		if r.Answers[i].Option == "" && !r.Answers[i].IsTimeout {
+			return errors.New("option is required")
+		}
+		if r.Answers[i].TimeTakenMs < 0 {
+			return errors.New("time_taken_ms cannot be negative")
+		}
+	}
+	return nil
+}
+
+// SortItOutCardReviewDTO provides audit breakdown for a single card.
+type SortItOutCardReviewDTO struct {
+	Question       string  `json:"question"`
+	Prompt         string  `json:"prompt"`
+	SelectedOption string  `json:"selected_option"`
+	CorrectOption  string  `json:"correct_option"`
+	IsCorrect      bool    `json:"is_correct"`
+	IsTimeout      bool    `json:"is_timeout"`
+	TimeTakenMs    int     `json:"time_taken_ms"`
+	BasePoints     int     `json:"base_points"`
+	SpeedBonus     int     `json:"speed_bonus"`
+	ComboBonus     int     `json:"combo_bonus"`
+	PointsEarned   int     `json:"points_earned"`
+	Explanation    *string `json:"explanation,omitempty"`
+}
+
+// CompleteSortItOutResponseDTO is the rich end-of-game summary for Sort It Out.
+type CompleteSortItOutResponseDTO struct {
+	Session            string                   `json:"session"`
+	PairType           string                   `json:"pair_type"`
+	TotalQuestions     int                      `json:"total_questions"`
+	CorrectCount       int                      `json:"correct_count"`
+	TimeoutCount       int                      `json:"timeout_count"`
+	BestStreak         int                      `json:"best_streak"`
+	AccuracyPercentage float64                  `json:"accuracy_percentage"`
+	FinalScore         int                      `json:"final_score"`
+	CoinsAwarded       int                      `json:"coins_awarded"`
+	XPAwarded          int                      `json:"xp_awarded"`
+	GemsAwarded        int                      `json:"gems_awarded"`
+	ScoreBreakdown     map[string]int           `json:"score_breakdown"`
+	CoinBreakdown      map[string]int           `json:"coin_breakdown"`
+	XPBreakdown        map[string]int           `json:"xp_breakdown"`
+	LevelUpReward      *LevelUpRewardDTO        `json:"level_up_reward,omitempty"`
+	Level              LevelInfoDTO             `json:"level"`
+	Streak             StreakInfoDTO            `json:"streak"`
+	CardsReview        []SortItOutCardReviewDTO `json:"cards_review"`
 }

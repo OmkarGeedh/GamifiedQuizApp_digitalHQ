@@ -13,6 +13,7 @@ type SessionQuestion struct {
 	OptionB         string  `json:"option_b"`
 	OptionC         string  `json:"option_c"`
 	OptionD         string  `json:"option_d"`
+	PairType        string  `json:"pair_type,omitempty"`
 	CorrectOption   string  `json:"correct_option"`             // 'a', 'b', 'c', or 'd' matching shuffled options
 	OriginalCorrect string  `json:"original_correct,omitempty"` // original DB correct letter ('a', 'b', 'c', 'd')
 	CorrectText     string  `json:"correct_text,omitempty"`     // the actual string text of the correct answer
@@ -29,6 +30,7 @@ type Question struct {
 	QuestionCode  string    `gorm:"column:question_code;size:20;not null;uniqueIndex" json:"question_code"`
 	QuestionType  string    `gorm:"column:question_type;size:32;not null;default:'mcq';index:idx_questions_type" json:"question_type"`
 	TopicID       string    `gorm:"column:topic_id;size:64;not null;index:idx_questions_topic" json:"topic_id"`
+	PairType      string    `gorm:"column:pair_type;size:32;index:idx_questions_pair_type" json:"pair_type,omitempty"`
 	Prompt        string    `gorm:"column:prompt;type:text;not null" json:"prompt"`
 	OptionA       string    `gorm:"column:option_a;type:text;not null" json:"option_a"`
 	OptionB       string    `gorm:"column:option_b;type:text;not null" json:"option_b"`
@@ -53,6 +55,7 @@ type GameSession struct {
 	ClientID              int        `gorm:"column:client_id;not null;index:idx_game_sessions_client;index:idx_game_sessions_client_status,priority:1" json:"client_id"`
 	TopicID               string     `gorm:"column:topic_id;size:64;not null;default:'general'" json:"topic_id"`
 	GameMode              string     `gorm:"column:game_mode;size:20;not null;default:'mcq'" json:"game_mode"`
+	PairType              string     `gorm:"column:pair_type;size:32" json:"pair_type,omitempty"`
 	TotalQuestions        int        `gorm:"column:total_questions;not null;default:10" json:"total_questions"`
 	CurrentIdx            int        `gorm:"column:current_idx;not null;default:0" json:"current_idx"`
 	Score                 int        `gorm:"column:score;not null;default:0" json:"score"`
@@ -84,6 +87,8 @@ const (
 	// GameModeSuddenDeath is the elimination flow: the first wrong answer or
 	// timeout terminates the run immediately.
 	GameModeSuddenDeath = "sudden_death"
+	// GameModeSortItOut is the rapid-fire binary choice swipe mini-game.
+	GameModeSortItOut = "sort_it_out"
 )
 
 // IsSuddenDeath reports whether this session uses elimination rules.
@@ -93,6 +98,11 @@ const (
 // like GameModeMCQ rather than silently gaining elimination semantics.
 func (s *GameSession) IsSuddenDeath() bool {
 	return s != nil && s.GameMode == GameModeSuddenDeath
+}
+
+// IsSortItOut reports whether this session uses Sort It Out swipe game rules.
+func (s *GameSession) IsSortItOut() bool {
+	return s != nil && s.GameMode == GameModeSortItOut
 }
 
 // SetQuestions serializes and stores the session's shuffled questions.

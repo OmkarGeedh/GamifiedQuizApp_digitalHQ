@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/dto"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/models"
 )
 
@@ -491,3 +492,335 @@ func TestCheckAndAbandonIfExpired(t *testing.T) {
 		}
 	})
 }
+
+func TestCalculateSortItOutPoints(t *testing.T) {
+	tests := []struct {
+		name        string
+		isCorrect   bool
+		timeTakenMs int
+		comboStreak int
+		wantBase    int
+		wantSpeed   int
+		wantCombo   int
+		wantTotal   int
+	}{
+		{
+			name:        "Incorrect answer yields 0 points across all components",
+			isCorrect:   false,
+			timeTakenMs: 1200,
+			comboStreak: 3,
+			wantBase:    0,
+			wantSpeed:   0,
+			wantCombo:   0,
+			wantTotal:   0,
+		},
+		{
+			name:        "Fast swipe (<2s) with 1x streak",
+			isCorrect:   true,
+			timeTakenMs: 1500,
+			comboStreak: 1,
+			wantBase:    10,
+			wantSpeed:   5,
+			wantCombo:   2,
+			wantTotal:   17,
+		},
+		{
+			name:        "Medium swipe (<4s) with 2x streak",
+			isCorrect:   true,
+			timeTakenMs: 2500,
+			comboStreak: 2,
+			wantBase:    10,
+			wantSpeed:   2,
+			wantCombo:   4,
+			wantTotal:   16,
+		},
+		{
+			name:        "Slow swipe (>=4s) with 3x streak",
+			isCorrect:   true,
+			timeTakenMs: 4200,
+			comboStreak: 3,
+			wantBase:    10,
+			wantSpeed:   0,
+			wantCombo:   6,
+			wantTotal:   16,
+		},
+		{
+			name:        "Fast swipe with max combo streak cap (+10 pts)",
+			isCorrect:   true,
+			timeTakenMs: 800,
+			comboStreak: 7, // 7 * 2 = 14, capped at 10
+			wantBase:    10,
+			wantSpeed:   5,
+			wantCombo:   10,
+			wantTotal:   25,
+		},
+		{
+			name:        "Boundary speed exactly 2000ms (medium speed +2)",
+			isCorrect:   true,
+			timeTakenMs: 2000,
+			comboStreak: 1,
+			wantBase:    10,
+			wantSpeed:   2,
+			wantCombo:   2,
+			wantTotal:   14,
+		},
+		{
+			name:        "Boundary speed exactly 4000ms (slow +0)",
+			isCorrect:   true,
+			timeTakenMs: 4000,
+			comboStreak: 1,
+			wantBase:    10,
+			wantSpeed:   0,
+			wantCombo:   2,
+			wantTotal:   12,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base, speed, combo, total := CalculateSortItOutPoints(tt.isCorrect, tt.timeTakenMs, tt.comboStreak)
+			if base != tt.wantBase {
+				t.Errorf("base points: got %d, want %d", base, tt.wantBase)
+			}
+			if speed != tt.wantSpeed {
+				t.Errorf("speed bonus: got %d, want %d", speed, tt.wantSpeed)
+			}
+			if combo != tt.wantCombo {
+				t.Errorf("combo bonus: got %d, want %d", combo, tt.wantCombo)
+			}
+			if total != tt.wantTotal {
+				t.Errorf("total points: got %d, want %d", total, tt.wantTotal)
+			}
+		})
+	}
+}
+
+func TestCalculateSortItOutRewards(t *testing.T) {
+	t.Run("Perfect 10 of 10 session", func(t *testing.T) {
+		reward := CalculateSortItOutRewards(10, 10, 200)
+		if reward.XP != 75 { // 10 completion + 50 correct + 15 perfect bonus
+			t.Errorf("expected XP 75, got %d", reward.XP)
+		}
+		if reward.Coins != 35 { // 5 completion + 20 correct + 10 perfect bonus
+			t.Errorf("expected coins 35, got %d", reward.Coins)
+		}
+		if reward.Gems != 3 {
+			t.Errorf("expected gems 3, got %d", reward.Gems)
+		}
+		if reward.XPBreakdown["perfect_bonus_xp"] != 15 {
+			t.Errorf("expected perfect XP bonus 15, got %d", reward.XPBreakdown["perfect_bonus_xp"])
+		}
+		if reward.CoinBreakdown["perfect_bonus_coins"] != 10 {
+			t.Errorf("expected perfect coin bonus 10, got %d", reward.CoinBreakdown["perfect_bonus_coins"])
+		}
+	})
+
+	t.Run("8 of 10 session (80% accuracy)", func(t *testing.T) {
+		reward := CalculateSortItOutRewards(8, 10, 140)
+		if reward.XP != 50 { // 10 completion + 40 correct
+			t.Errorf("expected XP 50, got %d", reward.XP)
+		}
+		if reward.Coins != 21 { // 5 completion + 16 correct
+			t.Errorf("expected coins 21, got %d", reward.Coins)
+		}
+		if reward.Gems != 1 {
+			t.Errorf("expected gems 1, got %d", reward.Gems)
+		}
+	})
+
+	t.Run("0 of 10 session", func(t *testing.T) {
+		reward := CalculateSortItOutRewards(0, 10, 0)
+		if reward.XP != 10 {
+			t.Errorf("expected XP 10, got %d", reward.XP)
+		}
+		if reward.Coins != 5 {
+			t.Errorf("expected coins 5, got %d", reward.Coins)
+		}
+		if reward.Gems != 0 {
+			t.Errorf("expected gems 0, got %d", reward.Gems)
+		}
+	})
+}
+
+func TestSortItOutMaxScoreForMode(t *testing.T) {
+	// 10 questions:
+	// Base = 10 * 10 = 100
+	// Speed = 10 * 5 = 50
+	// Combos = 2 + 4 + 6 + 8 + 10*6 = 20 + 60 = 80
+	// Total max score = 230
+	maxScore := CalculateMaxScoreForMode(models.GameModeSortItOut, 10)
+	if maxScore != 230 {
+		t.Fatalf("expected max score for sort_it_out with 10 questions to be 230, got %d", maxScore)
+	}
+}
+
+func TestSortItOutDTOValidations(t *testing.T) {
+	t.Run("CreateSessionRequestDTO validation for sort_it_out", func(t *testing.T) {
+		req := dto.CreateSessionRequestDTO{
+			TopicID:  "accounting",
+			GameMode: "sort_it_out",
+		}
+		if err := req.Validate(); err != nil {
+			t.Fatalf("unexpected error for valid sort_it_out create: %v", err)
+		}
+		if req.TimeLimitPerQuestionSec != 7 {
+			t.Fatalf("expected default time limit of 7 seconds, got %d", req.TimeLimitPerQuestionSec)
+		}
+
+		reqInvalidTime := dto.CreateSessionRequestDTO{
+			TopicID:                 "accounting",
+			GameMode:                "sort_it_out",
+			TimeLimitPerQuestionSec: 4,
+		}
+		if err := reqInvalidTime.Validate(); err == nil {
+			t.Fatal("expected error for time_limit_per_question_sec < 5")
+		}
+
+		reqInvalidTimeHigh := dto.CreateSessionRequestDTO{
+			TopicID:                 "accounting",
+			GameMode:                "sort_it_out",
+			TimeLimitPerQuestionSec: 11,
+		}
+		if err := reqInvalidTimeHigh.Validate(); err == nil {
+			t.Fatal("expected error for time_limit_per_question_sec > 10")
+		}
+
+		reqValidCustomTime := dto.CreateSessionRequestDTO{
+			TopicID:                 "accounting",
+			GameMode:                "sort_it_out",
+			TimeLimitPerQuestionSec: 9,
+		}
+		if err := reqValidCustomTime.Validate(); err != nil {
+			t.Fatalf("unexpected error for time limit 9: %v", err)
+		}
+		if reqValidCustomTime.TimeLimitPerQuestionSec != 9 {
+			t.Fatalf("expected time limit 9, got %d", reqValidCustomTime.TimeLimitPerQuestionSec)
+		}
+	})
+
+	t.Run("CompleteSortItOutRequestDTO validation", func(t *testing.T) {
+		reqEmptySession := dto.CompleteSortItOutRequestDTO{
+			Session: "",
+			Answers: []dto.SortItOutAnswerSubmissionDTO{
+				{Question: "q1", Option: "a"},
+			},
+		}
+		if err := reqEmptySession.Validate(); err == nil {
+			t.Fatal("expected error for empty session")
+		}
+
+		reqEmptyAnswers := dto.CompleteSortItOutRequestDTO{
+			Session: "sess-123",
+			Answers: []dto.SortItOutAnswerSubmissionDTO{},
+		}
+		if err := reqEmptyAnswers.Validate(); err == nil {
+			t.Fatal("expected error for empty answers")
+		}
+
+		reqMissingQuestion := dto.CompleteSortItOutRequestDTO{
+			Session: "sess-123",
+			Answers: []dto.SortItOutAnswerSubmissionDTO{
+				{Question: "", Option: "a"},
+			},
+		}
+		if err := reqMissingQuestion.Validate(); err == nil {
+			t.Fatal("expected error for missing question")
+		}
+
+		reqTimeoutWithoutOption := dto.CompleteSortItOutRequestDTO{
+			Session: "sess-123",
+			Answers: []dto.SortItOutAnswerSubmissionDTO{
+				{Question: "q1", Option: "", IsTimeout: true},
+			},
+		}
+		if err := reqTimeoutWithoutOption.Validate(); err != nil {
+			t.Fatalf("expected timeout without option to be valid, got: %v", err)
+		}
+
+		reqNegativeTime := dto.CompleteSortItOutRequestDTO{
+			Session: "sess-123",
+			Answers: []dto.SortItOutAnswerSubmissionDTO{
+				{Question: "q1", Option: "a", TimeTakenMs: -100},
+			},
+		}
+		if err := reqNegativeTime.Validate(); err == nil {
+			t.Fatal("expected error for negative time taken")
+		}
+	})
+}
+
+func TestGameSessionIsSortItOut(t *testing.T) {
+	s := &models.GameSession{GameMode: models.GameModeSortItOut}
+	if !s.IsSortItOut() {
+		t.Fatal("expected IsSortItOut() to return true")
+	}
+	s2 := &models.GameSession{GameMode: models.GameModeMCQ}
+	if s2.IsSortItOut() {
+		t.Fatal("expected IsSortItOut() to return false for MCQ")
+	}
+}
+
+func TestSortItOutSeedQuestionsConsistency(t *testing.T) {
+	raw, err := os.ReadFile("../data/seed_questions.json")
+	if err != nil {
+		t.Fatalf("failed to read seed_questions.json: %v", err)
+	}
+
+	type seedItem struct {
+		models.Question
+		CorrectOption string `json:"correct_option"`
+		PairType      string `json:"pair_type"`
+	}
+
+	var all []seedItem
+	if err := json.Unmarshal(raw, &all); err != nil {
+		t.Fatalf("failed to unmarshal seed_questions.json: %v", err)
+	}
+
+	sortItOutQuestions := make([]seedItem, 0)
+	for _, item := range all {
+		if item.QuestionType == models.GameModeSortItOut {
+			sortItOutQuestions = append(sortItOutQuestions, item)
+		}
+	}
+
+	if len(sortItOutQuestions) < 30 {
+		t.Fatalf("expected at least 30 sort_it_out seed questions, got %d", len(sortItOutQuestions))
+	}
+
+	pairCounts := make(map[string]int)
+	for _, q := range sortItOutQuestions {
+		pairCounts[q.PairType]++
+		corr := q.CorrectOption
+		if corr != "a" && corr != "b" {
+			t.Fatalf("question %s correct_option must be 'a' or 'b', got '%s'", q.QuestionCode, corr)
+		}
+		switch q.PairType {
+		case "credit_debit":
+			if q.OptionA != "Debit" || q.OptionB != "Credit" {
+				t.Fatalf("question %s pair credit_debit must have OptionA=Debit and OptionB=Credit", q.QuestionCode)
+			}
+		case "asset_liability":
+			if q.OptionA != "Asset" || q.OptionB != "Liability" {
+				t.Fatalf("question %s pair asset_liability must have OptionA=Asset and OptionB=Liability", q.QuestionCode)
+			}
+		case "true_false":
+			if q.OptionA != "True" || q.OptionB != "False" {
+				t.Fatalf("question %s pair true_false must have OptionA=True and OptionB=False", q.QuestionCode)
+			}
+		default:
+			t.Fatalf("unknown pair_type '%s' for question %s", q.PairType, q.QuestionCode)
+		}
+	}
+
+	if pairCounts["credit_debit"] < 10 {
+		t.Errorf("expected at least 10 credit_debit questions, got %d", pairCounts["credit_debit"])
+	}
+	if pairCounts["asset_liability"] < 10 {
+		t.Errorf("expected at least 10 asset_liability questions, got %d", pairCounts["asset_liability"])
+	}
+	if pairCounts["true_false"] < 10 {
+		t.Errorf("expected at least 10 true_false questions, got %d", pairCounts["true_false"])
+	}
+}
+

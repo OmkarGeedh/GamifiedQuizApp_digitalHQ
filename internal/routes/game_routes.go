@@ -22,6 +22,7 @@ func RegisterGameRoutes(router *gin.Engine) {
 		grp.POST("/power-ups/fifty-fifty", handlers.FiftyFiftyHandler)
 		grp.POST("/sessions/fifty-fifty", handlers.FiftyFiftyHandler)
 		grp.POST("/fifty-fifty", handlers.FiftyFiftyHandler)
+		grp.POST("/sort-it-out/complete", handlers.CompleteSortItOutHandler)
 		grp.GET("/history", handlers.GetGameHistoryHandler)
 	}
 
