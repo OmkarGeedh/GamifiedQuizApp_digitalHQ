@@ -1,7 +1,4 @@
-# This workflow will build a golang project
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-go
-
-name: Go
+name: CI/CD Pipeline
 
 on:
   push:
@@ -10,19 +7,56 @@ on:
     branches: [ "main" ]
 
 jobs:
-
-  build:
+  test:
+    name: Build & Test
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version-file: go.mod
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
 
-    - name: Build
-      run: go build -v ./...
+      - name: Build Application
+        run: go build -v ./...
 
-    - name: Test
-      run: go test -v ./...
+      - name: Run Tests
+        run: go test -v ./...
+
+  deploy:
+    name: Deploy to Zoho Catalyst AppSail
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Production Container Image
+        run: |
+          docker build -t quiz-api:latest -f Dockerfile.catalyst .
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Zoho Catalyst CLI
+        run: npm install -g zcatalyst-cli
+
+      - name: Deploy to Zoho Catalyst AppSail
+        env:
+          ZCATALYST_NON_INTERACTIVE: "true"
+        run: |
+          catalyst deploy appsail \
+            --project "${{ secrets.CATALYST_PROJECT_ID }}" \
+            --org "${{ secrets.CATALYST_ORG_ID }}" \
+            --token "${{ secrets.CATALYST_TOKEN }}" \
+            --dc in \
+            --non-interactive
+

@@ -1,0 +1,33 @@
+# =========================================================================
+# Production Dockerfile for Zoho Catalyst AppSail (~25MB ultra-lean image)
+# Sized to minimize GB-minute compute credits and start in < 300ms
+# =========================================================================
+
+# Stage 1: Build stripped Linux binary
+FROM golang:1.24-alpine AS builder
+
+WORKDIR /build
+
+ENV GOTOOLCHAIN=auto
+
+RUN apk add --no-cache git
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /build/bin/server .
+
+# Stage 2: Minimal runtime image
+FROM alpine:3.20
+
+WORKDIR /app
+
+RUN apk add --no-cache ca-certificates tzdata
+
+COPY --from=builder /build/bin/server /app/server
+
+EXPOSE 8080
+
+CMD ["/app/server"]

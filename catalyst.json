@@ -1,0 +1,11 @@
+{
+  "appsail": [
+    {
+      "source": "docker://quiz-api:latest",
+      "name": "quiz-api",
+      "port": {
+        "http": 8080
+      }
+    }
+  ]
+}
