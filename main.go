@@ -6,7 +6,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/config"
@@ -35,16 +37,6 @@ func main() {
 		defer sqlDB.Close()
 	}
 
-	// Run AutoMigrate for all models
-	if err := db.AutoMigrate(pgDB); err != nil {
-		log.Printf("Warning: Database AutoMigrate failed: %v\n", err)
-	}
-
-	// Run pending SQL migrations before starting server (tracked in schema_migrations)
-	if err := db.RunSQLMigrations(pgDB); err != nil {
-		log.Printf("Warning: Database SQL migrations failed: %v\n", err)
-	}
-
 	// 3. Initialize Redis connection
 	redisAddr := config.AppConfig.Redis.Endpoint()
 	redisPassword := config.AppConfig.Redis.Password
@@ -59,7 +51,9 @@ func main() {
 	}
 
 	// 4. Setup Gin Engine
-	if os.Getenv("ENV") == "production" {
+	if config.AppConfig != nil && config.AppConfig.IsProduction() {
+		gin.SetMode(gin.ReleaseMode)
+	} else if os.Getenv("ENV") == "production" {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
@@ -142,14 +136,41 @@ func main() {
 		})
 	})
 
-	// 6. Start Server
+	// 6. Start Server with Graceful Shutdown
 	port := os.Getenv("PORT")
+	if port == "" {
+		port = os.Getenv("X_ZOHO_CATALYST_LISTEN_PORT")
+	}
 	if port == "" {
 		port = "8080"
 	}
 
-	log.Printf("HTTP server listening on port :%s\n", port)
-	if err := r.Run(":" + port); err != nil {
-		log.Fatalf("Server failed to start: %v\n", err)
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           r,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	go func() {
+		log.Printf("HTTP server listening on port :%s\n", port)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Server failed to start: %v\n", err)
+		}
+	}()
+
+	// Wait for OS interrupt or SIGTERM (sent by Docker / Catalyst when scaling or restarting)
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	sig := <-quit
+	log.Printf("Received signal %v. Initiating graceful shutdown...\n", sig)
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("Server shutdown forced with error: %v\n", err)
+	} else {
+		log.Println("Server exited cleanly.")
 	}
 }

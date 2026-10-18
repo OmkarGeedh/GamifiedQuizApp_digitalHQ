@@ -45,10 +45,6 @@ func setupTestApp(t *testing.T) (*gin.Engine, string) {
 	gameTestDBOnce.Do(func() {
 		dbURL := config.AppConfig.Database.ConnectionString()
 		gameTestDB, gameTestDBErr = db.Connect(dbURL)
-		if gameTestDBErr == nil {
-			_ = db.AutoMigrate(gameTestDB)
-			_ = db.Seed(gameTestDB)
-		}
 	})
 
 	if gameTestDBErr != nil {

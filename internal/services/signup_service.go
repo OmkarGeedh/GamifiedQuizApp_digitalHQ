@@ -9,7 +9,6 @@ import (
 	"log"
 	"math"
 	"net/http"
-	"os"
 	"sync"
 	"time"
 
@@ -290,7 +289,7 @@ func SignupSendCodeService(ctx context.Context, ip string, req *dto.SignupSendCo
 		ExpiresIn:       600,
 		Message:         fmt.Sprintf("Verification code sent to %s", req.Email),
 	}
-	if os.Getenv("ENV") != "production" {
+	if config.AppConfig == nil || !config.AppConfig.IsProduction() {
 		res.OTP = otp
 	}
 
@@ -346,7 +345,7 @@ func SignupResendCodeService(ctx context.Context, ip string, req *dto.SignupRese
 		ExpiresIn:       600,
 		Message:         fmt.Sprintf("A new verification code was sent to %s", req.Email),
 	}
-	if os.Getenv("ENV") != "production" {
+	if config.AppConfig == nil || !config.AppConfig.IsProduction() {
 		res.OTP = otp
 	}
 

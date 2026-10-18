@@ -11,15 +11,14 @@ import (
 // GetCookieConfig returns whether the environment is production/staging and the cookie domain
 func GetCookieConfig() (isProduction bool, domain string) {
 	if config.AppConfig != nil {
-		env := config.AppConfig.Server.Env
-		isProduction = env == "production" || env == "staging" || os.Getenv("ENV") == "production" || os.Getenv("APP_ENV") == "production"
+		isProduction = config.AppConfig.IsProduction()
 		domain = config.AppConfig.Server.CookieDomain
 	} else {
 		env := os.Getenv("ENV")
 		if env == "" {
 			env = os.Getenv("APP_ENV")
 		}
-		isProduction = env == "production" || env == "staging"
+		isProduction = env == "production" || env == "staging" || env == "prod"
 		domain = os.Getenv("COOKIE_DOMAIN")
 	}
 	return isProduction, domain

@@ -39,23 +39,30 @@ Rebuild and `docker compose restart app` after every code change. `.air.toml` (o
 
 ## Schema and migrations
 
-Migrations are **GORM AutoMigrate**, not the `.sql` files. `migrations/*.sql` are legacy and unreferenced by any Go code. Schema is owned by `internal/models/*` and `db.AllModels()` in `internal/database/migration.go`.
+Database schema, sequenced SQL migrations, and data seeding are managed authoritatively by the **`SkillVerse-SQL_Migration`** repository (`game-db` CLI). The backend repo does not run migrations or seeds on boot.
 
-When adding a model you must touch three places:
-1. the struct in `internal/models/`
-2. `AllModels()` in `internal/database/migration.go`
-3. the hardcoded `tables` slice in `db.Status()` (same file) or it won't show up in `make migrate-status`
+Managed tables: `clients`, `client_profiles`, `client_streak_activities`, `mcq_questions`, `sort_it_out_questions`, `match_the_following_questions`, `match_pairs`, `user_question_history`, `wallet_ledger`. (Note: `game_sessions` table has been dropped in favor of ephemeral Redis sliding-TTL sessions).
 
-Managed tables: `clients`, `client_profiles`, `client_streak_activities`, `questions`, `game_sessions`, `user_question_history`, `wallet_ledger`.
+To migrate or seed the database:
+```bash
+cd ../SkillVerse-SQL_Migration
+make migrate-up
+make seed
+```
+Seed credentials: `player@example.com` / `secretpassword123`.
 
-`main.go` auto-migrates **and** auto-seeds on every boot when the `questions` table is empty. `seedQuestions()` issues `TRUNCATE TABLE questions RESTART IDENTITY CASCADE` before re-inserting from `internal/data/seed_questions.json` — running `-action=seed` destroys local question edits. Seed credentials: `player@example.com` / `secretpassword123`.
+## Env loading and separation
 
-## Env loading quirks
-
-- `config.LoadEnv()` walks `.env` from the CWD up to 4 parent dirs and uses `godotenv.Load`, which **never overrides** already-set variables.
+- `config.LoadEnv()` inspects `ENV` or `APP_ENV` (defaults to `development`) and loads files up to 4 parent directories in priority order: `.env.<env>.local` -> `.env.<env>` -> `.env.local` -> `.env`.
+- Variables already present in the OS/container environment **always take highest precedence** and are never overwritten.
 - `DATABASE_URL` and `REDIS_ADDR` win outright over the discrete `POSTGRES_*` / `REDIS_HOST`+`REDIS_PORT` vars when non-empty.
-- Docker Compose injects its own `DATABASE_URL` pointing at host `postgres`, so a stale `localhost` `DATABASE_URL` in `.env` is the usual cause of "connection refused" inside the container.
-- `main.go` and several services read `os.Getenv("ENV")` / `os.Getenv("PORT")` **directly**, bypassing `config.AppConfig.Server`. Keep both paths in sync when changing these.
+- Docker Compose injects its own `DATABASE_URL` pointing at host `postgres`, so a stale `localhost` `DATABASE_URL` in `.env` is overridden inside the container if injected by compose.
+- Use `config.AppConfig.IsProduction()`, `config.AppConfig.IsDevelopment()`, and `config.AppConfig.IsTest()` for environment-conditional behavior.
+- In production (`ENV=production`):
+  - `gin.SetMode(gin.ReleaseMode)` is set automatically.
+  - `seedQuestions()` will **never truncate existing questions** on boot unless `SEED_FORCE_REFRESH=true`.
+  - Demo player (`player@example.com`) is skipped unless `SEED_DEMO_USER=true`.
+  - Auth cookies default to `Secure: true` with strict cookie domain matching.
 
 ## Dual route registration
 
