@@ -114,16 +114,16 @@ Set these environment variables in the **Zoho Catalyst Console** under **AppSail
 |---|---|---|
 | `ENV` | `production` | Enables production security and error formatting |
 | `GIN_MODE` | `release` | Disables debug printing to save log credits |
+| `CLOUD_PROVIDER` | `zoho` | Activates Catalyst-specific WebSocket timeouts (15s pings) |
 | `DATABASE_URL` | `postgresql://user:pass@ep-xyz.neon.tech/dbname?sslmode=require` | External free PostgreSQL connection |
 | `POSTGRES_SSLMODE` | `require` | Enforces TLS database encryption |
-| `REDIS_ADDR` | *(leave empty or Upstash URL)* | If empty, backend uses zero-cost in-memory `sync.Map` |
-| `REDIS_PASSWORD`| *(optional)* | Only needed if using external Redis |
+| `REDIS_URL` | `rediss://default:PASS@xyz.upstash.io:6379` | External Redis connection (Upstash/Redis Cloud). Leave empty for zero-cost in-memory fallback |
 | `JWT_SECRET` | *`<strong-random-key>`* | Auth token signing secret |
 | `PASSWORD_SECRET`| *`<strong-pepper-key>`* | Password hash pepper salt |
 | `CORS_ALLOWED_ORIGINS`| `https://quiz.yourdomain.com` | Restricts cross-origin requests in production |
 
 > [!TIP]
-> **Zero-Cost Redis**: Leaving `REDIS_ADDR` blank activates the app's resilient in-memory session and cache fallback. For low-to-medium single-instance workloads, this costs **$0.00** and consumes zero external network bandwidth.
+> **Redis on Catalyst**: Zoho Catalyst's internal cache does not provide a direct Redis TCP port (6379) for Go drivers. To use Redis, provision a free [Upstash Redis](https://upstash.com) instance and supply `REDIS_URL`. Leaving `REDIS_URL` blank activates the app's zero-cost in-memory session and cache fallback ($0.00 / 0 Catalyst credits).
 
 ---
 
@@ -207,8 +207,19 @@ The AppSail Go web server is decoupled from database DDL and does not run schema
 
 ---
 
-## 8. WebSocket & Scale-to-Zero Best Practices
+## 8. WebSocket & Scale-to-Zero Architecture
 
+### AppSail WebSocket Ingress
+- **Direct Domain Routing**: Connect to the AppSail access URL (`wss://<service-name>-<zaid>.<env>.catalystappsail.com/ws/game`), **not** `catalystserverless.com`. Standard Catalyst API Gateways or basic functions do not forward raw WebSocket upgrades.
+- **Protocol**: Modern browsers enforce `wss://` (TLS). Calling unencrypted `ws://` to Catalyst HTTPS will trigger browser security mixed-content blocks.
+- **Proxy Idle Timeout Protection**: AppSail edge proxies terminate idle requests after **30 seconds**. The Go backend automatically configures `PingInterval = 15s` and `TCPKeepAlive = 15s` when running on Catalyst (`CLOUD_PROVIDER=zoho` or detected port) to keep the proxy tunnel open.
+- **Handshake Authentication**: Browsers cannot send custom HTTP headers during a WebSocket handshake. Authenticate via query parameters:
+  ```
+  wss://<appsail-url>/ws/game?session_id=<UUID>&token=<JWT_ACCESS_TOKEN>
+  ```
+  *(Also accepts `access_token` or `accessToken`).*
+
+### Scale-to-Zero Best Practices
 AppSail automatically scales down instances to **0** after 5 minutes of no activity, charging **zero compute credits**.
 
 To ensure persistent WebSockets don't keep the instance awake indefinitely:
@@ -242,20 +253,23 @@ To ensure persistent WebSockets don't keep the instance awake indefinitely:
 - **Cause**: The container image is too large, or database connection initialization timed out.
 - **Fix**: Verify you are using [`Dockerfile.catalyst`](../Dockerfile.catalyst) (~25 MB) and check that your `DATABASE_URL` is reachable from external networks with `sslmode=require`.
 
-### Q2: How do I test the app locally before deploying?
-- Run directly on host:
-  ```bash
-  go run .
-  # or: make run
-  ```
-- Or run via Docker Compose without Air:
-  ```bash
-  docker compose restart app
-  ```
+### Q2: WebSocket handshake returns 401 Unauthorized or 400 Bad Request
+- **Cause**: Missing `token` or `session_id` query parameters.
+- **Fix**: A Sudden Death session must first be initialized via `POST /api/v1/quiz/sessions/create` to obtain a `session_id`. Then connect to `wss://.../ws/game?session_id=<ID>&token=<JWT>`.
 
-### Q3: How do I verify the database status on Catalyst?
+### Q3: WebSocket disconnects after 30 seconds
+- **Cause**: Catalyst's edge proxy terminated an idle connection because server pings were > 30s.
+- **Fix**: Ensure `CLOUD_PROVIDER=zoho` is set (or `WS_PING_INTERVAL_SECONDS=15`), which causes the Go backend to ping every 15 seconds.
+
+### Q4: How do I verify the database status on Catalyst?
 Use the migration CLI from `SkillVerse-SQL_Migration`:
 ```bash
 cd SkillVerse-SQL_Migration
 DB_URL="postgresql://user:pass@host:5432/dbname?sslmode=require" ./bin/game-db migrate version
 ```
+
+---
+
+## 10. Complete Deployment Checklist
+For the comprehensive 7-pillar deployment checklist across all cloud providers (PostgreSQL, Redis, WebSockets, Timeouts, Port Binding, Lifecycle), refer to [**Backend Deployment Checklist**](deployment_checklist.md).
+

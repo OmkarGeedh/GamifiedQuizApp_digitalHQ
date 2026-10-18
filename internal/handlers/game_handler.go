@@ -368,10 +368,22 @@ func WebSocketGameHandler(c *gin.Context) {
 		}
 	}
 
+	// Normalize WebSocket handshake headers for edge proxies / gateways (e.g. Zoho Catalyst ZGS,
+	// AWS CloudFront, or load balancers that sanitize hop-by-hop Connection headers)
+	if strings.EqualFold(c.Request.Header.Get("Upgrade"), "websocket") || c.Request.Header.Get("Sec-WebSocket-Key") != "" {
+		if !strings.Contains(strings.ToLower(c.Request.Header.Get("Connection")), "upgrade") {
+			c.Request.Header.Set("Connection", "Upgrade")
+		}
+		if c.Request.Header.Get("Upgrade") == "" {
+			c.Request.Header.Set("Upgrade", "websocket")
+		}
+	}
+
 	// Upgrade to WebSocket
 	conn, err := wsUpgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
-		log.Printf("[ws] upgrade failed for client %d: %v", clientID, err)
+		log.Printf("[ws] upgrade failed for client %d (Connection=%q, Upgrade=%q, Sec-WS-Key=%q): %v",
+			clientID, c.Request.Header.Get("Connection"), c.Request.Header.Get("Upgrade"), c.Request.Header.Get("Sec-WebSocket-Key"), err)
 		return
 	}
 	defer conn.Close()
@@ -380,7 +392,7 @@ func WebSocketGameHandler(c *gin.Context) {
 	if tcpConn, ok := conn.UnderlyingConn().(*net.TCPConn); ok {
 		_ = tcpConn.SetNoDelay(true)
 		_ = tcpConn.SetKeepAlive(true)
-		_ = tcpConn.SetKeepAlivePeriod(30 * time.Second)
+		_ = tcpConn.SetKeepAlivePeriod(ws.TCPKeepAlive)
 	}
 
 	conn.SetReadLimit(ws.MaxMessageSize)

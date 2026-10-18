@@ -52,6 +52,12 @@ func ClientAuthMiddleware(c *gin.Context) {
 	if tokenStr == "" {
 		tokenStr = c.Query("token")
 	}
+	if tokenStr == "" {
+		tokenStr = c.Query("access_token")
+	}
+	if tokenStr == "" {
+		tokenStr = c.Query("accessToken")
+	}
 
 	if tokenStr == "" {
 		// No token provided

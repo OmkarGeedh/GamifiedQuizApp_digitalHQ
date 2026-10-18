@@ -194,4 +194,6 @@ Pre-configured Postman collection and environment files are available in the [`p
 - [Match the Following Specification](docs/match_the_following_plan.md): Relational matching pair mechanics, DTOs, scoring, and session lifecycle.
 - [Sort It Out Mini-Game Specification](docs/sort_it_out_plan.md): Binary classification mini-game mode, dedicated session cache, and gameplay endpoints.
 - [Master Architecture & Optimization Blueprint](docs/ultimate_db_redis_optimization_plan.md): 3-tier high-performance architecture, pure ephemeral Redis sessions, 6 caching domains, and PostgreSQL connection pool & O(1) sampling optimizations.
+- [Backend Infrastructure & Deployment Checklist](docs/deployment_checklist.md): 7-pillar production checklist covering PostgreSQL, Redis, WebSockets, edge proxies, timeouts, and container lifecycle.
+- [Zoho Catalyst Deployment Guide](docs/zoho_catalyst_implementation.md): Complete setup for AppSail Docker runtime, Upstash Redis, and WebSocket ingress configurations.
 

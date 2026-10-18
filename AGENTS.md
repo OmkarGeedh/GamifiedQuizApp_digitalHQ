@@ -80,6 +80,18 @@ The CORS middleware is an inline anonymous func in `main.go` (it also strips tra
 
 Never write code or tests that assume Redis is present. A stale `bin/server` can also be running while you test new code — check the running process.
 
+## Mandatory Infrastructure & Deployment Rules (Learned Rule)
+
+Whenever adding, updating, or planning backend deployment infrastructure (Zoho Catalyst, AWS, GCP, etc.), **never declare deployment ready without auditing the 7 pillars** documented in `docs/deployment_checklist.md`:
+
+1. **Database**: External PostgreSQL 16 with `sslmode=require`. Migrations and seeds are strictly owned by `SkillVerse-SQL_Migration` CLI before boot.
+2. **Redis / Cache**: Never assume a cloud platform's built-in cache exposes raw TCP port 6379 (Zoho Catalyst does not; AWS ElastiCache / Upstash do). Always verify `REDIS_URL` with TLS (`rediss://`) or verify that the zero-cost in-memory fallback operates correctly.
+3. **WebSocket Ingress**: Verify the load balancer / edge proxy supports HTTP `Upgrade: websocket` hop-by-hop forwarding (`101 Switching Protocols`). Bypass stateless API Gateways that drop upgrade headers; route directly to the persistent container service. Modern browsers strictly enforce `wss://` on HTTPS domains.
+4. **Proxy Idle Timeouts**: Check host edge proxy idle thresholds (Zoho Catalyst = 30s, AWS ALB = 60s). Server `PingInterval` must be strictly less than the proxy timeout (15s on Catalyst, 54s on AWS). Set `CLOUD_PROVIDER=<zoho|aws|gcp>` or `WS_PING_INTERVAL_SECONDS`.
+5. **Handshake Authentication**: Browsers cannot send custom headers during WebSocket upgrades; accept `token` / `access_token` query parameters. Ensure quiz sessions are initialized via REST before dialing `session_id`.
+6. **Port Binding & Lifecycle**: Bind dynamically to `PORT` / `X_ZOHO_CATALYST_LISTEN_PORT` in < 10 seconds. Handle `SIGTERM` with graceful shutdown.
+7. **Scale-to-Zero State Safety**: If an instance scales down or recycles, ensure active sessions can be recovered cleanly without leaking abandoned sessions.
+
 ## Scoring is deliberately fixed
 
 `docs/points_calculation.md` is the authority. `CalculatePoints(basePoints, difficulty, timeTakenMs, comboStreak)` in `internal/services/game_service.go` **keeps its 4-arg signature but ignores every argument** and returns the `MCQCorrectAnswerPoints` constant. Do not reintroduce speed or combo multipliers.
@@ -106,6 +118,7 @@ Tests are plain unit tests, no build tags, no DB or Redis fixtures required.
 - **No `.gitignore` exists**, and `.env`, `bin/server` (~48 MB), `tmp/main` (~45 MB), and `.DS_Store` are all tracked. Never use `git add -A`; stage paths explicitly.
 - `.env` is committed and holds real secrets (`JWT_SECRET`, `PASSWORD_SECRET`). Do not paste its contents into commits, PR descriptions, or docs.
 - Work happens on `main` directly.
+- **NEVER run `git push` autonomously** under any circumstances. Always prepare code, show diffs, and let the user review and push manually.
 - `docs/auth.md` is an empty file (0 bytes) despite being linked from the README.
 
 ## Stale documentation

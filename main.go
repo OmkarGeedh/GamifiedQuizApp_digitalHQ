@@ -15,6 +15,7 @@ import (
 	db "github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/database"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/routes"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/services"
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/ws"
 	"github.com/gin-gonic/gin"
 )
 
@@ -25,6 +26,9 @@ func main() {
 	if err := config.LoadEnv(); err != nil {
 		log.Printf("Warning loading .env: %v\n", err)
 	}
+	ws.InitPlatformTiming()
+	log.Printf("WebSocket timings initialized for platform '%s' (PingInterval: %v, PongWait: %v, TCPKeepAlive: %v)\n",
+		ws.CurrentPlatform, ws.PingInterval, ws.PongWait, ws.TCPKeepAlive)
 
 	// 2. Initialize PostgreSQL connection with GORM
 	databaseURL := config.AppConfig.Database.ConnectionString()
