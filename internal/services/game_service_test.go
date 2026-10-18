@@ -1028,3 +1028,23 @@ func TestMatchTheFollowingSeedQuestionsConsistency(t *testing.T) {
 	}
 }
 
+func BenchmarkGradeAnswer_RAM(b *testing.B) {
+	sq := models.SessionQuestion{
+		QuestionCode:  "Q100",
+		CorrectOption: "b",
+		OptionA:       "First",
+		OptionB:       "Second",
+		OptionC:       "Third",
+		OptionD:       "Fourth",
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		isCorrect, _, _ := GradeAnswer(&sq, nil, "b", "Second")
+		if !isCorrect {
+			b.Fatal("expected correct")
+		}
+	}
+}
+
+

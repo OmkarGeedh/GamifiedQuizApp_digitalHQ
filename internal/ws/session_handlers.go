@@ -207,10 +207,11 @@ func (gs *GameSession) handleUsePowerUp(ctx context.Context, rawData json.RawMes
 		gs.sendToPlayer(OutboundMessage{
 			Type: MsgTypePowerUpResult,
 			Data: PowerUpResultPayload{
-				Question:        q.QuestionCode,
-				PowerUp:         powerUp,
-				AddedTimeMs:     int(addTimeDuration.Milliseconds()),
-				RemainingTimeMs: int(remaining.Milliseconds()),
+				Question:          q.QuestionCode,
+				PowerUp:           powerUp,
+				AddedTimeMs:       int(addTimeDuration.Milliseconds()),
+				RemainingTimeMs:   int(remaining.Milliseconds()),
+				ServerTimestampMs: time.Now().UnixMilli(),
 			},
 		})
 
@@ -244,9 +245,10 @@ func (gs *GameSession) handleUsePowerUp(ctx context.Context, rawData json.RawMes
 		gs.sendToPlayer(OutboundMessage{
 			Type: MsgTypePowerUpResult,
 			Data: PowerUpResultPayload{
-				Question:      q.QuestionCode,
-				PowerUp:       powerUp,
-				HiddenOptions: hidden,
+				Question:          q.QuestionCode,
+				PowerUp:           powerUp,
+				HiddenOptions:     hidden,
+				ServerTimestampMs: time.Now().UnixMilli(),
 			},
 		})
 
@@ -737,6 +739,7 @@ func (gs *GameSession) broadcastQuestion(remainingMs int) {
 		}
 	}
 	payload.RemainingTimeMs = remainingMs
+	payload.ServerTimestampMs = time.Now().UnixMilli()
 
 	gs.sendToPlayer(OutboundMessage{
 		Type: MsgTypeQuestion,

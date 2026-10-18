@@ -14,7 +14,7 @@ import (
 
 const (
 	questionTimeLimitSec = 15
-	transitionDelayMs    = 800
+	transitionDelayMs    = 400
 	disconnectTTL        = 5 * time.Minute
 	addTimeDuration      = 5 * time.Second
 )

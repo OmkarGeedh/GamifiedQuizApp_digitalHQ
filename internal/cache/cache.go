@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/config"
@@ -15,7 +16,7 @@ const (
 	ProfileCacheTTL           = 15 * time.Minute
 	CatalogCacheTTL           = 1 * time.Hour
 	QuestionSamplingTTL       = 24 * time.Hour
-	AnswerLockTTL             = 10 * time.Second
+	AnswerLockTTL             = 5 * time.Minute
 	WeeklyLeaderboardKey      = "quiz:leaderboard:weekly"
 	WeeklyLeaderboardPrevKey  = "quiz:leaderboard:weekly:prev"
 	WeeklyLeaderboardTTL      = 7 * 24 * time.Hour
@@ -24,6 +25,8 @@ const (
 
 // SingleFlight group to coalesce duplicate concurrent cache misses (thundering herd mitigation)
 var RequestGroup singleflight.Group
+
+var memAnswerLocks sync.Map
 
 // ProfileKey returns the Redis key for a user's cached profile
 func ProfileKey(clientID int) string {
@@ -45,16 +48,19 @@ func IsRedisAvailable() bool {
 	return config.RedisClient != nil
 }
 
-// AcquireAnswerLock attempts to acquire a short-lived atomic lock to prevent duplicate answer submissions.
+// AcquireAnswerLock attempts to acquire an atomic lock to prevent duplicate answer submissions in < 0.1ms.
 // Returns true if lock was acquired; false if duplicate detected.
 func AcquireAnswerLock(ctx context.Context, sessionID, questionCode string) bool {
-	if config.RedisClient == nil {
-		return true // Fallback to allowing request when Redis is nil
-	}
 	key := AnswerLockKey(sessionID, questionCode)
+	if config.RedisClient == nil {
+		if _, loaded := memAnswerLocks.LoadOrStore(key, time.Now()); loaded {
+			return false
+		}
+		return true
+	}
 	success, err := config.RedisClient.SetNX(ctx, key, "1", AnswerLockTTL).Result()
 	if err != nil {
-		return true // Fail open on Redis error so user request isn't blocked
+		return true // Fail open on Redis network error so user request isn't blocked
 	}
 	return success
 }

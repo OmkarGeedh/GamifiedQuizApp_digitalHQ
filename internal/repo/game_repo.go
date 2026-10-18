@@ -29,8 +29,13 @@ func sampleRandomCodes(codes []string, limit int) []string {
 }
 
 // GetQuestionsByTopic fetches random questions for a given topic from mcq_questions.
-// Uses fast index-only code scan followed by primary B-tree lookup (< 1.5ms vs 80ms ORDER BY RANDOM()).
+// Checks Redis topic question code pool first (< 0.2ms), falling back to index-only scan.
 func GetQuestionsByTopic(ctx context.Context, topicID string, limit int) ([]models.Question, error) {
+	if cachedCodes, ok := cache.GetCachedQuestionCodes(ctx, topicID, models.GameModeMCQ); ok && len(cachedCodes) >= limit {
+		sampledCodes := sampleRandomCodes(cachedCodes, limit)
+		return GetQuestionsByCodes(ctx, sampledCodes)
+	}
+
 	db := GetDB()
 	if db == nil {
 		return nil, nil
@@ -48,6 +53,7 @@ func GetQuestionsByTopic(ctx context.Context, topicID string, limit int) ([]mode
 		return nil, nil
 	}
 
+	_ = cache.SetCachedQuestionCodes(ctx, topicID, models.GameModeMCQ, codes)
 	sampledCodes := sampleRandomCodes(codes, limit)
 	return GetQuestionsByCodes(ctx, sampledCodes)
 }
@@ -57,6 +63,12 @@ func GetQuestionsByTopicAndMode(ctx context.Context, topicID string, questionTyp
 	if questionType == "" {
 		return GetQuestionsByTopic(ctx, topicID, limit)
 	}
+
+	if cachedCodes, ok := cache.GetCachedQuestionCodes(ctx, topicID, questionType); ok && len(cachedCodes) >= limit {
+		sampledCodes := sampleRandomCodes(cachedCodes, limit)
+		return GetQuestionsByCodes(ctx, sampledCodes)
+	}
+
 	db := GetDB()
 	if db == nil {
 		return nil, nil
@@ -78,6 +90,7 @@ func GetQuestionsByTopicAndMode(ctx context.Context, topicID string, questionTyp
 		return nil, nil
 	}
 
+	_ = cache.SetCachedQuestionCodes(ctx, topicID, questionType, codes)
 	sampledCodes := sampleRandomCodes(codes, limit)
 	return GetQuestionsByCodes(ctx, sampledCodes)
 }

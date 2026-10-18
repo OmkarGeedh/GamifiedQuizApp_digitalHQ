@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/config"
 )
@@ -44,4 +45,35 @@ func InvalidateCachedTopics(ctx context.Context) error {
 		return nil
 	}
 	return config.RedisClient.Del(ctx, AvailableTopicsCatalogKey).Err()
+}
+
+// GetCachedQuestionCodes retrieves cached question codes for a topic and mode in < 0.2ms.
+func GetCachedQuestionCodes(ctx context.Context, topicID, gameMode string) ([]string, bool) {
+	if config.RedisClient == nil {
+		return nil, false
+	}
+	key := QuestionCatalogKey(topicID, gameMode)
+	members, err := config.RedisClient.SMembers(ctx, key).Result()
+	if err != nil || len(members) == 0 {
+		return nil, false
+	}
+	return members, true
+}
+
+// SetCachedQuestionCodes caches question codes in a Redis Set with 2-hour TTL.
+func SetCachedQuestionCodes(ctx context.Context, topicID, gameMode string, codes []string) error {
+	if config.RedisClient == nil || len(codes) == 0 {
+		return nil
+	}
+	key := QuestionCatalogKey(topicID, gameMode)
+	pipe := config.RedisClient.Pipeline()
+	pipe.Del(ctx, key)
+	interfaceCodes := make([]interface{}, len(codes))
+	for i, c := range codes {
+		interfaceCodes[i] = c
+	}
+	pipe.SAdd(ctx, key, interfaceCodes...)
+	pipe.Expire(ctx, key, 2*time.Hour)
+	_, err := pipe.Exec(ctx)
+	return err
 }

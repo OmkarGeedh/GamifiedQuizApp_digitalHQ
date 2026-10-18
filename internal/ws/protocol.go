@@ -77,9 +77,10 @@ type QuestionPayload struct {
 	// RemainingTimeMs is always emitted. It must not be omitempty: a resync with
 	// zero milliseconds left has to be distinguishable from the field being absent,
 	// otherwise clients fall back to TimeLimitMs and believe they have a full timer.
-	RemainingTimeMs int `json:"remaining_time_ms"`
-	QuestionNumber  int `json:"question_number"`
-	TotalQuestions  int `json:"total_questions"`
+	RemainingTimeMs   int   `json:"remaining_time_ms"`
+	QuestionNumber    int   `json:"question_number"`
+	TotalQuestions    int   `json:"total_questions"`
+	ServerTimestampMs int64 `json:"server_timestamp_ms"`
 }
 
 // OptionPayload is a single MCQ option in the WebSocket payload.
@@ -104,11 +105,12 @@ type AnswerResultPayload struct {
 
 // PowerUpResultPayload confirms an authoritative power-up result.
 type PowerUpResultPayload struct {
-	Question        string   `json:"question"`
-	PowerUp         string   `json:"power_up,omitempty"`
-	HiddenOptions   []string `json:"hidden_options,omitempty"`
-	AddedTimeMs     int      `json:"added_time_ms,omitempty"`
-	RemainingTimeMs int      `json:"remaining_time_ms,omitempty"`
+	Question          string   `json:"question"`
+	PowerUp           string   `json:"power_up,omitempty"`
+	HiddenOptions     []string `json:"hidden_options,omitempty"`
+	AddedTimeMs       int      `json:"added_time_ms,omitempty"`
+	RemainingTimeMs   int      `json:"remaining_time_ms,omitempty"`
+	ServerTimestampMs int64    `json:"server_timestamp_ms,omitempty"`
 }
 
 // GameOverPayload is the final summary sent when the quiz ends.

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -374,6 +375,13 @@ func WebSocketGameHandler(c *gin.Context) {
 		return
 	}
 	defer conn.Close()
+
+	// Low-latency socket tuning: bypass Nagle's algorithm and enable keepalive
+	if tcpConn, ok := conn.UnderlyingConn().(*net.TCPConn); ok {
+		_ = tcpConn.SetNoDelay(true)
+		_ = tcpConn.SetKeepAlive(true)
+		_ = tcpConn.SetKeepAlivePeriod(30 * time.Second)
+	}
 
 	conn.SetReadLimit(ws.MaxMessageSize)
 	_ = conn.SetReadDeadline(time.Now().Add(ws.PongWait))
