@@ -1,5 +1,7 @@
 # Infrastructure & Production Deployment Rules
 
+> **DEPRECATION NOTICE**: Railway is no longer used or supported for backend hosting. Never propose, generate configurations for, or deploy to Railway (`*.up.railway.app`). The current production/staging platform is Zoho Catalyst AppSail.
+
 Whenever planning, implementing, or modifying backend deployment infrastructure for this repository (such as Zoho Catalyst, AWS, GCP, etc.), you MUST audit and adhere to the 7-Pillar Deployment Checklist defined in `docs/deployment_checklist.md`.
 
 ## The 7 Mandatory Verification Pillars

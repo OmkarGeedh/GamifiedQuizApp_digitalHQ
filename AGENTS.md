@@ -84,6 +84,7 @@ Never write code or tests that assume Redis is present. A stale `bin/server` can
 
 Whenever adding, updating, or planning backend deployment infrastructure (Zoho Catalyst, AWS, GCP, etc.), **never declare deployment ready without auditing the 7 pillars** documented in `docs/deployment_checklist.md`:
 
+0. **Railway Decommissioned**: Railway is no longer used for hosting or staging. The active platform is Zoho Catalyst AppSail (with external PostgreSQL and optional Upstash/in-memory cache). Do not construct Railway URLs or deploy to Railway.
 1. **Database**: External PostgreSQL 16 with `sslmode=require`. Migrations and seeds are strictly owned by `SkillVerse-SQL_Migration` CLI before boot.
 2. **Redis / Cache**: Never assume a cloud platform's built-in cache exposes raw TCP port 6379 (Zoho Catalyst does not; AWS ElastiCache / Upstash do). Always verify `REDIS_URL` with TLS (`rediss://`) or verify that the zero-cost in-memory fallback operates correctly.
 3. **WebSocket Ingress**: Verify the load balancer / edge proxy supports HTTP `Upgrade: websocket` hop-by-hop forwarding (`101 Switching Protocols`). Bypass stateless API Gateways that drop upgrade headers; route directly to the persistent container service. Modern browsers strictly enforce `wss://` on HTTPS domains.
