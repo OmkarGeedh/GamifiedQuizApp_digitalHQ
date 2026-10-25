@@ -11,15 +11,15 @@ import (
 
 // CreateSessionRequestDTO validates input for starting a new quiz session.
 type CreateSessionRequestDTO struct {
-	TopicID                 string   `json:"topic" binding:"required"`
-	QuestionCount           int      `json:"question_count"`
-	AbandonStale            bool     `json:"abandon_stale,omitempty"`
-	QuestionCodes           []string `json:"question_codes,omitempty"`
+	TopicID       string   `json:"topic" binding:"required"`
+	QuestionCount int      `json:"question_count"`
+	AbandonStale  bool     `json:"abandon_stale,omitempty"`
+	QuestionCodes []string `json:"question_codes,omitempty"`
 	// GameMode selects the rules the session runs under. Omitted means "mcq",
 	// which preserves the original answer-every-question flow.
-	GameMode                string   `json:"game_mode,omitempty"`
-	PairType                string   `json:"pair_type,omitempty"`
-	TimeLimitPerQuestionSec int      `json:"time_limit_per_question_sec,omitempty"`
+	GameMode                string `json:"game_mode,omitempty"`
+	PairType                string `json:"pair_type,omitempty"`
+	TimeLimitPerQuestionSec int    `json:"time_limit_per_question_sec,omitempty"`
 }
 
 // Validate ensures the request has sane defaults and limits.
@@ -44,11 +44,7 @@ func (r *CreateSessionRequestDTO) Validate() error {
 	if len(r.QuestionCodes) > 0 {
 		r.QuestionCount = len(r.QuestionCodes)
 	} else if r.QuestionCount <= 0 {
-		if r.GameMode == models.GameModeMatchTheFollowing {
-			r.QuestionCount = 3
-		} else {
-			r.QuestionCount = 10
-		}
+		r.QuestionCount = 10
 	}
 	if r.QuestionCount > 25 {
 		return errors.New("question_count must not exceed 25")
@@ -62,8 +58,8 @@ func (r *CreateSessionRequestDTO) Validate() error {
 			return errors.New("time_limit_per_question_sec for sort_it_out must be between 5 and 10 seconds")
 		}
 	} else if r.GameMode == models.GameModeMatchTheFollowing {
-		if r.QuestionCount < 1 || r.QuestionCount > 5 {
-			return errors.New("question_count for match_the_following must be between 1 and 5 boards")
+		if r.QuestionCount < 1 || r.QuestionCount > 25 {
+			return errors.New("question_count for match_the_following must be between 1 and 25 boards")
 		}
 		if r.TimeLimitPerQuestionSec == 0 {
 			r.TimeLimitPerQuestionSec = 25
@@ -353,7 +349,7 @@ type MatchBoardDTO struct {
 	Prompt       string             `json:"prompt"`
 	TimeLimitSec int                `json:"time_limit_sec"`
 	LeftItems    []MatchPairItemDTO `json:"left_items"`
-	RightItems   []MatchPairItemDTO `json:"right_items"`         // Shuffled order
+	RightItems   []MatchPairItemDTO `json:"right_items"`            // Shuffled order
 	SolutionMap  map[string]string  `json:"solution_map,omitempty"` // left_id -> right_id
 	Hint         *string            `json:"hint,omitempty"`
 	Explanation  *string            `json:"explanation,omitempty"`

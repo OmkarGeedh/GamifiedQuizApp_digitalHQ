@@ -281,7 +281,7 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 			}
 		} else {
 			if req.QuestionCount <= 0 {
-				req.QuestionCount = 3
+				req.QuestionCount = 10
 			}
 			var err error
 			questions, err = repo.GetMatchTheFollowingQuestions(ctx, req.TopicID, req.QuestionCount)

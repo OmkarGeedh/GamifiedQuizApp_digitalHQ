@@ -132,8 +132,8 @@ func TestCreateSessionRequest_ValidateMatchTheFollowing(t *testing.T) {
 		if err := req.Validate(); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if req.QuestionCount != 3 {
-			t.Fatalf("expected default question_count=3, got %d", req.QuestionCount)
+		if req.QuestionCount != 10 {
+			t.Fatalf("expected default question_count=10, got %d", req.QuestionCount)
 		}
 		if req.TimeLimitPerQuestionSec != 25 {
 			t.Fatalf("expected default time_limit=25, got %d", req.TimeLimitPerQuestionSec)
@@ -144,14 +144,14 @@ func TestCreateSessionRequest_ValidateMatchTheFollowing(t *testing.T) {
 		req := &CreateSessionRequestDTO{
 			TopicID:                 "accounting",
 			GameMode:                models.GameModeMatchTheFollowing,
-			QuestionCount:           5,
+			QuestionCount:           10,
 			TimeLimitPerQuestionSec: 30,
 		}
 		if err := req.Validate(); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if req.QuestionCount != 5 {
-			t.Fatalf("expected question_count=5, got %d", req.QuestionCount)
+		if req.QuestionCount != 10 {
+			t.Fatalf("expected question_count=10, got %d", req.QuestionCount)
 		}
 		if req.TimeLimitPerQuestionSec != 30 {
 			t.Fatalf("expected time_limit=30, got %d", req.TimeLimitPerQuestionSec)
@@ -162,20 +162,20 @@ func TestCreateSessionRequest_ValidateMatchTheFollowing(t *testing.T) {
 		tooFew := &CreateSessionRequestDTO{
 			TopicID:       "accounting",
 			GameMode:      models.GameModeMatchTheFollowing,
-			QuestionCount: -1, // will default to 3 in Validate, but explicit 0 or negative
+			QuestionCount: -1, // will default to 10 in Validate, but explicit 0 or negative
 		}
 		_ = tooFew.Validate()
-		if tooFew.QuestionCount != 3 {
-			t.Fatalf("expected 0 to default to 3, got %d", tooFew.QuestionCount)
+		if tooFew.QuestionCount != 10 {
+			t.Fatalf("expected -1 to default to 10, got %d", tooFew.QuestionCount)
 		}
 
 		tooMany := &CreateSessionRequestDTO{
 			TopicID:       "accounting",
 			GameMode:      models.GameModeMatchTheFollowing,
-			QuestionCount: 6,
+			QuestionCount: 26,
 		}
 		if err := tooMany.Validate(); err == nil {
-			t.Fatal("expected error for question_count > 5")
+			t.Fatal("expected error for question_count > 25")
 		}
 	})
 
