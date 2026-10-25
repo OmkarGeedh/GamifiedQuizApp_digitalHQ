@@ -10,6 +10,7 @@ import (
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/models"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // --- O(1) Indexed Question Sampling & Retrieval ---
@@ -455,11 +456,37 @@ func FinalizeSession(ctx context.Context, session *models.GameSession, coins, xp
 			todayStr := now.Format("2006-01-02")
 			_ = RecordDailyActivity(ctx, session.ClientID, todayStr)
 
+			// 4. Record durable leaderboard game result (idempotent via session_id unique index)
+			leaderboardResult := models.LeaderboardGameResult{
+				SessionID:   session.ID,
+				ClientID:    session.ClientID,
+				TopicID:     session.TopicID,
+				GameMode:    session.GameMode,
+				FinalScore:  session.Score,
+				CompletedAt: now,
+			}
+			if err := tx.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "session_id"}},
+				DoNothing: true,
+			}).Create(&leaderboardResult).Error; err != nil {
+				return fmt.Errorf("failed to record leaderboard game result: %w", err)
+			}
+
 			return nil
 		})
 		if err != nil {
 			return err
 		}
+	} else {
+		// Record in-memory for testing when db is nil
+		_ = RecordInMemoryLeaderboardResult(&models.LeaderboardGameResult{
+			SessionID:   session.ID,
+			ClientID:    session.ClientID,
+			TopicID:     session.TopicID,
+			GameMode:    session.GameMode,
+			FinalScore:  session.Score,
+			CompletedAt: now,
+		})
 	}
 
 	// 4. Redis Real-Time Leaderboard Update (< 0.2ms)

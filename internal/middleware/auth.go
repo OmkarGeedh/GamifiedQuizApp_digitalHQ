@@ -131,6 +131,7 @@ func ClientAuthMiddleware(c *gin.Context) {
 		dbErr         error
 		wg            sync.WaitGroup
 	)
+	client.ID = clientID
 
 	if jtiVal != "" && config.RedisClient != nil {
 		wg.Add(1)

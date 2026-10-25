@@ -61,6 +61,7 @@ func setupTestEngine() *gin.Engine {
 	routes.RegisterProfileRoutes(r)
 	routes.RegisterGameRoutes(r)
 	routes.RegisterWalletRoutes(r)
+	routes.RegisterLeaderboardRoutes(r)
 
 	r.NoMethod(func(c *gin.Context) {
 		c.JSON(http.StatusMethodNotAllowed, gin.H{
@@ -156,6 +157,22 @@ func TestRouteRegistrationBothPrefixes(t *testing.T) {
 			t.Errorf("expected route %s to exist (not 404), got 404", path)
 		}
 	}
+
+	// Test leaderboard endpoint exists under both /leaderboard and /api/v1/leaderboard (not 404)
+	for _, path := range []string{"/leaderboard", "/api/v1/leaderboard"} {
+		req, _ := http.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Origin", "http://localhost:3000")
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		if w.Code == http.StatusNotFound {
+			t.Errorf("expected route %s to exist (not 404), got 404", path)
+		}
+		// Since it requires authentication, it should respond with 401 Unauthorized
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("expected status 401 Unauthorized for unauthenticated %s, got %d", path, w.Code)
+		}
+	}
 }
 
 func TestMethodNotAllowedReturns405(t *testing.T) {
@@ -170,4 +187,3 @@ func TestMethodNotAllowedReturns405(t *testing.T) {
 		t.Errorf("expected status 405 Method Not Allowed, got %d", w.Code)
 	}
 }
-
