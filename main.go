@@ -13,7 +13,6 @@ import (
 
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/config"
 	db "github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/database"
-	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/models"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/routes"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/services"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/ws"
@@ -40,11 +39,6 @@ func main() {
 	config.DB = pgDB
 	if sqlDB, err := pgDB.DB(); err == nil {
 		defer sqlDB.Close()
-	}
-
-	// Ensure leaderboard table and indexes exist
-	if err := pgDB.AutoMigrate(&models.LeaderboardGameResult{}); err != nil {
-		log.Printf("Warning: AutoMigrate leaderboard_game_results failed: %v\n", err)
 	}
 
 	// 3. Initialize Redis connection
