@@ -16,9 +16,12 @@ func Connect(databaseURL string) (*gorm.DB, error) {
 
 	const maxRetries = 5
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		db, err = gorm.Open(postgres.Open(databaseURL), &gorm.Config{
-			PrepareStmt:            true, // Cache pre-compiled SQL query plans on PostgreSQL
-			SkipDefaultTransaction: true, // Disables implicit BEGIN/COMMIT on single queries (saves 1 RTT per operation)
+		db, err = gorm.Open(postgres.New(postgres.Config{
+			DSN:                  databaseURL,
+			PreferSimpleProtocol: true, // Disables prepared statement protocol for PgBouncer / Catalyst pooled connections
+		}), &gorm.Config{
+			PrepareStmt:            false, // Prevents SQLSTATE 08P01 "prepared statement already in use"
+			SkipDefaultTransaction: true,  // Disables implicit BEGIN/COMMIT on single queries (saves 1 RTT per operation)
 			Logger:                 logger.Default.LogMode(logger.Warn),
 		})
 		if err == nil {

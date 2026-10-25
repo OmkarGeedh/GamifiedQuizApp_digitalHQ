@@ -197,7 +197,7 @@ LIMIT ? OFFSET ?
 	pageArgs = append(pageArgs, filter.PageSize, offset)
 
 	var rows []dbLeaderboardRow
-	if err := db.WithContext(ctx).Raw(pageQuery, pageArgs...).Scan(&rows).Error; err != nil {
+	if err := db.Session(&gorm.Session{PrepareStmt: false}).WithContext(ctx).Raw(pageQuery, pageArgs...).Scan(&rows).Error; err != nil {
 		return nil, fmt.Errorf("failed to fetch leaderboard page: %w", err)
 	}
 
@@ -230,7 +230,7 @@ SELECT rank FROM ranked_leaderboard WHERE client_id = ?
 		rankArgs = append(rankArgs, currentClientID)
 
 		var userRank int
-		err := db.WithContext(ctx).Raw(rankQuery, rankArgs...).Scan(&userRank).Error
+		err := db.Session(&gorm.Session{PrepareStmt: false}).WithContext(ctx).Raw(rankQuery, rankArgs...).Scan(&userRank).Error
 		if err == nil && userRank > 0 {
 			currentUserRank = &userRank
 		}
