@@ -173,6 +173,34 @@ func TestRouteRegistrationBothPrefixes(t *testing.T) {
 			t.Errorf("expected status 401 Unauthorized for unauthenticated %s, got %d", path, w.Code)
 		}
 	}
+
+	// Test WebSocket game endpoints exist and are authenticated (not 404, returns 401 unauth)
+	for _, path := range []string{"/ws/game", "/api/v1/ws/game", "/ws", "/api/v1/ws"} {
+		req, _ := http.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		if w.Code == http.StatusNotFound {
+			t.Errorf("expected WebSocket route %s to exist (not 404), got 404", path)
+		}
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("expected status 401 Unauthorized for unauthenticated %s, got %d", path, w.Code)
+		}
+	}
+
+	// Test WebSocket diagnostic echo endpoints exist and are unauthenticated (not 404, not 401)
+	for _, path := range []string{"/ws/echo", "/api/v1/ws/echo", "/ws/ping", "/api/v1/ws/ping"} {
+		req, _ := http.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		if w.Code == http.StatusNotFound {
+			t.Errorf("expected WebSocket echo route %s to exist (not 404), got 404", path)
+		}
+		if w.Code == http.StatusUnauthorized {
+			t.Errorf("expected WebSocket echo route %s to be unauthenticated, got 401", path)
+		}
+	}
 }
 
 func TestMethodNotAllowedReturns405(t *testing.T) {

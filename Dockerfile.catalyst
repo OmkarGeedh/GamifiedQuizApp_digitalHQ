@@ -28,6 +28,7 @@ RUN apk add --no-cache ca-certificates tzdata
 
 COPY --from=builder /build/bin/server /app/server
 
+ENV CLOUD_PROVIDER=zoho
 EXPOSE 8080
 
 CMD ["/app/server"]

@@ -65,7 +65,14 @@ func DetectPlatform() Platform {
 	}
 
 	// 2. Auto-detection via platform-injected environment variables
-	if os.Getenv("X_ZOHO_CATALYST_LISTEN_PORT") != "" || os.Getenv("CATALYST_ENV") != "" {
+	if os.Getenv("X_ZOHO_CATALYST_LISTEN_PORT") != "" ||
+		os.Getenv("X_ZOHO_CATALYST_APPSAIL_PORT") != "" ||
+		os.Getenv("CATALYST_ENV") != "" ||
+		os.Getenv("CATALYST_PROJECT_ID") != "" ||
+		os.Getenv("CATALYST_ORG_ID") != "" ||
+		os.Getenv("CATALYST_APP_NAME") != "" ||
+		os.Getenv("CATALYST_ENVIRONMENT") != "" ||
+		os.Getenv("ZOHO_CATALYST") != "" {
 		return PlatformZoho
 	}
 	if os.Getenv("AWS_REGION") != "" || os.Getenv("AWS_EXECUTION_ENV") != "" || os.Getenv("ECS_CONTAINER_METADATA_URI") != "" {

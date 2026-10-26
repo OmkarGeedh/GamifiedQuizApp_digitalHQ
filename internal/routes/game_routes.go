@@ -43,7 +43,31 @@ func RegisterGameRoutes(router *gin.Engine) {
 		registerQuizRoutes(rootQuiz)
 	}
 
-	// WebSocket route (authentication handled inside the handler)
-	router.GET("/ws/game", middleware.ClientAuthMiddleware, handlers.WebSocketGameHandler)
-	router.GET("/api/v1/ws/game", middleware.ClientAuthMiddleware, handlers.WebSocketGameHandler)
+	// WebSocket game routes (authenticated, supporting /ws/game, /ws, and /api/v1 variants)
+	wsRoutes := []string{
+		"/ws/game",
+		"/ws/game/",
+		"/api/v1/ws/game",
+		"/api/v1/ws/game/",
+		"/ws",
+		"/ws/",
+		"/api/v1/ws",
+		"/api/v1/ws/",
+	}
+	for _, p := range wsRoutes {
+		router.GET(p, middleware.ClientAuthMiddleware, handlers.WebSocketGameHandler)
+	}
+
+	// WebSocket diagnostic echo probe routes (unauthenticated for instant connectivity verification)
+	echoRoutes := []string{
+		"/ws/echo",
+		"/ws/echo/",
+		"/api/v1/ws/echo",
+		"/api/v1/ws/echo/",
+		"/ws/ping",
+		"/api/v1/ws/ping",
+	}
+	for _, p := range echoRoutes {
+		router.GET(p, handlers.WebSocketEchoHandler)
+	}
 }

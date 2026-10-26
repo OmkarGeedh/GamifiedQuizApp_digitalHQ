@@ -629,6 +629,192 @@ func TestE2E_WebSocket_LiveGame(t *testing.T) {
 	t.Logf("WebSocket live test passed: Question=%s, Result=%+v", qPayload.Question, resultPayload)
 }
 
+func TestWebSocket_EchoDiagnostics(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	routes.RegisterGameRoutes(r)
+
+	server := httptest.NewServer(r)
+	defer server.Close()
+
+	serverURL, _ := url.Parse(server.URL)
+	wsURL := fmt.Sprintf("ws://%s/ws/echo", serverURL.Host)
+
+	wsConn, httpResp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("WebSocket echo dial failed: %v (HTTP Status: %v)", err, httpResp)
+	}
+	defer wsConn.Close()
+
+	// Read initial connected diagnostics message
+	_ = wsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var welcomeMsg struct {
+		Type string `json:"type"`
+		Data struct {
+			Status       string `json:"status"`
+			Platform     string `json:"platform"`
+			PingInterval string `json:"ping_interval"`
+		} `json:"data"`
+	}
+	if err := wsConn.ReadJSON(&welcomeMsg); err != nil {
+		t.Fatalf("Failed to read echo welcome message: %v", err)
+	}
+	if welcomeMsg.Type != "connected" || welcomeMsg.Data.Status != "ok" {
+		t.Fatalf("Unexpected welcome payload: %+v", welcomeMsg)
+	}
+
+	// Send message and expect echo back
+	if err := wsConn.WriteMessage(websocket.TextMessage, []byte("hello catalyst")); err != nil {
+		t.Fatalf("Failed to write to echo socket: %v", err)
+	}
+
+	_ = wsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var echoResp struct {
+		Type string `json:"type"`
+		Data string `json:"data"`
+	}
+	if err := wsConn.ReadJSON(&echoResp); err != nil {
+		t.Fatalf("Failed to read echo response: %v", err)
+	}
+	if echoResp.Type != "echo" || echoResp.Data != "hello catalyst" {
+		t.Fatalf("Unexpected echo response: %+v", echoResp)
+	}
+}
+
+func TestWebSocket_StructuredErrorOnMissingSession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	secret := "test_jwt_secret_structured_error"
+	t.Setenv("JWT_SECRET", secret)
+	if config.AppConfig != nil && config.AppConfig.Server.JWTSecret != "" {
+		secret = config.AppConfig.Server.JWTSecret
+	}
+
+	tokenObj := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"client_id": 1,
+		"exp":       time.Now().Add(1 * time.Hour).Unix(),
+	})
+	token, _ := tokenObj.SignedString([]byte(secret))
+
+	r := gin.New()
+	routes.RegisterGameRoutes(r)
+
+	server := httptest.NewServer(r)
+	defer server.Close()
+
+	serverURL, _ := url.Parse(server.URL)
+
+	missingSessionURL := fmt.Sprintf("ws://%s/ws/game?token=%s", serverURL.Host, token)
+	wsConn, _, err := websocket.DefaultDialer.Dial(missingSessionURL, nil)
+	if err != nil {
+		t.Fatalf("Expected WS dial to succeed with structured error frame, got err: %v", err)
+	}
+	defer wsConn.Close()
+
+	_ = wsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var errFrame struct {
+		Type string `json:"type"`
+		Data struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"data"`
+	}
+	if err := wsConn.ReadJSON(&errFrame); err != nil {
+		t.Fatalf("Failed to read error frame: %v", err)
+	}
+	if errFrame.Type != "error" || errFrame.Data.Code != "SESSION_REQUIRED" {
+		t.Fatalf("Expected SESSION_REQUIRED error, got %+v", errFrame)
+	}
+}
+
+func TestWebSocket_SessionParamFlexibilityAndStructuredErrors(t *testing.T) {
+	r, token := setupTestApp(t)
+	server := httptest.NewServer(r)
+	defer server.Close()
+
+	serverURL, _ := url.Parse(server.URL)
+
+	// 1. Missing session on WS dial returns structured SESSION_REQUIRED frame
+	missingSessionURL := fmt.Sprintf("ws://%s/ws/game?token=%s", serverURL.Host, token)
+	wsConn, _, err := websocket.DefaultDialer.Dial(missingSessionURL, nil)
+	if err != nil {
+		t.Fatalf("Expected WS dial to succeed with structured error frame, got err: %v", err)
+	}
+	defer wsConn.Close()
+
+	_ = wsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var errFrame struct {
+		Type string `json:"type"`
+		Data struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"data"`
+	}
+	if err := wsConn.ReadJSON(&errFrame); err != nil {
+		t.Fatalf("Failed to read error frame: %v", err)
+	}
+	if errFrame.Type != "error" || errFrame.Data.Code != "SESSION_REQUIRED" {
+		t.Fatalf("Expected SESSION_REQUIRED error, got %+v", errFrame)
+	}
+
+	// 2. Create session and connect using ?sessionId= (camelCase)
+	topic := "topic-session-param-test"
+	questions := []models.Question{
+		{
+			QuestionCode:  "q_param_1",
+			QuestionType:  models.GameModeMCQ,
+			TopicID:       topic,
+			Prompt:        "What is Go?",
+			OptionA:       "Language",
+			OptionB:       "Animal",
+			OptionC:       "Car",
+			OptionD:       "Food",
+			CorrectOption: "a",
+			Points:        10,
+			Difficulty:    1,
+		},
+	}
+	_ = config.DB.Create(&questions).Error
+	t.Cleanup(func() {
+		_ = config.DB.Where("topic_id = ?", topic).Delete(&models.Question{}).Error
+	})
+
+	createBody, _ := json.Marshal(dto.CreateSessionRequestDTO{
+		TopicID:       topic,
+		QuestionCount: 1,
+	})
+	createReq, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/quiz/sessions/create", bytes.NewReader(createBody))
+	createReq.Header.Set("Authorization", "Bearer "+token)
+	createReq.Header.Set("Content-Type", "application/json")
+	res, err := http.DefaultClient.Do(createReq)
+	if err != nil {
+		t.Fatalf("failed create session: %v", err)
+	}
+	defer res.Body.Close()
+
+	var createResp struct {
+		Data dto.SessionCreatedResponseDTO `json:"data"`
+	}
+	_ = json.NewDecoder(res.Body).Decode(&createResp)
+	createdSession := createResp.Data.Session
+
+	// Connect using ?sessionId=
+	camelURL := fmt.Sprintf("ws://%s/ws/game?sessionId=%s&token=%s", serverURL.Host, createdSession, token)
+	camelConn, _, err := websocket.DefaultDialer.Dial(camelURL, nil)
+	if err != nil {
+		t.Fatalf("WS dial with ?sessionId= failed: %v", err)
+	}
+	defer camelConn.Close()
+
+	_ = camelConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var qMsg ws.OutboundMessage
+	if err := camelConn.ReadJSON(&qMsg); err != nil {
+		t.Fatalf("Failed to read question on ?sessionId= connection: %v", err)
+	}
+	if qMsg.Type != ws.MsgTypeQuestion {
+		t.Fatalf("Expected 'question' type, got %s", qMsg.Type)
+	}
+}
+
 func TestSuddenDeathSessionContractAndFiltering(t *testing.T) {
 	r, token := setupTestApp(t)
 	topic := "sd-contract-" + uuid.NewString()

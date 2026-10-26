@@ -290,6 +290,101 @@ func GetGameHistoryHandler(c *gin.Context) {
 
 // --- WebSocket Handler ---
 
+// isWebSocketRequest checks if an HTTP request is attempting a WebSocket upgrade.
+func isWebSocketRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket") ||
+		r.Header.Get("Sec-WebSocket-Key") != "" ||
+		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
+}
+
+// WebSocketEchoHandler provides an unauthenticated WebSocket echo and diagnostic endpoint.
+// It verifies edge proxy upgrade forwarding (HTTP 101 Switching Protocols), platform detection,
+// and periodic keep-alive pings on Zoho Catalyst AppSail without requiring a game session.
+// GET /ws/echo or GET /api/v1/ws/echo
+func WebSocketEchoHandler(c *gin.Context) {
+	if isWebSocketRequest(c.Request) {
+		c.Request.Header.Set("Connection", "Upgrade")
+		c.Request.Header.Set("Upgrade", "websocket")
+		if c.Request.Header.Get("Sec-Websocket-Version") == "" {
+			c.Request.Header.Set("Sec-Websocket-Version", "13")
+		}
+	}
+
+	responseHeader := make(http.Header)
+	if clientProtocols := websocket.Subprotocols(c.Request); len(clientProtocols) > 0 {
+		responseHeader.Set("Sec-WebSocket-Protocol", clientProtocols[0])
+	}
+
+	conn, err := wsUpgrader.Upgrade(c.Writer, c.Request, responseHeader)
+	if err != nil {
+		log.Printf("[ws-echo] upgrade failed: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	if tcpConn, ok := conn.UnderlyingConn().(*net.TCPConn); ok {
+		_ = tcpConn.SetNoDelay(true)
+		_ = tcpConn.SetKeepAlive(true)
+		_ = tcpConn.SetKeepAlivePeriod(ws.TCPKeepAlive)
+	}
+
+	conn.SetReadLimit(ws.MaxMessageSize)
+	_ = conn.SetReadDeadline(time.Now().Add(ws.PongWait))
+	conn.SetPongHandler(func(string) error {
+		_ = conn.SetReadDeadline(time.Now().Add(ws.PongWait))
+		return nil
+	})
+
+	// Send initial diagnostic info frame
+	_ = conn.WriteJSON(gin.H{
+		"type": "connected",
+		"data": gin.H{
+			"status":        "ok",
+			"platform":      string(ws.CurrentPlatform),
+			"ping_interval": ws.PingInterval.String(),
+			"pong_wait":     ws.PongWait.String(),
+			"message":       "WebSocket connection established successfully on Zoho Catalyst AppSail",
+		},
+	})
+
+	ticker := time.NewTicker(ws.PingInterval)
+	defer ticker.Stop()
+
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				_ = conn.SetWriteDeadline(time.Now().Add(ws.WriteWait))
+				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+					return
+				}
+			}
+		}
+	}()
+	defer close(done)
+
+	for {
+		msgType, msg, err := conn.ReadMessage()
+		if err != nil {
+			break
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(ws.PongWait))
+		_ = conn.SetWriteDeadline(time.Now().Add(ws.WriteWait))
+		if msgType == websocket.TextMessage {
+			_ = conn.WriteJSON(gin.H{
+				"type": "echo",
+				"data": string(msg),
+			})
+		}
+	}
+}
+
 // WebSocketGameHandler upgrades an HTTP connection to WebSocket and binds
 // the client to a live game session for real-time Sudden Death gameplay.
 // GET /ws/game
@@ -303,6 +398,35 @@ func WebSocketGameHandler(c *gin.Context) {
 
 	sessionID := strings.TrimSpace(c.Query("session_id"))
 	if sessionID == "" {
+		sessionID = strings.TrimSpace(c.Query("sessionId"))
+	}
+	if sessionID == "" {
+		sessionID = strings.TrimSpace(c.Query("session"))
+	}
+	if sessionID == "" {
+		if isWebSocketRequest(c.Request) {
+			responseHeader := make(http.Header)
+			if clientProtocols := websocket.Subprotocols(c.Request); len(clientProtocols) > 0 {
+				responseHeader.Set("Sec-WebSocket-Protocol", clientProtocols[0])
+			}
+			conn, err := wsUpgrader.Upgrade(c.Writer, c.Request, responseHeader)
+			if err == nil {
+				_ = conn.WriteJSON(ws.OutboundMessage{
+					Type: ws.MsgTypeError,
+					Data: map[string]interface{}{
+						"code":    "SESSION_REQUIRED",
+						"message": "Missing session identifier. Supply ?session_id=<UUID> (or ?sessionId=). Initialize a game session first via POST /api/v1/quiz/sessions/create.",
+					},
+				})
+				_ = conn.WriteControl(
+					websocket.CloseMessage,
+					websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "session_id required"),
+					time.Now().Add(2*time.Second),
+				)
+				_ = conn.Close()
+				return
+			}
+		}
 		response.Error(c, http.StatusBadRequest, "session_id query parameter is required")
 		return
 	}
@@ -325,6 +449,29 @@ func WebSocketGameHandler(c *gin.Context) {
 		var err error
 		session, err = repo.GetSessionByID(c.Request.Context(), sessionID)
 		if err != nil {
+			if isWebSocketRequest(c.Request) {
+				responseHeader := make(http.Header)
+				if clientProtocols := websocket.Subprotocols(c.Request); len(clientProtocols) > 0 {
+					responseHeader.Set("Sec-WebSocket-Protocol", clientProtocols[0])
+				}
+				conn, upErr := wsUpgrader.Upgrade(c.Writer, c.Request, responseHeader)
+				if upErr == nil {
+					_ = conn.WriteJSON(ws.OutboundMessage{
+						Type: ws.MsgTypeError,
+						Data: map[string]interface{}{
+							"code":    "SESSION_NOT_FOUND",
+							"message": fmt.Sprintf("Session '%s' not found. It may have expired or been abandoned.", sessionID),
+						},
+					})
+					_ = conn.WriteControl(
+						websocket.CloseMessage,
+						websocket.FormatCloseMessage(websocket.CloseNormalClosure, "Session not found"),
+						time.Now().Add(2*time.Second),
+					)
+					_ = conn.Close()
+					return
+				}
+			}
 			response.Error(c, http.StatusNotFound, "Session not found")
 			return
 		}
@@ -368,19 +515,23 @@ func WebSocketGameHandler(c *gin.Context) {
 		}
 	}
 
-	// Normalize WebSocket handshake headers for edge proxies / gateways (e.g. Zoho Catalyst ZGS,
+	// Normalize WebSocket handshake headers for edge proxies / gateways (e.g. Zoho Catalyst AppSail,
 	// AWS CloudFront, or load balancers that sanitize hop-by-hop Connection headers)
-	if strings.EqualFold(c.Request.Header.Get("Upgrade"), "websocket") || c.Request.Header.Get("Sec-WebSocket-Key") != "" {
-		if !strings.Contains(strings.ToLower(c.Request.Header.Get("Connection")), "upgrade") {
-			c.Request.Header.Set("Connection", "Upgrade")
-		}
-		if c.Request.Header.Get("Upgrade") == "" {
-			c.Request.Header.Set("Upgrade", "websocket")
+	if isWebSocketRequest(c.Request) {
+		c.Request.Header.Set("Connection", "Upgrade")
+		c.Request.Header.Set("Upgrade", "websocket")
+		if c.Request.Header.Get("Sec-Websocket-Version") == "" {
+			c.Request.Header.Set("Sec-Websocket-Version", "13")
 		}
 	}
 
+	responseHeader := make(http.Header)
+	if clientProtocols := websocket.Subprotocols(c.Request); len(clientProtocols) > 0 {
+		responseHeader.Set("Sec-WebSocket-Protocol", clientProtocols[0])
+	}
+
 	// Upgrade to WebSocket
-	conn, err := wsUpgrader.Upgrade(c.Writer, c.Request, nil)
+	conn, err := wsUpgrader.Upgrade(c.Writer, c.Request, responseHeader)
 	if err != nil {
 		log.Printf("[ws] upgrade failed for client %d (Connection=%q, Upgrade=%q, Sec-WS-Key=%q): %v",
 			clientID, c.Request.Header.Get("Connection"), c.Request.Header.Get("Upgrade"), c.Request.Header.Get("Sec-WebSocket-Key"), err)

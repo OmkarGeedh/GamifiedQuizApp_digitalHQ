@@ -58,6 +58,34 @@ func ClientAuthMiddleware(c *gin.Context) {
 	if tokenStr == "" {
 		tokenStr = c.Query("accessToken")
 	}
+	if tokenStr == "" {
+		tokenStr = c.Query("auth_token")
+	}
+	if tokenStr == "" {
+		tokenStr = c.Query("authToken")
+	}
+	if tokenStr == "" {
+		tokenStr = c.Query("jwt")
+	}
+	if tokenStr == "" {
+		// Fallback for browser WebSocket clients passing token in Sec-WebSocket-Protocol
+		if proto := c.GetHeader("Sec-WebSocket-Protocol"); proto != "" {
+			parts := strings.Split(proto, ",")
+			for _, part := range parts {
+				trimmed := strings.TrimSpace(part)
+				if strings.EqualFold(trimmed, "bearer") ||
+					strings.EqualFold(trimmed, "access_token") ||
+					strings.EqualFold(trimmed, "token") ||
+					strings.EqualFold(trimmed, "jwt") {
+					continue
+				}
+				if len(trimmed) > 0 {
+					tokenStr = trimmed
+					break
+				}
+			}
+		}
+	}
 
 	if tokenStr == "" {
 		// No token provided
@@ -111,6 +139,9 @@ func ClientAuthMiddleware(c *gin.Context) {
 	}
 
 	clientIDVal, ok := claims["client_id"]
+	if !ok || clientIDVal == nil {
+		clientIDVal, ok = claims["id"]
+	}
 	if !ok || clientIDVal == nil {
 		ClearClientAuthCookies(c)
 		response.Error(c, http.StatusUnauthorized, "Invalid token payload (client_id missing)")

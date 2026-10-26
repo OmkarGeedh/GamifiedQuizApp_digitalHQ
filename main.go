@@ -148,9 +148,12 @@ func main() {
 	})
 
 	// 6. Start Server with Graceful Shutdown
-	port := os.Getenv("PORT")
+	port := os.Getenv("X_ZOHO_CATALYST_LISTEN_PORT")
 	if port == "" {
-		port = os.Getenv("X_ZOHO_CATALYST_LISTEN_PORT")
+		port = os.Getenv("X_ZOHO_CATALYST_APPSAIL_PORT")
+	}
+	if port == "" {
+		port = os.Getenv("PORT")
 	}
 	if port == "" {
 		port = "8080"
