@@ -1,134 +1,89 @@
-# AGENTS.md
+# AGENTS.md — GamifiedQuizApp_digitalHQ (Go backend)
 
-Single-service Go backend for a gamified MCQ quiz app. Module: `github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ` (Go 1.25). Stack: Gin, GORM, PostgreSQL 16, Redis 7, gorilla/websocket.
+Single-service Go backend for the SkillVerse quiz app. Module `github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ` (Go 1.25). Stack: Gin, GORM, PostgreSQL 18, Redis 7 (optional). Hosted on **Zoho Catalyst AppSail** (Railway is decommissioned; never use `*.up.railway.app`).
 
 ## Commands
 
-There is no `make build` / `make test`. Use Go directly:
-
 ```bash
 go build ./...
-go test ./...
-go test ./internal/services/ -run TestCalculatePoints -v   # single test
+go test ./...                                   # DB-backed tests skip if Postgres is unreachable
+go test ./internal/services/ -run TestCalculatePoints -v
+make run                                        # go run .
+make docker-up / docker-down / docker-logs
 ```
 
-`.github/workflows/go.yml` is the only CI: on push/PR to `main` it runs `go build -v ./...` then `go test -v ./...`. No lint, no formatter, no typecheck step, no pre-commit hooks.
+CI (`.github/workflows/go.yml`): `go build -v ./...` then `go test -v ./...` on push/PR to `main`. No lint step.
 
-`Makefile` targets:
-- `make run` — `go run .`
-- `make docker-up` / `docker-down` / `docker-logs`
-- `make migrate|migrate-down|migrate-reset|migrate-seed|migrate-status` — these `docker compose exec app`, i.e. they **require the stack to already be running**.
-- `make local-migrate|local-seed|local-status` — same actions on the host via `go run ./cmd/migrate -action=...`.
-
-## Current build state
-
-`go build ./...` **fails**; `go test ./...` reports `FAIL internal/mailer [build failed]` and passes every other package. Cause: an uncommitted working-tree edit to `internal/config/config.go` deletes the `SMTPConfig` struct and `Config.SMTP` field, while `internal/mailer/smtp.go:19` and `internal/mailer/smtp_test.go:25` still reference them. The tracked `.env` also lacks the `SMTP_*` keys that `.env.example` and `docker-compose.yml` define.
-
-This reads as in-progress removal of SMTP email delivery. Confirm intent before "fixing" it by rewriting `internal/mailer` — the fix may be to delete the mailer package, not to restore the config.
-
-## Docker: there is no hot reload
-
-`docker-compose.yml` sets `command: ["./bin/server"]`, which **overrides** the Dockerfile's `CMD`. Combined with the `.:/app` bind mount, the container runs the prebuilt binary from your host working tree — not Air, despite the README and the Air install in `Dockerfile`.
-
+### Running DB-backed tests for real
+Handler tests in `internal/handlers` need Postgres (and Redis for logout revocation). Use the migration repo's local stack:
 ```bash
-go build -o bin/server .    # required before make docker-up
-make docker-up
+cd ../SkillVerse-SQL_Migration && POSTGRES_PORT=5434 docker compose up -d postgres
+go run ./cmd/db migrate up -db "postgresql://skillverse:skillverse_secrets@127.0.0.1:5434/gamifiedapp?sslmode=disable"
+go run ./cmd/db seed       -db "<same url>"
+docker run -d --rm --name sv_test_redis -p 6380:6379 redis:7-alpine
+cd ../GamifiedQuizApp_digitalHQ
+DATABASE_URL="<same url>" REDIS_ADDR=127.0.0.1:6380 go test ./... -count=1
 ```
+Tests create their own content via `internal/handlers/content_fixture_test.go` (throwaway subject, removed by cascade). Never point tests at production. Note: `docker compose` in the migration repo reads `DB_URL` from its `.env` (Neon) — pass `-db` explicitly for local runs.
 
-Rebuild and `docker compose restart app` after every code change. `.air.toml` (output `./tmp/main`) and the Air install are dead weight for the compose flow.
+## Database (owned by SkillVerse-SQL_Migration)
 
-## Schema and migrations
+The backend never migrates or seeds. Schema, content CSVs and seeds live in `../SkillVerse-SQL_Migration` (see its AGENTS.md); `make migrate-up && make seed` there.
 
-Database schema, sequenced SQL migrations, and data seeding are managed authoritatively by the **`SkillVerse-SQL_Migration`** repository (`game-db` CLI). The backend repo does not run migrations or seeds on boot.
+Tables: `clients`, `client_profiles`, `client_streak_activities`, `wallet_ledger`, `subjects`, `chapters`, `mcq_questions`, `sudden_death_questions`, `sort_it_out_sets`, `sort_it_out_items`, `match_boards`, `match_pairs`, `user_question_history`, `leaderboard_game_results`. Game sessions live only in Redis (in-memory fallback).
 
-Tables: `clients`, `client_profiles`, `client_streak_activities`, `wallet_ledger`, `subjects`, `chapters`, `mcq_questions`, `sudden_death_questions`, `sort_it_out_sets`, `sort_it_out_items`, `match_boards`, `match_pairs`, `user_question_history`, `leaderboard_game_results`. Game sessions live only in Redis.
+- **Content is read only through views**: `v_mcq_questions`, `v_sudden_death_questions`, `v_sort_it_out_questions`, `v_match_boards`, `v_content_counts`. Models in `internal/models/game_model.go` map to them; never write content with GORM.
+- API `topic_id` / `topic` = `subjects.code` (`accounts`, `economics`, `maths1`, `maths2`). Optional `chapter_no` narrows a session. `GET /subjects` returns subjects → chapters → per-mode counts (learning mode / topic picker).
+- Question codes: `<subject short>-<ch>-<mode>-<n>`, ≤ 20 chars (e.g. `acc11-04-mcq-0012`); unique across all games, so `GetQuestionsByCodes` checks MCQ and Sudden Death views.
+- Sort It Out `pair_type` = set code; Match pair IDs are derived as `<board id>-<pair order>`.
+- `user_question_history.game_mode` is NOT NULL without default — always set `GameMode` on inserts.
+- `leaderboard_game_results` is created by migrations; do not reintroduce `AutoMigrate`.
+- Demo login: `player@example.com` / `secretpassword123` (seeded by the migration repo).
 
-**The backend reads game content only through views** (`v_mcq_questions`, `v_sudden_death_questions`, `v_sort_it_out_questions`, `v_match_boards`, `v_content_counts`); the models in `internal/models/game_model.go` map to those views and must never be written with GORM. `topic_id` in the API = `subjects.code` (`accounts`, `economics`, `maths1`, `maths2`); optional `chapter_no` narrows a session to one chapter; `GET /subjects` lists subjects → chapters → per-mode counts. Match pair IDs are derived (`<board id>-<pair order>`). DB-backed handler tests build their own content with `internal/handlers/content_fixture_test.go`. See `../SkillVerse-SQL_Migration/AGENTS.md` for schema and CSV rules.
+## Game modes and transport
 
-To migrate or seed the database:
-```bash
-cd ../SkillVerse-SQL_Migration
-make migrate-up
-make seed
-```
-Seed credentials: `player@example.com` / `secretpassword123`.
+All gameplay is HTTP. **Zoho Catalyst does not tunnel WebSockets** (101 without `Upgrade`, no frames; see `docs/catalyst_websocket_issue.md`).
 
-## Env loading and separation
+| Mode | Flow |
+|---|---|
+| MCQ | `POST /quiz/sessions/create` → `/quiz/answers/evaluate` → `/quiz/sessions/complete` |
+| Sort It Out | create → `/quiz/sort-it-out/complete` (batch) |
+| Match the Following | create → `/quiz/match-the-following/complete` (batch) |
+| Sudden Death | create → `/quiz/sudden-death/question` → `/answer` / `/power-up` (turns; contract in `docs/sudden_death.md`) |
 
-- `config.LoadEnv()` inspects `ENV` or `APP_ENV` (defaults to `development`) and loads files up to 4 parent directories in priority order: `.env.<env>.local` -> `.env.<env>` -> `.env.local` -> `.env`.
-- Variables already present in the OS/container environment **always take highest precedence** and are never overwritten.
-- `DATABASE_URL` and `REDIS_ADDR` win outright over the discrete `POSTGRES_*` / `REDIS_HOST`+`REDIS_PORT` vars when non-empty.
-- Docker Compose injects its own `DATABASE_URL` pointing at host `postgres`, so a stale `localhost` `DATABASE_URL` in `.env` is overridden inside the container if injected by compose.
-- Use `config.AppConfig.IsProduction()`, `config.AppConfig.IsDevelopment()`, and `config.AppConfig.IsTest()` for environment-conditional behavior.
-- In production (`ENV=production`):
-  - `gin.SetMode(gin.ReleaseMode)` is set automatically.
-  - `seedQuestions()` will **never truncate existing questions** on boot unless `SEED_FORCE_REFRESH=true`.
-  - Demo player (`player@example.com`) is skipped unless `SEED_DEMO_USER=true`.
-  - Auth cookies default to `Secure: true` with strict cookie domain matching.
+Sudden Death HTTP turns live in `internal/ws/turns.go` and return ordered events (`question`, `answer_result`, `power_up_result`, `game_over`, `error`). Timing is server-authoritative via `question_deadline` / `add_time_used` on the cached session (+1 s HTTP grace). Scoring (`scoreAnswer`) and finalization (`finalizeRun`) in `internal/ws/session_handlers.go` are shared with the legacy socket game — keep rules in one place.
 
-## Dual route registration
-
-Every endpoint exists twice: once at the root (`/auth/...`, `/quiz/...`, `/profile/...`, `/wallet/...`) and once under `/api/v1`. Each `Register*Routes` in `internal/routes/` builds routes inside a closure and invokes it twice (`rootGrp := router.Group("")` and `v1Grp := router.Group("/api/v1")`).
-
-Add new endpoints **inside the shared closure** so both prefixes get them. Registering directly on `router` breaks the mirror — `internal/routes/routes_test.go` asserts it. The only exception is the WebSocket route, which is explicitly registered at `/ws/game` and `/api/v1/ws/game`.
-
-The CORS middleware is an inline anonymous func in `main.go` (it also strips trailing slashes to dodge 301/307 drops) and is **duplicated verbatim** in `internal/routes/routes_test.go`. Change both together. `r.HandleMethodNotAllowed = true` plus custom `NoRoute`/`NoMethod` give JSON 404/405 bodies.
-
-## Redis is optional
-
-`config.RedisClient` is a global set in `main.go`. If Redis is unavailable the app still boots, and:
-- signup cooldowns / rate limits / pending signups fall back to the in-memory maps in `internal/services/signup_service.go`
-- `middleware.RateLimit*` becomes a no-op (`config.RedisClient == nil` → `c.Next()`)
-
-Never write code or tests that assume Redis is present. A stale `bin/server` can also be running while you test new code — check the running process.
-
-## Mandatory Infrastructure & Deployment Rules (Learned Rule)
-
-Whenever adding, updating, or planning backend deployment infrastructure (Zoho Catalyst, AWS, GCP, etc.), **never declare deployment ready without auditing the 7 pillars** documented in `docs/deployment_checklist.md`:
-
-0. **Railway Decommissioned**: Railway is no longer used for hosting or staging. The active platform is Zoho Catalyst AppSail (with external PostgreSQL and optional Upstash/in-memory cache). Do not construct Railway URLs or deploy to Railway.
-1. **Database**: External PostgreSQL 16 with `sslmode=require`. Migrations and seeds are strictly owned by `SkillVerse-SQL_Migration` CLI before boot.
-2. **Redis / Cache**: Never assume a cloud platform's built-in cache exposes raw TCP port 6379 (Zoho Catalyst does not; AWS ElastiCache / Upstash do). Always verify `REDIS_URL` with TLS (`rediss://`) or verify that the zero-cost in-memory fallback operates correctly.
-3. **WebSocket Ingress** (Zoho Catalyst AppSail does **not** tunnel WebSockets — verified 2026-10-29; Sudden Death runs over HTTP `POST /quiz/sudden-death/*`, see `docs/catalyst_websocket_issue.md`): Verify the load balancer / edge proxy supports HTTP `Upgrade: websocket` hop-by-hop forwarding (`101 Switching Protocols`). Bypass stateless API Gateways that drop upgrade headers; route directly to the persistent container service. Modern browsers strictly enforce `wss://` on HTTPS domains.
-4. **Proxy Idle Timeouts**: Check host edge proxy idle thresholds (Zoho Catalyst = 30s, AWS ALB = 60s). Server `PingInterval` must be strictly less than the proxy timeout (15s on Catalyst, 54s on AWS). Set `CLOUD_PROVIDER=<zoho|aws|gcp>` or `WS_PING_INTERVAL_SECONDS`.
-5. **Handshake Authentication**: Browsers cannot send custom headers during WebSocket upgrades; accept `token` / `access_token` query parameters. Ensure quiz sessions are initialized via REST before dialing `session_id`.
-6. **Port Binding & Lifecycle**: Bind dynamically to `PORT` / `X_ZOHO_CATALYST_LISTEN_PORT` in < 10 seconds. Handle `SIGTERM` with graceful shutdown.
-7. **Scale-to-Zero State Safety**: If an instance scales down or recycles, ensure active sessions can be recovered cleanly without leaking abandoned sessions.
+`/ws/game` and `/ws/echo` still exist but no client uses them; they are deletion candidates. Don't build new features on WebSockets while hosted on Catalyst.
 
 ## Scoring is deliberately fixed
 
-`docs/points_calculation.md` is the authority. `CalculatePoints(basePoints, difficulty, timeTakenMs, comboStreak)` in `internal/services/game_service.go` **keeps its 4-arg signature but ignores every argument** and returns the `MCQCorrectAnswerPoints` constant. Do not reintroduce speed or combo multipliers.
+`docs/points_calculation.md` is the authority. `CalculatePoints(...)` keeps its 4-arg signature but ignores every argument and returns `MCQCorrectAnswerPoints`. No speed/combo multipliers (Sudden Death's every-3rd-correct +5 streak bonus is the only exception). Coins/XP are awarded only on completion; level-up rewards are a separate event excluded from `xp_awarded` / `coins_awarded`.
 
-Coins and XP are awarded only on session completion (`CalculateGameRewards`), not per answer. Level-up rewards are a separate economy event, excluded from `xp_awarded` / `coins_awarded` and their breakdowns.
+Sessions have a 5-minute inactivity TTL (`services.SessionInactivityTTL`), refreshed on activity.
 
-Quiz sessions have a 5-minute inactivity TTL (`services.SessionInactivityTTL`), refreshed in Redis on activity. `services.StartSessionTTLSweeper`, started from `main.go`, runs every minute and marks stale sessions abandoned with no rewards.
+## Dual route registration
 
-## Layering conventions
+Every endpoint exists at the root and under `/api/v1`: each `Register*Routes` builds routes in a closure invoked for both groups. Add endpoints **inside the closure**; `internal/routes/routes_test.go` asserts the mirror. CORS is an inline func in `main.go` duplicated in `routes_test.go` — change both.
 
-`routes` → `handlers` (HTTP glue only) → `services` (business logic) → `repo` (GORM queries) → `models`.
+## Layering
 
-- Services return `(result, http.Status, error)`. HTTP status codes are decided in the service layer, not the handler.
-- All responses go through `internal/utils/response` (`Success` / `Error` / `ValidationError`), producing `{success, message, data, errors, timestamp}`.
-- Request/response shapes live in `internal/dto` with `Validate()` methods for input.
-- `repo.GetDB()` returns the global `config.DB`.
-- Passwords are `bcrypt(password + PASSWORD_SECRET pepper)` — always go through the pepper.
-- WebSocket auth passes the JWT as a `?token=` query param, not a header.
+`routes` → `handlers` (HTTP glue) → `services` (business logic, return `(result, status, error)`) → `repo` (GORM) → `models`. Responses via `internal/utils/response` (`{success, message, data, errors, timestamp}`). DTOs in `internal/dto` with `Validate()`. Passwords: bcrypt(password + `PASSWORD_SECRET` pepper).
 
-Tests are plain unit tests, no build tags, no DB or Redis fixtures required.
+## Env loading
+
+- `config.LoadEnv()` reads `ENV`/`APP_ENV` (default `development`) and loads `.env.<env>.local` → `.env.<env>` → `.env.local` → `.env`, up to 4 parent dirs. Existing OS env always wins.
+- `DATABASE_URL` / `REDIS_ADDR` override discrete `POSTGRES_*` / `REDIS_HOST`+`REDIS_PORT`.
+- Redis is optional: without it rate limits are no-ops, signup cooldowns/sessions use in-memory maps, and logout token revocation does not work. Never assume Redis in code or tests. On Catalyst with >1 instance, Redis is required for shared session state.
+- Production (`ENV=production`): Gin release mode, secure auth cookies.
+
+## Deployment (Zoho Catalyst AppSail)
+
+Audit `docs/deployment_checklist.md` before calling a deploy ready: external Postgres with `sslmode=require`; Redis via `rediss://` or in-memory fallback; bind `PORT` / `X_ZOHO_CATALYST_LISTEN_PORT` within 10 s; graceful `SIGTERM`; scale-to-zero safe session recovery. Image: `Dockerfile.catalyst`; config: `catalyst.json`; CLI: `catalyst deploy`.
+
+Docker compose has no hot reload: it runs the prebuilt `bin/server`, so `go build -o bin/server .` before `make docker-up` and after every change.
 
 ## Repo hygiene
 
-- **No `.gitignore` exists**, and `.env`, `bin/server` (~48 MB), `tmp/main` (~45 MB), and `.DS_Store` are all tracked. Never use `git add -A`; stage paths explicitly.
-- `.env` is committed and holds real secrets (`JWT_SECRET`, `PASSWORD_SECRET`). Do not paste its contents into commits, PR descriptions, or docs.
-- Work happens on `main` directly.
-- **NEVER run `git push` autonomously** under any circumstances. Always prepare code, show diffs, and let the user review and push manually.
-- `docs/auth.md` is an empty file (0 bytes) despite being linked from the README.
-
-## Stale documentation
-
-The README is out of date in ways that will waste your time:
-- Its Postman walkthrough uses `POST /auth/login/otp` → `/auth/login/verify-otp`. Those routes were **removed**; login is `POST /auth/login` with email + password. `TestLogin_OTPRouteIsRemoved` in `internal/handlers/auth_handler_test.go` asserts they 404.
-- It claims the compose stack runs with Air live reload (see Docker section above).
-- It references a `postman/` directory; the actual directory is `Postman/`.
-
-`Postman/README.md` also describes speed and combo scoring multipliers that the backend no longer implements.
+- No `.gitignore`: `.env` (real secrets), `bin/server`, `tmp/main`, `.DS_Store` are tracked. Never `git add -A`; stage paths explicitly and never paste `.env` contents anywhere.
+- Work on `main`. **Never `git push`**; the user reviews and pushes.
+- README/Postman are partly stale: OTP login routes were removed (`POST /auth/login` with email+password); Postman describes old scoring multipliers.
