@@ -2,8 +2,6 @@ package services
 
 import (
 	"context"
-	"encoding/json"
-	"os"
 	"testing"
 	"time"
 
@@ -379,48 +377,6 @@ func TestGradeAnswer_MultiLayeredEvaluation(t *testing.T) {
 	})
 }
 
-func TestSuddenDeathSeedQuestionsEnforceTwoOptionContract(t *testing.T) {
-	raw, err := os.ReadFile("../data/seed_questions.json")
-	if err != nil {
-		t.Fatalf("read seed data: %v", err)
-	}
-	type seedQuestion struct {
-		models.Question
-		CorrectOption string `json:"correct_option"`
-	}
-	var all []seedQuestion
-	if err := json.Unmarshal(raw, &all); err != nil {
-		t.Fatalf("decode seed data: %v", err)
-	}
-	suddenDeath := make([]models.Question, 0, 10)
-	for _, q := range all {
-		if q.QuestionType == models.GameModeSuddenDeath {
-			q.Question.CorrectOption = q.CorrectOption
-			suddenDeath = append(suddenDeath, q.Question)
-		}
-	}
-	if len(suddenDeath) != 10 {
-		t.Fatalf("expected 10 Sudden Death seed questions, got %d", len(suddenDeath))
-	}
-	if err := ValidateSuddenDeathQuestions(suddenDeath); err != nil {
-		t.Fatalf("invalid Sudden Death seed contract: %v", err)
-	}
-	for _, q := range suddenDeath {
-		sq := ShuffleQuestion(q)
-		correct, _, _ := GradeAnswer(&sq, nil, sq.CorrectOption, "")
-		if !correct {
-			t.Fatalf("%s: shuffled correct slot %s was rejected", q.QuestionCode, sq.CorrectOption)
-		}
-		wrong := "a"
-		if sq.CorrectOption == "a" {
-			wrong = "b"
-		}
-		if accepted, _, _ := GradeAnswer(&sq, nil, wrong, sq.CorrectText); accepted {
-			t.Fatalf("%s: wrong served slot %s bypassed grading", q.QuestionCode, wrong)
-		}
-	}
-}
-
 func TestCheckAndAbandonIfExpired(t *testing.T) {
 	ctx := context.Background()
 
@@ -760,70 +716,6 @@ func TestGameSessionIsSortItOut(t *testing.T) {
 	}
 }
 
-func TestSortItOutSeedQuestionsConsistency(t *testing.T) {
-	raw, err := os.ReadFile("../data/seed_questions.json")
-	if err != nil {
-		t.Fatalf("failed to read seed_questions.json: %v", err)
-	}
-
-	type seedItem struct {
-		models.Question
-		CorrectOption string `json:"correct_option"`
-		PairType      string `json:"pair_type"`
-	}
-
-	var all []seedItem
-	if err := json.Unmarshal(raw, &all); err != nil {
-		t.Fatalf("failed to unmarshal seed_questions.json: %v", err)
-	}
-
-	sortItOutQuestions := make([]seedItem, 0)
-	for _, item := range all {
-		if item.QuestionType == models.GameModeSortItOut {
-			sortItOutQuestions = append(sortItOutQuestions, item)
-		}
-	}
-
-	if len(sortItOutQuestions) < 30 {
-		t.Fatalf("expected at least 30 sort_it_out seed questions, got %d", len(sortItOutQuestions))
-	}
-
-	pairCounts := make(map[string]int)
-	for _, q := range sortItOutQuestions {
-		pairCounts[q.PairType]++
-		corr := q.CorrectOption
-		if corr != "a" && corr != "b" {
-			t.Fatalf("question %s correct_option must be 'a' or 'b', got '%s'", q.QuestionCode, corr)
-		}
-		switch q.PairType {
-		case "credit_debit":
-			if q.OptionA != "Debit" || q.OptionB != "Credit" {
-				t.Fatalf("question %s pair credit_debit must have OptionA=Debit and OptionB=Credit", q.QuestionCode)
-			}
-		case "asset_liability":
-			if q.OptionA != "Asset" || q.OptionB != "Liability" {
-				t.Fatalf("question %s pair asset_liability must have OptionA=Asset and OptionB=Liability", q.QuestionCode)
-			}
-		case "true_false":
-			if q.OptionA != "True" || q.OptionB != "False" {
-				t.Fatalf("question %s pair true_false must have OptionA=True and OptionB=False", q.QuestionCode)
-			}
-		default:
-			t.Fatalf("unknown pair_type '%s' for question %s", q.PairType, q.QuestionCode)
-		}
-	}
-
-	if pairCounts["credit_debit"] < 10 {
-		t.Errorf("expected at least 10 credit_debit questions, got %d", pairCounts["credit_debit"])
-	}
-	if pairCounts["asset_liability"] < 10 {
-		t.Errorf("expected at least 10 asset_liability questions, got %d", pairCounts["asset_liability"])
-	}
-	if pairCounts["true_false"] < 10 {
-		t.Errorf("expected at least 10 true_false questions, got %d", pairCounts["true_false"])
-	}
-}
-
 func TestCalculateMatchBoardPoints(t *testing.T) {
 	tests := []struct {
 		name                   string
@@ -978,73 +870,3 @@ func TestGameSessionIsMatchTheFollowing(t *testing.T) {
 		t.Fatal("expected nil session IsMatchTheFollowing() to return false")
 	}
 }
-
-func TestMatchTheFollowingSeedQuestionsConsistency(t *testing.T) {
-	raw, err := os.ReadFile("../data/seed_questions.json")
-	if err != nil {
-		t.Fatalf("failed to read seed_questions.json: %v", err)
-	}
-
-	type seedPair struct {
-		PairOrder int    `json:"pair_order"`
-		LeftText  string `json:"left_text"`
-		RightText string `json:"right_text"`
-	}
-
-	type seedItem struct {
-		models.Question
-		MatchPairs []seedPair `json:"match_pairs"`
-	}
-
-	var all []seedItem
-	if err := json.Unmarshal(raw, &all); err != nil {
-		t.Fatalf("failed to unmarshal seed_questions.json: %v", err)
-	}
-
-	var matchBoards []seedItem
-	for _, item := range all {
-		if item.QuestionType == models.GameModeMatchTheFollowing {
-			matchBoards = append(matchBoards, item)
-		}
-	}
-
-	if len(matchBoards) < 10 {
-		t.Fatalf("expected at least 10 match_the_following boards, got %d", len(matchBoards))
-	}
-
-	for _, b := range matchBoards {
-		if len(b.MatchPairs) != 4 {
-			t.Fatalf("board %s must have exactly 4 match pairs, got %d", b.QuestionCode, len(b.MatchPairs))
-		}
-		for i, p := range b.MatchPairs {
-			expectedOrder := i + 1
-			if p.PairOrder != expectedOrder {
-				t.Fatalf("board %s pair %d order expected %d, got %d", b.QuestionCode, i, expectedOrder, p.PairOrder)
-			}
-			if p.LeftText == "" || p.RightText == "" {
-				t.Fatalf("board %s pair %d must have non-empty left and right text", b.QuestionCode, i)
-			}
-		}
-	}
-}
-
-func BenchmarkGradeAnswer_RAM(b *testing.B) {
-	sq := models.SessionQuestion{
-		QuestionCode:  "Q100",
-		CorrectOption: "b",
-		OptionA:       "First",
-		OptionB:       "Second",
-		OptionC:       "Third",
-		OptionD:       "Fourth",
-	}
-	b.ResetTimer()
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		isCorrect, _, _ := GradeAnswer(&sq, nil, "b", "Second")
-		if !isCorrect {
-			b.Fatal("expected correct")
-		}
-	}
-}
-
-

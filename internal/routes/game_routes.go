@@ -31,6 +31,7 @@ func RegisterGameRoutes(router *gin.Engine) {
 	v1 := router.Group("/api/v1", middleware.ClientAuthMiddleware)
 	{
 		v1.GET("/topics/:topic_id/questions", handlers.GetTopicQuestionsHandler)
+		v1.GET("/subjects", handlers.GetSubjectsHandler)
 		v1Quiz := v1.Group("/quiz")
 		registerQuizRoutes(v1Quiz)
 	}
@@ -39,6 +40,7 @@ func RegisterGameRoutes(router *gin.Engine) {
 	root := router.Group("", middleware.ClientAuthMiddleware)
 	{
 		root.GET("/topics/:topic_id/questions", handlers.GetTopicQuestionsHandler)
+		root.GET("/subjects", handlers.GetSubjectsHandler)
 		rootQuiz := root.Group("/quiz")
 		registerQuizRoutes(rootQuiz)
 	}

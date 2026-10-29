@@ -158,8 +158,8 @@ func TestRouteRegistrationBothPrefixes(t *testing.T) {
 		}
 	}
 
-	// Test leaderboard endpoint exists under both /leaderboard and /api/v1/leaderboard (not 404)
-	for _, path := range []string{"/leaderboard", "/api/v1/leaderboard"} {
+	// Authenticated GET endpoints exist under both prefixes and reject anonymous calls with 401
+	for _, path := range []string{"/leaderboard", "/api/v1/leaderboard", "/subjects", "/api/v1/subjects"} {
 		req, _ := http.NewRequest(http.MethodGet, path, nil)
 		req.Header.Set("Origin", "http://localhost:3000")
 		w := httptest.NewRecorder()

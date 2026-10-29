@@ -151,7 +151,7 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 	if req.GameMode == models.GameModeSortItOut {
 		pairType := req.PairType
 		if pairType == "" {
-			pairTypes, err := repo.GetDistinctPairTypes(ctx, req.TopicID, models.GameModeSortItOut)
+			pairTypes, err := repo.GetDistinctPairTypes(ctx, req.TopicID, req.ChapterNo)
 			if err != nil {
 				return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch pair types: %w", err)
 			}
@@ -179,7 +179,7 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 				req.QuestionCount = 10
 			}
 			var err error
-			questions, err = repo.GetSortItOutQuestions(ctx, req.TopicID, pairType, req.QuestionCount)
+			questions, err = repo.GetSortItOutQuestions(ctx, req.TopicID, req.ChapterNo, pairType, req.QuestionCount)
 			if err != nil {
 				return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch questions: %w", err)
 			}
@@ -242,6 +242,7 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 		session := &models.GameSession{
 			ClientID:       clientID,
 			TopicID:        req.TopicID,
+			ChapterNo:      req.ChapterNo,
 			GameMode:       req.GameMode,
 			PairType:       pairType,
 			TotalQuestions: len(sessionQuestions),
@@ -284,7 +285,7 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 				req.QuestionCount = 10
 			}
 			var err error
-			questions, err = repo.GetMatchTheFollowingQuestions(ctx, req.TopicID, req.QuestionCount)
+			questions, err = repo.GetMatchTheFollowingQuestions(ctx, req.TopicID, req.ChapterNo, req.QuestionCount)
 			if err != nil {
 				return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch questions: %w", err)
 			}
@@ -304,7 +305,7 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 			timeLimitPerQuestion = 25
 		}
 
-		questionIDs := make([]string, len(questions))
+		questionIDs := make([]int, len(questions))
 		for i, q := range questions {
 			questionIDs[i] = q.ID
 		}
@@ -367,6 +368,7 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 		session := &models.GameSession{
 			ClientID:       clientID,
 			TopicID:        req.TopicID,
+			ChapterNo:      req.ChapterNo,
 			GameMode:       req.GameMode,
 			TotalQuestions: len(sessionQuestions),
 			Status:         models.SessionStatusInProgress,
@@ -397,7 +399,7 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 	}
 
 	// Validate topic has enough questions
-	count, err := repo.CountQuestionsByTopicAndMode(ctx, req.TopicID, targetType)
+	count, err := repo.CountQuestionsByTopicAndMode(ctx, req.TopicID, req.ChapterNo, targetType)
 	if err != nil {
 		return nil, http.StatusInternalServerError, fmt.Errorf("failed to check question count: %w", err)
 	}
@@ -429,7 +431,7 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 	}
 	if len(questions) == 0 {
 		var err error
-		questions, err = repo.GetQuestionsByTopicAndMode(ctx, req.TopicID, targetType, req.QuestionCount)
+		questions, err = repo.GetQuestionsByTopicAndMode(ctx, req.TopicID, req.ChapterNo, targetType, req.QuestionCount)
 		if err != nil {
 			return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch questions: %w", err)
 		}
@@ -460,6 +462,7 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 	session := &models.GameSession{
 		ClientID:       clientID,
 		TopicID:        req.TopicID,
+		ChapterNo:      req.ChapterNo,
 		GameMode:       req.GameMode,
 		TotalQuestions: len(sessionQuestions),
 		Status:         models.SessionStatusInProgress,
@@ -1893,7 +1896,7 @@ func GetTopicQuestions(ctx context.Context, topicID string, limit int) (*dto.Top
 	if limit > 50 {
 		limit = 50
 	}
-	questions, err := repo.GetQuestionsByTopic(ctx, topicID, limit)
+	questions, err := repo.GetQuestionsByTopic(ctx, topicID, 0, limit)
 	if err != nil {
 		return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch questions: %w", err)
 	}
@@ -1919,4 +1922,24 @@ func GetTopicQuestions(ctx context.Context, topicID string, limit int) (*dto.Top
 		TimeLimitPerQuestionSec: DefaultTimeLimitSec,
 		Questions:               questionDTOs,
 	}, http.StatusOK, nil
+}
+
+// GetSubjects groups v_content_counts into subjects -> chapters -> per-mode counts.
+func GetSubjects(ctx context.Context) ([]dto.SubjectDTO, int, error) {
+	rows, err := repo.GetContentCounts(ctx)
+	if err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch subjects: %w", err)
+	}
+	subjects := []dto.SubjectDTO{}
+	for _, r := range rows {
+		if n := len(subjects); n == 0 || subjects[n-1].TopicID != r.TopicID {
+			subjects = append(subjects, dto.SubjectDTO{TopicID: r.TopicID, Name: r.SubjectName, Grade: r.Grade})
+		}
+		s := &subjects[len(subjects)-1]
+		if n := len(s.Chapters); n == 0 || s.Chapters[n-1].ChapterNo != r.ChapterNo {
+			s.Chapters = append(s.Chapters, dto.ChapterDTO{ChapterNo: r.ChapterNo, Title: r.ChapterTitle, Counts: map[string]int{}})
+		}
+		s.Chapters[len(s.Chapters)-1].Counts[r.GameMode] = r.QuestionCount
+	}
+	return subjects, http.StatusOK, nil
 }

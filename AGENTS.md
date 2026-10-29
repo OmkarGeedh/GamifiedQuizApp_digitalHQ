@@ -41,7 +41,9 @@ Rebuild and `docker compose restart app` after every code change. `.air.toml` (o
 
 Database schema, sequenced SQL migrations, and data seeding are managed authoritatively by the **`SkillVerse-SQL_Migration`** repository (`game-db` CLI). The backend repo does not run migrations or seeds on boot.
 
-Managed tables: `clients`, `client_profiles`, `client_streak_activities`, `mcq_questions`, `sort_it_out_questions`, `match_the_following_questions`, `match_pairs`, `user_question_history`, `wallet_ledger`. (Note: `game_sessions` table has been dropped in favor of ephemeral Redis sliding-TTL sessions).
+Tables: `clients`, `client_profiles`, `client_streak_activities`, `wallet_ledger`, `subjects`, `chapters`, `mcq_questions`, `sudden_death_questions`, `sort_it_out_sets`, `sort_it_out_items`, `match_boards`, `match_pairs`, `user_question_history`, `leaderboard_game_results`. Game sessions live only in Redis.
+
+**The backend reads game content only through views** (`v_mcq_questions`, `v_sudden_death_questions`, `v_sort_it_out_questions`, `v_match_boards`, `v_content_counts`); the models in `internal/models/game_model.go` map to those views and must never be written with GORM. `topic_id` in the API = `subjects.code` (`accounts`, `economics`, `maths1`, `maths2`); optional `chapter_no` narrows a session to one chapter; `GET /subjects` lists subjects → chapters → per-mode counts. Match pair IDs are derived (`<board id>-<pair order>`). DB-backed handler tests build their own content with `internal/handlers/content_fixture_test.go`. See `../SkillVerse-SQL_Migration/AGENTS.md` for schema and CSV rules.
 
 To migrate or seed the database:
 ```bash

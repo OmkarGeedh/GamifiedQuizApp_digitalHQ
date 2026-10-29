@@ -13,9 +13,36 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// --- O(1) Indexed Question Sampling & Retrieval ---
+// --- Question Sampling & Retrieval (reads the v_* content views) ---
 
-// sampleRandomCodes takes a slice of question codes and returns up to limit randomly chosen codes in Go memory (O(N) shuffle).
+// questionView maps an MCQ-family game mode to its read view.
+func questionView(mode string) string {
+	if mode == models.GameModeSuddenDeath {
+		return "v_sudden_death_questions"
+	}
+	return "v_mcq_questions"
+}
+
+// scope narrows a content view query to a subject (topic_id) and, when > 0, a chapter.
+func scope(q *gorm.DB, topicID string, chapterNo int) *gorm.DB {
+	if topicID != "" {
+		q = q.Where("topic_id = ?", topicID)
+	}
+	if chapterNo > 0 {
+		q = q.Where("chapter_no = ?", chapterNo)
+	}
+	return q
+}
+
+// cacheScope is the Redis code-pool key segment for a subject/chapter.
+func cacheScope(topicID string, chapterNo int) string {
+	if chapterNo > 0 {
+		return fmt.Sprintf("%s:ch%d", topicID, chapterNo)
+	}
+	return topicID
+}
+
+// sampleRandomCodes returns up to limit randomly chosen codes.
 func sampleRandomCodes(codes []string, limit int) []string {
 	if len(codes) <= limit {
 		return codes
@@ -29,75 +56,40 @@ func sampleRandomCodes(codes []string, limit int) []string {
 	return shuffled[:limit]
 }
 
-// GetQuestionsByTopic fetches random questions for a given topic from mcq_questions.
-// Checks Redis topic question code pool first (< 0.2ms), falling back to index-only scan.
-func GetQuestionsByTopic(ctx context.Context, topicID string, limit int) ([]models.Question, error) {
-	if cachedCodes, ok := cache.GetCachedQuestionCodes(ctx, topicID, models.GameModeMCQ); ok && len(cachedCodes) >= limit {
-		sampledCodes := sampleRandomCodes(cachedCodes, limit)
-		return GetQuestionsByCodes(ctx, sampledCodes)
+// GetQuestionsByTopic fetches random MCQ questions for a subject (and optional chapter).
+func GetQuestionsByTopic(ctx context.Context, topicID string, chapterNo, limit int) ([]models.Question, error) {
+	return GetQuestionsByTopicAndMode(ctx, topicID, chapterNo, models.GameModeMCQ, limit)
+}
+
+// GetQuestionsByTopicAndMode samples question codes from the mode's view (Redis code pool
+// first, then an index-only scan) and loads the sampled rows.
+func GetQuestionsByTopicAndMode(ctx context.Context, topicID string, chapterNo int, mode string, limit int) ([]models.Question, error) {
+	if mode != models.GameModeSuddenDeath {
+		mode = models.GameModeMCQ
+	}
+	key := cacheScope(topicID, chapterNo)
+	if cachedCodes, ok := cache.GetCachedQuestionCodes(ctx, key, mode); ok && len(cachedCodes) >= limit {
+		return GetQuestionsByCodes(ctx, sampleRandomCodes(cachedCodes, limit))
 	}
 
 	db := GetDB()
 	if db == nil {
 		return nil, nil
 	}
-
 	var codes []string
-	err := db.WithContext(ctx).
-		Model(&models.MCQQuestion{}).
-		Where("topic_id = ? AND (question_type = ? OR question_type = '' OR question_type IS NULL)", topicID, models.GameModeMCQ).
-		Pluck("question_code", &codes).Error
-	if err != nil {
+	if err := scope(db.WithContext(ctx).Table(questionView(mode)), topicID, chapterNo).
+		Pluck("question_code", &codes).Error; err != nil {
 		return nil, err
 	}
 	if len(codes) == 0 {
 		return nil, nil
 	}
-
-	_ = cache.SetCachedQuestionCodes(ctx, topicID, models.GameModeMCQ, codes)
-	sampledCodes := sampleRandomCodes(codes, limit)
-	return GetQuestionsByCodes(ctx, sampledCodes)
+	_ = cache.SetCachedQuestionCodes(ctx, key, mode, codes)
+	return GetQuestionsByCodes(ctx, sampleRandomCodes(codes, limit))
 }
 
-// GetQuestionsByTopicAndMode fetches random questions for a given topic and question_type.
-func GetQuestionsByTopicAndMode(ctx context.Context, topicID string, questionType string, limit int) ([]models.Question, error) {
-	if questionType == "" {
-		return GetQuestionsByTopic(ctx, topicID, limit)
-	}
-
-	if cachedCodes, ok := cache.GetCachedQuestionCodes(ctx, topicID, questionType); ok && len(cachedCodes) >= limit {
-		sampledCodes := sampleRandomCodes(cachedCodes, limit)
-		return GetQuestionsByCodes(ctx, sampledCodes)
-	}
-
-	db := GetDB()
-	if db == nil {
-		return nil, nil
-	}
-
-	var codes []string
-	err := db.WithContext(ctx).
-		Model(&models.MCQQuestion{}).
-		Where("topic_id = ? AND question_type = ?", topicID, questionType).
-		Pluck("question_code", &codes).Error
-	if err != nil {
-		return nil, err
-	}
-
-	if len(codes) == 0 && questionType != models.GameModeSuddenDeath {
-		return GetQuestionsByTopic(ctx, topicID, limit)
-	}
-	if len(codes) == 0 {
-		return nil, nil
-	}
-
-	_ = cache.SetCachedQuestionCodes(ctx, topicID, questionType, codes)
-	sampledCodes := sampleRandomCodes(codes, limit)
-	return GetQuestionsByCodes(ctx, sampledCodes)
-}
-
-// GetQuestionsByCodes fetches questions matching the specified question codes from mcq_questions,
-// preserving the caller's requested order.
+// GetQuestionsByCodes loads MCQ and Sudden Death questions by code, preserving the
+// requested order. Codes are unique across both views (mode tag inside the code).
 func GetQuestionsByCodes(ctx context.Context, codes []string) ([]models.Question, error) {
 	if len(codes) == 0 {
 		return nil, nil
@@ -106,115 +98,97 @@ func GetQuestionsByCodes(ctx context.Context, codes []string) ([]models.Question
 	if db == nil {
 		return nil, nil
 	}
-
-	var questions []models.MCQQuestion
-	err := db.WithContext(ctx).
-		Where("question_code IN ?", codes).
-		Find(&questions).Error
-	if err != nil {
-		return nil, err
-	}
-
-	questionMap := make(map[string]models.MCQQuestion, len(questions))
-	for _, q := range questions {
-		questionMap[q.QuestionCode] = q
+	byCode := make(map[string]models.Question, len(codes))
+	for _, mode := range []string{models.GameModeMCQ, models.GameModeSuddenDeath} {
+		var rows []models.Question
+		if err := db.WithContext(ctx).Table(questionView(mode)).
+			Where("question_code IN ?", codes).Find(&rows).Error; err != nil {
+			return nil, err
+		}
+		for _, q := range rows {
+			q.QuestionType = mode
+			byCode[q.QuestionCode] = q
+		}
 	}
 	ordered := make([]models.Question, 0, len(codes))
 	for _, code := range codes {
-		if q, ok := questionMap[code]; ok {
+		if q, ok := byCode[code]; ok {
 			ordered = append(ordered, q)
 		}
 	}
 	return ordered, nil
 }
 
-// GetQuestionByCode fetches a single question by its unique code from mcq_questions.
+// GetQuestionByCode fetches a single MCQ or Sudden Death question by code.
 func GetQuestionByCode(ctx context.Context, code string) (*models.Question, error) {
-	db := GetDB()
-	if db == nil {
-		return nil, gorm.ErrRecordNotFound
-	}
-	var q models.MCQQuestion
-	err := db.WithContext(ctx).
-		Where("question_code = ?", code).
-		First(&q).Error
+	qs, err := GetQuestionsByCodes(ctx, []string{code})
 	if err != nil {
 		return nil, err
 	}
-	return &q, nil
+	if len(qs) == 0 {
+		return nil, gorm.ErrRecordNotFound
+	}
+	return &qs[0], nil
 }
 
-// GetAvailableTopics returns distinct topic IDs with question counts from mcq_questions.
-// Protected by SingleFlight and cached in Redis for 1 hour.
-func GetAvailableTopics(ctx context.Context) ([]map[string]interface{}, error) {
-	// 1. Check Redis cache first (< 0.2ms)
-	if cached, ok := cache.GetCachedTopics(ctx); ok && len(cached) > 0 {
-		return cached, nil
-	}
-
-	// 2. Coalesce concurrent requests into a single database execution
-	val, err, _ := cache.RequestGroup.Do("get_available_topics", func() (interface{}, error) {
-		// Double-check cache inside mutex
-		if cached, ok := cache.GetCachedTopics(ctx); ok && len(cached) > 0 {
-			return cached, nil
-		}
+// GetContentCounts returns per subject/chapter/mode question counts, cached for an hour.
+func GetContentCounts(ctx context.Context) ([]models.ContentCount, error) {
+	val, err, _ := cache.RequestGroup.Do("content_counts", func() (interface{}, error) {
 		db := GetDB()
 		if db == nil {
-			return []map[string]interface{}{}, nil
+			return []models.ContentCount{}, nil
 		}
-		var results []map[string]interface{}
+		var rows []models.ContentCount
 		err := db.WithContext(ctx).
-			Model(&models.MCQQuestion{}).
-			Select("topic_id, COUNT(*) as count").
-			Group("topic_id").
-			Order("topic_id ASC").
-			Find(&results).Error
-		if err == nil && len(results) > 0 {
-			_ = cache.SetCachedTopics(ctx, results)
-		}
-		return results, err
+			Order("sort_order, topic_id, chapter_no, game_mode").
+			Find(&rows).Error
+		return rows, err
 	})
 	if err != nil {
 		return nil, err
 	}
-	return val.([]map[string]interface{}), nil
+	return val.([]models.ContentCount), nil
 }
 
-// CountQuestionsByTopic returns the number of questions for a topic in mcq_questions.
-func CountQuestionsByTopic(ctx context.Context, topicID string) (int64, error) {
-	db := GetDB()
-	if db == nil {
-		return 0, nil
+// GetAvailableTopics returns each subject with its MCQ question count.
+func GetAvailableTopics(ctx context.Context) ([]map[string]interface{}, error) {
+	if cached, ok := cache.GetCachedTopics(ctx); ok && len(cached) > 0 {
+		return cached, nil
 	}
-	var count int64
-	err := db.WithContext(ctx).
-		Model(&models.MCQQuestion{}).
-		Where("topic_id = ? AND (question_type = ? OR question_type = '' OR question_type IS NULL)", topicID, models.GameModeMCQ).
-		Count(&count).Error
-	return count, err
-}
-
-// CountQuestionsByTopicAndMode returns the number of questions for a topic and mode.
-func CountQuestionsByTopicAndMode(ctx context.Context, topicID string, questionType string) (int64, error) {
-	if questionType == "" {
-		return CountQuestionsByTopic(ctx, topicID)
-	}
-	db := GetDB()
-	if db == nil {
-		return 0, nil
-	}
-	var count int64
-	err := db.WithContext(ctx).
-		Model(&models.MCQQuestion{}).
-		Where("topic_id = ? AND question_type = ?", topicID, questionType).
-		Count(&count).Error
+	rows, err := GetContentCounts(ctx)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	if count == 0 && questionType != models.GameModeSuddenDeath {
-		return CountQuestionsByTopic(ctx, topicID)
+	counts := map[string]int{}
+	var order []string
+	for _, r := range rows {
+		if r.GameMode != models.GameModeMCQ {
+			continue
+		}
+		if _, ok := counts[r.TopicID]; !ok {
+			order = append(order, r.TopicID)
+		}
+		counts[r.TopicID] += r.QuestionCount
 	}
-	return count, nil
+	results := make([]map[string]interface{}, 0, len(order))
+	for _, t := range order {
+		results = append(results, map[string]interface{}{"topic_id": t, "count": counts[t]})
+	}
+	if len(results) > 0 {
+		_ = cache.SetCachedTopics(ctx, results)
+	}
+	return results, nil
+}
+
+// CountQuestionsByTopicAndMode counts MCQ or Sudden Death questions in a subject/chapter.
+func CountQuestionsByTopicAndMode(ctx context.Context, topicID string, chapterNo int, mode string) (int64, error) {
+	db := GetDB()
+	if db == nil {
+		return 0, nil
+	}
+	var count int64
+	err := scope(db.WithContext(ctx).Table(questionView(mode)), topicID, chapterNo).Count(&count).Error
+	return count, err
 }
 
 // --- Ephemeral Session Repository (Pure In-Memory & Redis RAM) ---
@@ -502,28 +476,6 @@ func FinalizeSession(ctx context.Context, session *models.GameSession, coins, xp
 	return nil
 }
 
-// --- Seed Helpers ---
-
-// BulkInsertQuestions inserts a batch of questions into mcq_questions.
-func BulkInsertQuestions(ctx context.Context, questions []models.MCQQuestion) error {
-	db := GetDB()
-	if db == nil {
-		return nil
-	}
-	return db.WithContext(ctx).CreateInBatches(questions, 50).Error
-}
-
-// QuestionCount returns the total number of questions in mcq_questions.
-func QuestionCount(ctx context.Context) (int64, error) {
-	db := GetDB()
-	if db == nil {
-		return 0, nil
-	}
-	var count int64
-	err := db.WithContext(ctx).Model(&models.MCQQuestion{}).Count(&count).Error
-	return count, err
-}
-
 // UpdateProfileLevel updates only the level column on the player's profile.
 func UpdateProfileLevel(ctx context.Context, clientID, newLevel int) error {
 	db := GetDB()
@@ -534,56 +486,6 @@ func UpdateProfileLevel(ctx context.Context, clientID, newLevel int) error {
 		Table("client_profiles").
 		Where("client_id = ?", clientID).
 		Update("level", newLevel).Error
-}
-
-// --- Sort It Out Helpers ---
-
-// GetDistinctPairTypes fetches available pair types from sort_it_out_questions.
-func GetDistinctPairTypes(ctx context.Context, topicID, mode string) ([]string, error) {
-	db := GetDB()
-	if db == nil {
-		return nil, nil
-	}
-	var pairTypes []string
-	query := db.WithContext(ctx).
-		Model(&models.SortItOutQuestion{}).
-		Where("pair_type IS NOT NULL AND pair_type != ''")
-	if topicID != "" {
-		query = query.Where("topic_id = ?", topicID)
-	}
-	err := query.Distinct("pair_type").Pluck("pair_type", &pairTypes).Error
-	return pairTypes, err
-}
-
-// GetSortItOutQuestions fetches questions from sort_it_out_questions using O(1) indexed code sampling.
-func GetSortItOutQuestions(ctx context.Context, topicID, pairType string, limit int) ([]models.SortItOutQuestion, error) {
-	db := GetDB()
-	if db == nil {
-		return nil, nil
-	}
-
-	query := db.WithContext(ctx).Model(&models.SortItOutQuestion{})
-	if topicID != "" {
-		query = query.Where("topic_id = ?", topicID)
-	}
-	if pairType != "" {
-		query = query.Where("pair_type = ?", pairType)
-	}
-
-	var codes []string
-	if err := query.Pluck("question_code", &codes).Error; err != nil {
-		return nil, err
-	}
-	if len(codes) == 0 {
-		return nil, nil
-	}
-
-	sampledCodes := sampleRandomCodes(codes, limit)
-	var questions []models.SortItOutQuestion
-	err := db.WithContext(ctx).
-		Where("question_code IN ?", sampledCodes).
-		Find(&questions).Error
-	return questions, err
 }
 
 // RecordBatchAnswers performs efficient batch insertion into user_question_history.
@@ -598,45 +500,45 @@ func RecordBatchAnswers(ctx context.Context, history []*models.UserQuestionHisto
 	return db.WithContext(ctx).CreateInBatches(history, 50).Error
 }
 
-// --- Match the Following Helpers ---
+// --- Sort It Out ---
 
-// GetMatchPairsByQuestionIDs fetches all pairs belonging to the given question IDs, ordered by pair_order ASC.
-func GetMatchPairsByQuestionIDs(ctx context.Context, questionIDs []string) (map[string][]models.MatchPair, error) {
-	result := make(map[string][]models.MatchPair)
-	if len(questionIDs) == 0 {
-		return result, nil
-	}
+// GetDistinctPairTypes returns the sort set codes available in a subject/chapter.
+func GetDistinctPairTypes(ctx context.Context, topicID string, chapterNo int) ([]string, error) {
 	db := GetDB()
 	if db == nil {
-		return result, nil
+		return nil, nil
 	}
-	var pairs []models.MatchPair
-	err := db.WithContext(ctx).
-		Where("question_id IN ?", questionIDs).
-		Order("pair_order ASC").
-		Find(&pairs).Error
-	if err != nil {
+	var pairTypes []string
+	err := scope(db.WithContext(ctx).Model(&models.SortItOutQuestion{}), topicID, chapterNo).
+		Distinct("pair_type").Pluck("pair_type", &pairTypes).Error
+	return pairTypes, err
+}
+
+// GetSortItOutQuestions samples up to limit items from a subject/chapter, optionally one set.
+func GetSortItOutQuestions(ctx context.Context, topicID string, chapterNo int, pairType string, limit int) ([]models.SortItOutQuestion, error) {
+	db := GetDB()
+	if db == nil {
+		return nil, nil
+	}
+	query := scope(db.WithContext(ctx).Model(&models.SortItOutQuestion{}), topicID, chapterNo)
+	if pairType != "" {
+		query = query.Where("pair_type = ?", pairType)
+	}
+	var codes []string
+	if err := query.Pluck("question_code", &codes).Error; err != nil {
 		return nil, err
 	}
-	for _, p := range pairs {
-		result[p.QuestionID] = append(result[p.QuestionID], p)
+	if len(codes) == 0 {
+		return nil, nil
 	}
-	return result, nil
+	var questions []models.SortItOutQuestion
+	err := db.WithContext(ctx).
+		Where("question_code IN ?", sampleRandomCodes(codes, limit)).
+		Find(&questions).Error
+	return questions, err
 }
 
-// CreateMatchPairs inserts a batch of match pairs into the database.
-func CreateMatchPairs(ctx context.Context, pairs []models.MatchPair) error {
-	if len(pairs) == 0 {
-		return nil
-	}
-	db := GetDB()
-	if db == nil {
-		return nil
-	}
-	return db.WithContext(ctx).CreateInBatches(pairs, 50).Error
-}
-
-// GetSortItOutQuestionsByCodes fetches questions matching the specified question codes from sort_it_out_questions.
+// GetSortItOutQuestionsByCodes loads sort items by code, preserving the requested order.
 func GetSortItOutQuestionsByCodes(ctx context.Context, codes []string) ([]models.SortItOutQuestion, error) {
 	if len(codes) == 0 {
 		return nil, nil
@@ -646,26 +548,49 @@ func GetSortItOutQuestionsByCodes(ctx context.Context, codes []string) ([]models
 		return nil, nil
 	}
 	var questions []models.SortItOutQuestion
-	err := db.WithContext(ctx).
-		Where("question_code IN ?", codes).
-		Find(&questions).Error
-	if err != nil {
+	if err := db.WithContext(ctx).Where("question_code IN ?", codes).Find(&questions).Error; err != nil {
 		return nil, err
 	}
-	questionMap := make(map[string]models.SortItOutQuestion, len(questions))
+	byCode := make(map[string]models.SortItOutQuestion, len(questions))
 	for _, q := range questions {
-		questionMap[q.QuestionCode] = q
+		byCode[q.QuestionCode] = q
 	}
 	ordered := make([]models.SortItOutQuestion, 0, len(codes))
 	for _, code := range codes {
-		if q, ok := questionMap[code]; ok {
+		if q, ok := byCode[code]; ok {
 			ordered = append(ordered, q)
 		}
 	}
 	return ordered, nil
 }
 
-// GetMatchTheFollowingQuestionsByCodes fetches questions matching the specified question codes from match_the_following_questions.
+// --- Match the Following ---
+
+// GetMatchPairsByQuestionIDs loads pairs for the given board IDs, ordered by pair_order.
+func GetMatchPairsByQuestionIDs(ctx context.Context, boardIDs []int) (map[int][]models.MatchPair, error) {
+	result := make(map[int][]models.MatchPair)
+	if len(boardIDs) == 0 {
+		return result, nil
+	}
+	db := GetDB()
+	if db == nil {
+		return result, nil
+	}
+	var pairs []models.MatchPair
+	if err := db.WithContext(ctx).
+		Where("board_id IN ?", boardIDs).
+		Order("board_id, pair_order").
+		Find(&pairs).Error; err != nil {
+		return nil, err
+	}
+	for _, p := range pairs {
+		p.ID = fmt.Sprintf("%d-%d", p.BoardID, p.PairOrder)
+		result[p.BoardID] = append(result[p.BoardID], p)
+	}
+	return result, nil
+}
+
+// GetMatchTheFollowingQuestionsByCodes loads boards by code, preserving the requested order.
 func GetMatchTheFollowingQuestionsByCodes(ctx context.Context, codes []string) ([]models.MatchTheFollowingQuestion, error) {
 	if len(codes) == 0 {
 		return nil, nil
@@ -675,49 +600,39 @@ func GetMatchTheFollowingQuestionsByCodes(ctx context.Context, codes []string) (
 		return nil, nil
 	}
 	var questions []models.MatchTheFollowingQuestion
-	err := db.WithContext(ctx).
-		Where("question_code IN ?", codes).
-		Find(&questions).Error
-	if err != nil {
+	if err := db.WithContext(ctx).Where("question_code IN ?", codes).Find(&questions).Error; err != nil {
 		return nil, err
 	}
-	questionMap := make(map[string]models.MatchTheFollowingQuestion, len(questions))
+	byCode := make(map[string]models.MatchTheFollowingQuestion, len(questions))
 	for _, q := range questions {
-		questionMap[q.QuestionCode] = q
+		byCode[q.QuestionCode] = q
 	}
 	ordered := make([]models.MatchTheFollowingQuestion, 0, len(codes))
 	for _, code := range codes {
-		if q, ok := questionMap[code]; ok {
+		if q, ok := byCode[code]; ok {
 			ordered = append(ordered, q)
 		}
 	}
 	return ordered, nil
 }
 
-// GetMatchTheFollowingQuestions fetches questions from match_the_following_questions using O(1) indexed code sampling.
-func GetMatchTheFollowingQuestions(ctx context.Context, topicID string, limit int) ([]models.MatchTheFollowingQuestion, error) {
+// GetMatchTheFollowingQuestions samples up to limit boards from a subject/chapter.
+func GetMatchTheFollowingQuestions(ctx context.Context, topicID string, chapterNo, limit int) ([]models.MatchTheFollowingQuestion, error) {
 	db := GetDB()
 	if db == nil {
 		return nil, nil
 	}
-
-	query := db.WithContext(ctx).Model(&models.MatchTheFollowingQuestion{})
-	if topicID != "" {
-		query = query.Where("topic_id = ?", topicID)
-	}
-
 	var codes []string
-	if err := query.Pluck("question_code", &codes).Error; err != nil {
+	if err := scope(db.WithContext(ctx).Model(&models.MatchTheFollowingQuestion{}), topicID, chapterNo).
+		Pluck("question_code", &codes).Error; err != nil {
 		return nil, err
 	}
 	if len(codes) == 0 {
 		return nil, nil
 	}
-
-	sampledCodes := sampleRandomCodes(codes, limit)
 	var questions []models.MatchTheFollowingQuestion
 	err := db.WithContext(ctx).
-		Where("question_code IN ?", sampledCodes).
+		Where("question_code IN ?", sampleRandomCodes(codes, limit)).
 		Find(&questions).Error
 	return questions, err
 }

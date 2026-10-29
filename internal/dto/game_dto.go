@@ -11,7 +11,9 @@ import (
 
 // CreateSessionRequestDTO validates input for starting a new quiz session.
 type CreateSessionRequestDTO struct {
-	TopicID       string   `json:"topic" binding:"required"`
+	TopicID string `json:"topic" binding:"required"`
+	// ChapterNo limits questions to one chapter of the subject; 0 means the whole subject.
+	ChapterNo     int      `json:"chapter_no,omitempty"`
 	QuestionCount int      `json:"question_count"`
 	AbandonStale  bool     `json:"abandon_stale,omitempty"`
 	QuestionCodes []string `json:"question_codes,omitempty"`
@@ -27,6 +29,9 @@ func (r *CreateSessionRequestDTO) Validate() error {
 	r.TopicID = strings.TrimSpace(r.TopicID)
 	if r.TopicID == "" {
 		return errors.New("topic is required")
+	}
+	if r.ChapterNo < 0 || r.ChapterNo > 99 {
+		return errors.New("chapter_no must be between 1 and 99")
 	}
 
 	// Normalize and validate the mode. An empty value keeps the historical
@@ -432,4 +437,18 @@ type CompleteMatchTheFollowingResponseDTO struct {
 	Level              LevelInfoDTO          `json:"level"`
 	Streak             StreakInfoDTO         `json:"streak"`
 	BoardsReview       []MatchBoardReviewDTO `json:"boards_review"`
+}
+
+// SubjectDTO lists a subject's chapters with per-game question counts (learning mode / topic picker).
+type SubjectDTO struct {
+	TopicID  string       `json:"topic_id"`
+	Name     string       `json:"name"`
+	Grade    int          `json:"grade"`
+	Chapters []ChapterDTO `json:"chapters"`
+}
+
+type ChapterDTO struct {
+	ChapterNo int            `json:"chapter_no"`
+	Title     string         `json:"title"`
+	Counts    map[string]int `json:"counts"`
 }

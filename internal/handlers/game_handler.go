@@ -62,6 +62,17 @@ func GetTopicQuestionsHandler(c *gin.Context) {
 	response.Success(c, status, "Questions fetched successfully", res)
 }
 
+// GetSubjectsHandler lists subjects with chapters and per-game question counts.
+// GET /api/v1/subjects
+func GetSubjectsHandler(c *gin.Context) {
+	res, status, err := services.GetSubjects(c.Request.Context())
+	if err != nil {
+		response.Error(c, status, err.Error())
+		return
+	}
+	response.Success(c, status, "Subjects fetched successfully", res)
+}
+
 // CreateQuizSessionHandler creates a new quiz session and returns questions.
 // POST /api/v1/quiz/sessions/create
 func CreateQuizSessionHandler(c *gin.Context) {
@@ -497,7 +508,7 @@ func WebSocketGameHandler(c *gin.Context) {
 			if session.IsSuddenDeath() {
 				questionType = models.GameModeSuddenDeath
 			}
-			dbQuestions, err := repo.GetQuestionsByTopicAndMode(c.Request.Context(), session.TopicID, questionType, session.TotalQuestions)
+			dbQuestions, err := repo.GetQuestionsByTopicAndMode(c.Request.Context(), session.TopicID, session.ChapterNo, questionType, session.TotalQuestions)
 			if err != nil || len(dbQuestions) == 0 {
 				response.Error(c, http.StatusInternalServerError, "Failed to load session questions")
 				return
