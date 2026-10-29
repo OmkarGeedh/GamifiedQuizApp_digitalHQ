@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -329,7 +330,7 @@ func TestE2E_MCQ_REST_Workflow(t *testing.T) {
 	// 9. Complete Session and Claim Rewards
 	t.Run("Complete session awards wallet ledger and profile updates", func(t *testing.T) {
 		var profileBefore models.Profile
-		if err := config.DB.Where("client_id = ?", 1).First(&profileBefore).Error; err != nil {
+		if err := config.DB.Where("id = ?", 1).First(&profileBefore).Error; err != nil {
 			t.Fatalf("Failed to load profile before completion: %v", err)
 		}
 
@@ -440,7 +441,7 @@ func TestE2E_MCQ_REST_Workflow(t *testing.T) {
 		}
 
 		var profileAfter models.Profile
-		if err := config.DB.Where("client_id = ?", 1).First(&profileAfter).Error; err != nil {
+		if err := config.DB.Where("id = ?", 1).First(&profileAfter).Error; err != nil {
 			t.Fatalf("Failed to load profile after completion: %v", err)
 		}
 		if profileAfter.Coins-profileBefore.Coins != expectedCoins {
@@ -1215,15 +1216,12 @@ func TestCompleteMatchTheFollowingHandler(t *testing.T) {
 		_ = repo.ClearClientActiveSession(context.Background(), 1)
 
 		content := newContentFixture(t)
-		code1 := content.Board(1, "Board 1", 4)
-		code2 := content.Board(2, "Board 2", 4)
-		code3 := content.Board(3, "Board 3", 4)
+		pairCodes := content.MatchPairs(12) // dealt as 3 boards of 4
 
-		// 1. Create match_the_following session
+		// 1. Create match_the_following session: the chapter's pairs are dealt into boards
 		createBody, _ := json.Marshal(dto.CreateSessionRequestDTO{
 			TopicID:                 content.Topic,
 			GameMode:                models.GameModeMatchTheFollowing,
-			QuestionCodes:           []string{code1, code2, code3},
 			QuestionCount:           3,
 			TimeLimitPerQuestionSec: 25,
 		})
@@ -1256,6 +1254,11 @@ func TestCompleteMatchTheFollowingHandler(t *testing.T) {
 		}
 		if len(createResp.Data.Boards) != 3 {
 			t.Fatalf("expected 3 boards in create response, got %d", len(createResp.Data.Boards))
+		}
+		for _, board := range createResp.Data.Boards {
+			if board.Prompt != "Test · Test" {
+				t.Fatalf("expected board titled by subject and chapter, got %q", board.Prompt)
+			}
 		}
 
 		sessionID := createResp.Data.Session
@@ -1397,6 +1400,24 @@ func TestCompleteMatchTheFollowingHandler(t *testing.T) {
 		}
 		if _, ok := data.ScoreBreakdown["mistake_penalty"]; !ok {
 			t.Fatal("missing mistake_penalty in score breakdown")
+		}
+
+		// History is recorded per pair: 12 dealt pairs, 10 matched, all codes from the fixture.
+		var history []models.UserQuestionHistory
+		if err := config.DB.Where("session_id = ?", sessionID).Find(&history).Error; err != nil {
+			t.Fatalf("failed to load history: %v", err)
+		}
+		matched := 0
+		for _, h := range history {
+			if !slices.Contains(pairCodes, h.QuestionCode) {
+				t.Fatalf("history row %q is not a fixture pair code", h.QuestionCode)
+			}
+			if h.IsCorrect {
+				matched++
+			}
+		}
+		if len(history) != 12 || matched != 10 {
+			t.Fatalf("expected 12 pair history rows with 10 matched, got %d rows / %d matched", len(history), matched)
 		}
 
 		// 3. Second submission should return 409 Conflict

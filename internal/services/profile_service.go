@@ -12,7 +12,6 @@ import (
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/dto"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/models"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/repo"
-	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
@@ -130,50 +129,28 @@ func GetProfileSetupOptions(ctx context.Context) (*dto.ProfileSetupOptionsDTO, i
 // PROFILE RETRIEVAL & INITIALIZATION
 // -----------------------------------------------------------------------------
 
+// GetOrCreateProfile returns the player's profile. The profile lives on the clients row
+// (created at signup with starter balances), so "create" only fills the display name.
 func GetOrCreateProfile(ctx context.Context, clientID int) (*models.Profile, error) {
 	profile, err := repo.GetProfileByClientID(ctx, clientID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("client not found: %w", err)
+		}
+		return nil, err
+	}
 	now := time.Now().UTC()
 	todayStr := now.Format("2006-01-02")
 	todayDate, _ := time.Parse("2006-01-02", todayStr)
 
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			// Fetch client record to initialize name/username
-			client, err := repo.GetClientByID(ctx, clientID)
-			if err != nil {
-				return nil, fmt.Errorf("client not found: %w", err)
-			}
-
-			displayName := client.Username
-			if displayName == "" {
-				displayName = "Player"
-			}
-
-			newProfile := models.Profile{
-				ClientID:       clientID,
-				UUID:           uuid.New().String(),
-				FullName:       displayName,
-				AvatarID:       "user",
-				Coins:          100, // Starter bonus
-				Gems:           10,  // Starter bonus
-				Experience:     0,
-				Level:          1,
-				CurrentStreak:  1,
-				HighestStreak:  1,
-				LastActiveDate: todayDate,
-				WeeklyScore:    0,
-				IsOnboarded:    false,
-			}
-
-			if err := repo.CreateProfile(ctx, &newProfile); err != nil {
-				return nil, fmt.Errorf("failed to create default profile: %w", err)
-			}
-
-			_ = repo.RecordDailyActivity(ctx, clientID, todayStr)
-
-			return &newProfile, nil
+	if profile.FullName == "" {
+		profile.FullName = "Player"
+		if client, err := repo.GetClientByID(ctx, clientID); err == nil && client != nil && client.Username != "" {
+			profile.FullName = client.Username
 		}
-		return nil, err
+		if err := repo.UpdateProfile(ctx, profile); err != nil {
+			return nil, fmt.Errorf("failed to initialize profile: %w", err)
+		}
 	}
 
 	// Profile exists: update streak if new active day

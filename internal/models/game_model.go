@@ -24,28 +24,28 @@ type SessionQuestion struct {
 	MatchPairs      []MatchPair `json:"match_pairs,omitempty"`
 }
 
-// MatchPair is one left/right pair of a Match the Following board (table match_pairs).
-// ID is not stored; the repo derives it as "<board id>-<pair order>" so session state
-// and grading can address a pair with a single string.
+// MatchPair is one left/right pair (table match_pairs). ID is the pair's question code;
+// the backend deals a chapter's pairs into boards at game time.
 type MatchPair struct {
-	ID        string `gorm:"-" json:"id"`
-	BoardID   int    `gorm:"column:board_id;primaryKey" json:"board_id"`
-	PairOrder int    `gorm:"column:pair_order;primaryKey" json:"pair_order"`
-	LeftText  string `gorm:"column:left_text" json:"left_text"`
-	RightText string `gorm:"column:right_text" json:"right_text"`
+	ID         string `gorm:"column:question_code;primaryKey" json:"id"`
+	TopicID    string `gorm:"column:subject" json:"topic_id,omitempty"`
+	ChapterNo  int    `gorm:"column:chapter_no" json:"chapter_no,omitempty"`
+	LeftText   string `gorm:"column:left_text" json:"left_text"`
+	RightText  string `gorm:"column:right_text" json:"right_text"`
+	Difficulty int    `gorm:"column:difficulty" json:"difficulty,omitempty"`
 }
 
 func (MatchPair) TableName() string {
 	return "match_pairs"
 }
 
-// MCQQuestion is a read-only row of v_mcq_questions or v_sudden_death_questions
+// MCQQuestion is a read-only row of mcq_questions or sudden_death_questions
 // (Sudden Death rows leave OptionC/OptionD empty). TopicID is the subject code.
-// QuestionType is not a column; the repo sets it from the view it read.
+// QuestionType is not a column; the repo sets it from the table it read.
 type MCQQuestion struct {
-	QuestionCode  string  `gorm:"column:question_code" json:"question_code"`
+	QuestionCode  string  `gorm:"column:question_code;primaryKey" json:"question_code"`
 	QuestionType  string  `gorm:"-" json:"question_type"`
-	TopicID       string  `gorm:"column:topic_id" json:"topic_id"`
+	TopicID       string  `gorm:"column:subject" json:"topic_id"`
 	ChapterNo     int     `gorm:"column:chapter_no" json:"chapter_no"`
 	Prompt        string  `gorm:"column:prompt" json:"prompt"`
 	OptionA       string  `gorm:"column:option_a" json:"option_a"`
@@ -54,55 +54,35 @@ type MCQQuestion struct {
 	OptionD       string  `gorm:"column:option_d" json:"option_d"`
 	CorrectOption string  `gorm:"column:correct_option" json:"-"`
 	Difficulty    int     `gorm:"column:difficulty" json:"difficulty"`
-	Points        int     `gorm:"column:points" json:"points"`
 	Hint          *string `gorm:"column:hint" json:"hint,omitempty"`
 	Explanation   *string `gorm:"column:explanation" json:"explanation,omitempty"`
 }
 
 func (MCQQuestion) TableName() string {
-	return "v_mcq_questions"
+	return "mcq_questions"
 }
 
 type Question = MCQQuestion
 
-// SortItOutQuestion is a read-only row of v_sort_it_out_questions. OptionA/OptionB are
+// SortItOutQuestion is a read-only row of sort_it_out_questions. OptionA/OptionB are
 // the set's buckets and PairType is the set code.
 type SortItOutQuestion struct {
-	QuestionCode  string  `gorm:"column:question_code" json:"question_code"`
-	TopicID       string  `gorm:"column:topic_id" json:"topic_id"`
+	QuestionCode  string  `gorm:"column:question_code;primaryKey" json:"question_code"`
+	TopicID       string  `gorm:"column:subject" json:"topic_id"`
 	ChapterNo     int     `gorm:"column:chapter_no" json:"chapter_no"`
-	PairType      string  `gorm:"column:pair_type" json:"pair_type"`
+	PairType      string  `gorm:"column:set_code" json:"pair_type"`
 	ItemType      string  `gorm:"column:item_type" json:"item_type"`
 	Prompt        string  `gorm:"column:prompt" json:"prompt"`
-	OptionA       string  `gorm:"column:option_a" json:"option_a"`
-	OptionB       string  `gorm:"column:option_b" json:"option_b"`
-	CorrectOption string  `gorm:"column:correct_option" json:"-"`
+	OptionA       string  `gorm:"column:bucket_a" json:"option_a"`
+	OptionB       string  `gorm:"column:bucket_b" json:"option_b"`
+	CorrectOption string  `gorm:"column:correct_bucket" json:"-"`
 	Difficulty    int     `gorm:"column:difficulty" json:"difficulty"`
-	Points        int     `gorm:"column:points" json:"points"`
 	Hint          *string `gorm:"-" json:"hint,omitempty"`
 	Explanation   *string `gorm:"column:explanation" json:"explanation,omitempty"`
 }
 
 func (SortItOutQuestion) TableName() string {
-	return "v_sort_it_out_questions"
-}
-
-// MatchTheFollowingQuestion is a read-only row of v_match_boards.
-type MatchTheFollowingQuestion struct {
-	ID           int         `gorm:"column:id" json:"id"`
-	QuestionCode string      `gorm:"column:question_code" json:"question_code"`
-	TopicID      string      `gorm:"column:topic_id" json:"topic_id"`
-	ChapterNo    int         `gorm:"column:chapter_no" json:"chapter_no"`
-	Prompt       string      `gorm:"column:prompt" json:"prompt"`
-	Difficulty   int         `gorm:"column:difficulty" json:"difficulty"`
-	Points       int         `gorm:"column:points" json:"points"`
-	Hint         *string     `gorm:"column:hint" json:"hint,omitempty"`
-	Explanation  *string     `gorm:"column:explanation" json:"explanation,omitempty"`
-	Pairs        []MatchPair `gorm:"-" json:"pairs,omitempty"`
-}
-
-func (MatchTheFollowingQuestion) TableName() string {
-	return "v_match_boards"
+	return "sort_it_out_questions"
 }
 
 // ContentCount is a row of v_content_counts.
@@ -222,18 +202,18 @@ const (
 type ActiveSession = GameSession
 
 // UserQuestionHistory is an immutable audit record of every answer submitted across all game modes.
+// Primary key: (session_id, question_code).
 type UserQuestionHistory struct {
-	ID             string    `gorm:"column:id;type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
-	ClientID       int       `gorm:"column:client_id;not null;index:idx_uqh_client;index:idx_uqh_client_answered,priority:1" json:"client_id"`
-	SessionID      string    `gorm:"column:session_id;type:uuid;not null;index:idx_uqh_session;index:idx_uqh_session_question,priority:1" json:"session_id"`
-	GameMode       string    `gorm:"column:game_mode;size:32;not null;default:'mcq';index:idx_uqh_mode" json:"game_mode"`
-	QuestionCode   string    `gorm:"column:question_code;size:20;not null;index:idx_uqh_session_question,priority:2" json:"question_code"`
+	SessionID      string    `gorm:"column:session_id;type:uuid;primaryKey" json:"session_id"`
+	QuestionCode   string    `gorm:"column:question_code;size:20;primaryKey" json:"question_code"`
+	ClientID       int       `gorm:"column:client_id;not null" json:"client_id"`
+	GameMode       string    `gorm:"column:game_mode;size:32;not null" json:"game_mode"`
 	SelectedOption string    `gorm:"column:selected_option;size:50;not null" json:"selected_option"`
 	IsCorrect      bool      `gorm:"column:is_correct;not null;default:false" json:"is_correct"`
 	TimeTakenMs    int       `gorm:"column:time_taken_ms;not null;default:0" json:"time_taken_ms"`
 	PointsAwarded  int       `gorm:"column:points_awarded;not null;default:0" json:"points_awarded"`
 	CoinsAwarded   int       `gorm:"column:coins_awarded;not null;default:0" json:"coins_awarded"`
-	AnsweredAt     time.Time `gorm:"column:answered_at;autoCreateTime;index:idx_uqh_client_answered,priority:2" json:"answered_at"`
+	AnsweredAt     time.Time `gorm:"column:answered_at;autoCreateTime" json:"answered_at"`
 }
 
 func (UserQuestionHistory) TableName() string {

@@ -83,9 +83,9 @@ Watch the Go application logs and OTPs in real time:
 
 ## 🗄️ 3. Database Migrations & Seeding
 
-The application automatically runs migrations on startup. You can also run, inspect, or seed the database manually at any time:
+The backend never migrates. Schema and content are applied by `../SkillVerse-SQL_Migration` (`make migrate-up && make seed`).
 
-### Run Migrations (`clients`, `client_profiles`, `client_streak_activities`)
+### Run Migrations (owned by `../SkillVerse-SQL_Migration`; see its AGENTS.md)
 - **macOS / Linux**:
   ```bash
   make migrate

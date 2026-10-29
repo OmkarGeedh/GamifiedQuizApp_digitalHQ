@@ -158,21 +158,20 @@ WITH user_scores AS (
 ranked_leaderboard AS (
     SELECT 
         c.id AS client_id,
-        COALESCE(NULLIF(p.uuid, ''), CONCAT('usr_', c.id::text)) AS user_id,
-        COALESCE(NULLIF(TRIM(p.full_name), ''), NULLIF(TRIM(c.username), ''), 'Player') AS display_name,
-        COALESCE(NULLIF(TRIM(p.avatar_id), ''), 'user') AS avatar_id,
-        p.avatar_url,
+        c.uuid::text AS user_id,
+        COALESCE(NULLIF(TRIM(c.full_name), ''), NULLIF(TRIM(c.username), ''), 'Player') AS display_name,
+        COALESCE(NULLIF(TRIM(c.avatar_id), ''), 'user') AS avatar_id,
+        c.avatar_url,
         COALESCE(s.score, 0)::int AS score,
         s.latest_activity,
         ROW_NUMBER() OVER (
             ORDER BY 
                 COALESCE(s.score, 0) DESC,
                 s.latest_activity DESC NULLS LAST,
-                COALESCE(NULLIF(TRIM(p.full_name), ''), NULLIF(TRIM(c.username), ''), 'Player') ASC,
+                COALESCE(NULLIF(TRIM(c.full_name), ''), NULLIF(TRIM(c.username), ''), 'Player') ASC,
                 c.id ASC
         ) AS rank
     FROM clients c
-    LEFT JOIN client_profiles p ON p.client_id = c.id
     LEFT JOIN user_scores s ON s.client_id = c.id
     WHERE c.status = 'active'
 )

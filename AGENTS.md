@@ -24,20 +24,22 @@ docker run -d --rm --name sv_test_redis -p 6380:6379 redis:7-alpine
 cd ../GamifiedQuizApp_digitalHQ
 DATABASE_URL="<same url>" REDIS_ADDR=127.0.0.1:6380 go test ./... -count=1
 ```
-Tests create their own content via `internal/handlers/content_fixture_test.go` (throwaway subject, removed by cascade). Never point tests at production. Note: `docker compose` in the migration repo reads `DB_URL` from its `.env` (Neon) — pass `-db` explicitly for local runs.
+Tests create their own content via `internal/handlers/content_fixture_test.go` (throwaway subject, removed by cascade). After a schema squash run `go run ./cmd/db migrate reset -db ...` instead of `migrate up`. Never point tests at production. Note: `docker compose` in the migration repo reads `DB_URL` from its `.env` (Neon) — pass `-db` explicitly for local runs.
 
 ## Database (owned by SkillVerse-SQL_Migration)
 
 The backend never migrates or seeds. Schema, content CSVs and seeds live in `../SkillVerse-SQL_Migration` (see its AGENTS.md); `make migrate-up && make seed` there.
 
-Tables: `clients`, `client_profiles`, `client_streak_activities`, `wallet_ledger`, `subjects`, `chapters`, `mcq_questions`, `sudden_death_questions`, `sort_it_out_sets`, `sort_it_out_items`, `match_boards`, `match_pairs`, `user_question_history`, `leaderboard_game_results`. Game sessions live only in Redis (in-memory fallback).
+Tables (9): `clients` (login + profile + balances + streak in one row), `wallet_ledger`, `subjects` (chapter titles in `chapters jsonb`), `mcq_questions`, `sudden_death_questions`, `sort_it_out_questions`, `match_pairs`, `user_question_history`, `leaderboard_game_results`. Game sessions live only in Redis (in-memory fallback).
 
-- **Content is read only through views**: `v_mcq_questions`, `v_sudden_death_questions`, `v_sort_it_out_questions`, `v_match_boards`, `v_content_counts`. Models in `internal/models/game_model.go` map to them; never write content with GORM.
-- API `topic_id` / `topic` = `subjects.code` (`accounts`, `economics`, `maths1`, `maths2`). Optional `chapter_no` narrows a session. `GET /subjects` returns subjects → chapters → per-mode counts (learning mode / topic picker).
-- Question codes: `<subject short>-<ch>-<mode>-<n>`, ≤ 20 chars (e.g. `acc11-04-mcq-0012`); unique across all games, so `GetQuestionsByCodes` checks MCQ and Sudden Death views.
-- Sort It Out `pair_type` = set code; Match pair IDs are derived as `<board id>-<pair order>`.
-- `user_question_history.game_mode` is NOT NULL without default — always set `GameMode` on inserts.
-- `leaderboard_game_results` is created by migrations; do not reintroduce `AutoMigrate`.
+- Content tables are read directly and are read-only for the backend (never write content with GORM). Each row has `question_code` (PK), `subject`, `chapter_no`; models in `internal/models/game_model.go`. `v_content_counts` (subject → chapter → per-mode counts) feeds `GET /subjects` and Match board titles.
+- API `topic_id` / `topic` = `subjects.code` (`accounts`, `economics`, `maths1`, `maths2`). Optional `chapter_no` narrows a session.
+- Question codes: `<subject short>-<ch>-<mode>-<n>`, ≤ 20 chars (e.g. `acc11-04-mcq-0012`); unique across all games, so `GetQuestionsByCodes` checks the MCQ and Sudden Death tables.
+- Sort It Out `pair_type` = `set_code` (items of one game share it; buckets are `bucket_a/b`).
+- Match the Following: `match_pairs` stores single pairs. `services.DealMatchBoards` shuffles a subject/chapter's pairs and deals them evenly into boards of 4 per chapter (no repeated left/right text on a board), titled "<subject> · <chapter>" with session-local codes `board-<n>`. Pair IDs are pair question codes; history is written per pair.
+- `Profile` and `Client` both map to `clients` (`Profile.ClientID` = `id`). Signup creates the full row with starter balances via DB defaults; `GetOrCreateProfile` only fills an empty `full_name` from the username. Streak days are `clients.active_days` (`RecordDailyActivity`).
+- `user_question_history` PK is `(session_id, question_code)`; inserts use `ON CONFLICT DO NOTHING`. `game_mode` is NOT NULL without default — always set `GameMode`.
+- `leaderboard_game_results` (PK `session_id`) is created by migrations; do not reintroduce `AutoMigrate`.
 - Demo login: `player@example.com` / `secretpassword123` (seeded by the migration repo).
 
 ## Game modes and transport

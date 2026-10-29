@@ -215,7 +215,6 @@ func TestShuffleQuestion_PreservesOptionsAndMapsCorrectAnswer(t *testing.T) {
 		OptionC:       "Madrid",
 		OptionD:       "Rome",
 		CorrectOption: "a",
-		Points:        10,
 		Difficulty:    1,
 	}
 
@@ -289,7 +288,6 @@ func TestGradeAnswer_MultiLayeredEvaluation(t *testing.T) {
 		OptionC:       "2",
 		OptionD:       "5",
 		CorrectOption: "a", // "4"
-		Points:        10,
 		Difficulty:    1,
 	}
 

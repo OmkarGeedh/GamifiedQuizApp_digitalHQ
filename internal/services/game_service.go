@@ -270,34 +270,28 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 
 	// Special flow for Match the Following multi-board matching puzzle
 	if req.GameMode == models.GameModeMatchTheFollowing {
-		var questions []models.MatchTheFollowingQuestion
+		var pairs []models.MatchPair
+		var err error
 		if len(req.QuestionCodes) > 0 {
-			var err error
-			questions, err = repo.GetMatchTheFollowingQuestionsByCodes(ctx, req.QuestionCodes)
+			pairs, err = repo.GetMatchPairsByCodes(ctx, req.QuestionCodes)
 			if err != nil {
 				return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch requested questions: %w", err)
 			}
-			if len(questions) != len(req.QuestionCodes) {
+			if len(pairs) != len(req.QuestionCodes) {
 				return nil, http.StatusBadRequest, errors.New("all requested question_codes must exist")
 			}
 		} else {
-			if req.QuestionCount <= 0 {
-				req.QuestionCount = 10
-			}
-			var err error
-			questions, err = repo.GetMatchTheFollowingQuestions(ctx, req.TopicID, req.ChapterNo, req.QuestionCount)
+			pairs, err = repo.GetMatchPairs(ctx, req.TopicID, req.ChapterNo)
 			if err != nil {
 				return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch questions: %w", err)
 			}
-			if len(questions) == 0 {
-				return nil, http.StatusNotFound, errors.New("no match_the_following questions found for the selected topic")
-			}
-			rand.Shuffle(len(questions), func(i, j int) {
-				questions[i], questions[j] = questions[j], questions[i]
-			})
-			if len(questions) > req.QuestionCount {
-				questions = questions[:req.QuestionCount]
-			}
+		}
+		boards := DealMatchBoards(pairs, len(req.QuestionCodes) == 0)
+		if len(boards) == 0 {
+			return nil, http.StatusNotFound, errors.New("no match_the_following questions found for the selected topic")
+		}
+		if len(req.QuestionCodes) == 0 && req.QuestionCount > 0 && len(boards) > req.QuestionCount {
+			boards = boards[:req.QuestionCount]
 		}
 
 		timeLimitPerQuestion := req.TimeLimitPerQuestionSec
@@ -305,36 +299,25 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 			timeLimitPerQuestion = 25
 		}
 
-		questionIDs := make([]int, len(questions))
-		for i, q := range questions {
-			questionIDs[i] = q.ID
-		}
-		pairsMap, err := repo.GetMatchPairsByQuestionIDs(ctx, questionIDs)
-		if err != nil {
-			return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch match pairs: %w", err)
-		}
+		titles := matchBoardTitles(ctx)
+		sessionQuestions := make([]models.SessionQuestion, 0, len(boards))
+		boardDTOs := make([]dto.MatchBoardDTO, 0, len(boards))
 
-		sessionQuestions := make([]models.SessionQuestion, 0, len(questions))
-		boardDTOs := make([]dto.MatchBoardDTO, 0, len(questions))
+		for i, board := range boards {
+			code := fmt.Sprintf("board-%d", i+1)
+			prompt := titles(board[0].TopicID, board[0].ChapterNo)
+			leftItems := make([]dto.MatchPairItemDTO, 0, len(board))
+			rightItems := make([]dto.MatchPairItemDTO, 0, len(board))
+			solMap := make(map[string]string, len(board))
+			difficulty := 1
 
-		for _, q := range questions {
-			pairs := pairsMap[q.ID]
-			leftItems := make([]dto.MatchPairItemDTO, 0, len(pairs))
-			rightItems := make([]dto.MatchPairItemDTO, 0, len(pairs))
-			solMap := make(map[string]string, len(pairs))
-
-			for _, p := range pairs {
+			for _, p := range board {
 				leftID := fmt.Sprintf("%s_l", p.ID)
 				rightID := fmt.Sprintf("%s_r", p.ID)
-				leftItems = append(leftItems, dto.MatchPairItemDTO{
-					ID:   leftID,
-					Text: p.LeftText,
-				})
-				rightItems = append(rightItems, dto.MatchPairItemDTO{
-					ID:   rightID,
-					Text: p.RightText,
-				})
+				leftItems = append(leftItems, dto.MatchPairItemDTO{ID: leftID, Text: p.LeftText})
+				rightItems = append(rightItems, dto.MatchPairItemDTO{ID: rightID, Text: p.RightText})
 				solMap[leftID] = rightID
+				difficulty = max(difficulty, p.Difficulty)
 			}
 
 			// Shuffle right items to prevent across-the-row matching
@@ -342,26 +325,20 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 				rightItems[i], rightItems[j] = rightItems[j], rightItems[i]
 			})
 
-			sq := models.SessionQuestion{
-				QuestionCode: q.QuestionCode,
-				Prompt:       q.Prompt,
-				Difficulty:   q.Difficulty,
+			sessionQuestions = append(sessionQuestions, models.SessionQuestion{
+				QuestionCode: code,
+				Prompt:       prompt,
+				Difficulty:   difficulty,
 				Points:       40,
-				Hint:         q.Hint,
-				Explanation:  q.Explanation,
-				MatchPairs:   pairs,
-			}
-			sessionQuestions = append(sessionQuestions, sq)
-
+				MatchPairs:   board,
+			})
 			boardDTOs = append(boardDTOs, dto.MatchBoardDTO{
-				QuestionCode: q.QuestionCode,
-				Prompt:       q.Prompt,
+				QuestionCode: code,
+				Prompt:       prompt,
 				TimeLimitSec: timeLimitPerQuestion,
 				LeftItems:    leftItems,
 				RightItems:   rightItems,
 				SolutionMap:  solMap,
-				Hint:         q.Hint,
-				Explanation:  q.Explanation,
 			})
 		}
 
@@ -1148,6 +1125,7 @@ func CompleteMatchTheFollowingSession(ctx context.Context, clientID int, req *dt
 		totalPairs := len(sq.MatchPairs)
 		matchedCount := 0
 		usedRightIDs := make(map[string]bool)
+		matchedPairs := make(map[string]bool, totalPairs)
 
 		for leftID, rightID := range boardSub.Matches {
 			if usedRightIDs[rightID] {
@@ -1159,6 +1137,7 @@ func CompleteMatchTheFollowingSession(ctx context.Context, clientID int, req *dt
 			}
 			if ok && (expectedRight == rightID || strings.TrimSuffix(expectedRight, "_r") == strings.TrimSuffix(rightID, "_r")) {
 				usedRightIDs[rightID] = true
+				matchedPairs[strings.TrimSuffix(leftID, "_l")] = true
 				matchedCount++
 			}
 		}
@@ -1205,17 +1184,23 @@ func CompleteMatchTheFollowingSession(ctx context.Context, clientID int, req *dt
 			Explanation:     sq.Explanation,
 		})
 
-		historyRecords = append(historyRecords, &models.UserQuestionHistory{
-			ClientID:       clientID,
-			SessionID:      session.ID,
-			GameMode:       models.GameModeMatchTheFollowing,
-			QuestionCode:   sq.QuestionCode,
-			SelectedOption: fmt.Sprintf("%d/%d", matchedCount, totalPairs),
-			IsCorrect:      isCleared,
-			TimeTakenMs:    boardSub.TimeTakenMs,
-			PointsAwarded:  totalBoardScore,
-			CoinsAwarded:   0,
-		})
+		// One history row per pair, so per-pair accuracy can be tracked across games.
+		for _, p := range sq.MatchPairs {
+			selected, points := "unmatched", 0
+			if matchedPairs[p.ID] {
+				selected, points = "matched", 10
+			}
+			historyRecords = append(historyRecords, &models.UserQuestionHistory{
+				ClientID:       clientID,
+				SessionID:      session.ID,
+				GameMode:       models.GameModeMatchTheFollowing,
+				QuestionCode:   p.ID,
+				SelectedOption: selected,
+				IsCorrect:      matchedPairs[p.ID],
+				TimeTakenMs:    boardSub.TimeTakenMs / max(totalPairs, 1),
+				PointsAwarded:  points,
+			})
+		}
 	}
 
 	session.Score = finalScore
@@ -1744,7 +1729,7 @@ func ShuffleQuestion(q models.Question) models.SessionQuestion {
 		OriginalCorrect: origCorrectLetter,
 		CorrectText:     correctText,
 		Difficulty:      q.Difficulty,
-		Points:          q.Points,
+		Points:          MCQCorrectAnswerPoints,
 		Hint:            q.Hint,
 		Explanation:     q.Explanation,
 	}

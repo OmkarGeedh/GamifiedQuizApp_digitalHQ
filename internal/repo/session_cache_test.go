@@ -129,8 +129,8 @@ func TestCachedSessionWrapper_MatchPairsPreserved(t *testing.T) {
 		QuestionCode: "mtf_acc_001",
 		Prompt:       "Match Accounts",
 		MatchPairs: []models.MatchPair{
-			{ID: "1-1", BoardID: 1, PairOrder: 1, LeftText: "Cash", RightText: "Real Account"},
-			{ID: "1-2", BoardID: 1, PairOrder: 2, LeftText: "Salary", RightText: "Nominal Account"},
+			{ID: "acc11-01-mf-0001", LeftText: "Cash", RightText: "Real Account"},
+			{ID: "acc11-01-mf-0002", LeftText: "Salary", RightText: "Nominal Account"},
 		},
 	}
 	encoded, err := json.Marshal([]models.SessionQuestion{sq})

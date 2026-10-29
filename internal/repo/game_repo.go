@@ -13,20 +13,20 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// --- Question Sampling & Retrieval (reads the v_* content views) ---
+// --- Question Sampling & Retrieval (content tables are read-only for the backend) ---
 
-// questionView maps an MCQ-family game mode to its read view.
-func questionView(mode string) string {
+// questionTable maps an MCQ-family game mode to its content table.
+func questionTable(mode string) string {
 	if mode == models.GameModeSuddenDeath {
-		return "v_sudden_death_questions"
+		return "sudden_death_questions"
 	}
-	return "v_mcq_questions"
+	return "mcq_questions"
 }
 
-// scope narrows a content view query to a subject (topic_id) and, when > 0, a chapter.
+// scope narrows a content query to a subject (API topic_id) and, when > 0, a chapter.
 func scope(q *gorm.DB, topicID string, chapterNo int) *gorm.DB {
 	if topicID != "" {
-		q = q.Where("topic_id = ?", topicID)
+		q = q.Where("subject = ?", topicID)
 	}
 	if chapterNo > 0 {
 		q = q.Where("chapter_no = ?", chapterNo)
@@ -61,7 +61,7 @@ func GetQuestionsByTopic(ctx context.Context, topicID string, chapterNo, limit i
 	return GetQuestionsByTopicAndMode(ctx, topicID, chapterNo, models.GameModeMCQ, limit)
 }
 
-// GetQuestionsByTopicAndMode samples question codes from the mode's view (Redis code pool
+// GetQuestionsByTopicAndMode samples question codes from the mode's table (Redis code pool
 // first, then an index-only scan) and loads the sampled rows.
 func GetQuestionsByTopicAndMode(ctx context.Context, topicID string, chapterNo int, mode string, limit int) ([]models.Question, error) {
 	if mode != models.GameModeSuddenDeath {
@@ -77,7 +77,7 @@ func GetQuestionsByTopicAndMode(ctx context.Context, topicID string, chapterNo i
 		return nil, nil
 	}
 	var codes []string
-	if err := scope(db.WithContext(ctx).Table(questionView(mode)), topicID, chapterNo).
+	if err := scope(db.WithContext(ctx).Table(questionTable(mode)), topicID, chapterNo).
 		Pluck("question_code", &codes).Error; err != nil {
 		return nil, err
 	}
@@ -89,7 +89,7 @@ func GetQuestionsByTopicAndMode(ctx context.Context, topicID string, chapterNo i
 }
 
 // GetQuestionsByCodes loads MCQ and Sudden Death questions by code, preserving the
-// requested order. Codes are unique across both views (mode tag inside the code).
+// requested order. Codes are unique across both tables (mode tag inside the code).
 func GetQuestionsByCodes(ctx context.Context, codes []string) ([]models.Question, error) {
 	if len(codes) == 0 {
 		return nil, nil
@@ -101,7 +101,7 @@ func GetQuestionsByCodes(ctx context.Context, codes []string) ([]models.Question
 	byCode := make(map[string]models.Question, len(codes))
 	for _, mode := range []string{models.GameModeMCQ, models.GameModeSuddenDeath} {
 		var rows []models.Question
-		if err := db.WithContext(ctx).Table(questionView(mode)).
+		if err := db.WithContext(ctx).Table(questionTable(mode)).
 			Where("question_code IN ?", codes).Find(&rows).Error; err != nil {
 			return nil, err
 		}
@@ -187,7 +187,7 @@ func CountQuestionsByTopicAndMode(ctx context.Context, topicID string, chapterNo
 		return 0, nil
 	}
 	var count int64
-	err := scope(db.WithContext(ctx).Table(questionView(mode)), topicID, chapterNo).Count(&count).Error
+	err := scope(db.WithContext(ctx).Table(questionTable(mode)), topicID, chapterNo).Count(&count).Error
 	return count, err
 }
 
@@ -267,7 +267,7 @@ func RecordAnswer(ctx context.Context, history *models.UserQuestionHistory) erro
 	if db == nil {
 		return nil
 	}
-	return db.WithContext(ctx).Create(history).Error
+	return db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(history).Error
 }
 
 // HasAnsweredQuestion checks if a question was already answered in a given session.
@@ -368,7 +368,7 @@ func GetClientGameHistory(ctx context.Context, clientID, limit, offset int) ([]m
 
 // --- Finalization (Atomic Transaction) ---
 
-// FinalizeSession atomically commits rewards to wallet_ledger, updates client_profiles,
+// FinalizeSession atomically commits rewards to wallet_ledger, updates the player's balances,
 // increments Redis real-time leaderboard (ZINCRBY), and cleans up ephemeral session keys.
 func FinalizeSession(ctx context.Context, session *models.GameSession, coins, xp, gems int) error {
 	now := time.Now().UTC()
@@ -421,7 +421,7 @@ func FinalizeSession(ctx context.Context, session *models.GameSession, coins, xp
 				"weekly_score": gorm.Expr("weekly_score + ?", session.Score),
 			}
 			if err := tx.Model(&models.Profile{}).
-				Where("client_id = ?", session.ClientID).
+				Where("id = ?", session.ClientID).
 				Updates(profileUpdate).Error; err != nil {
 				return fmt.Errorf("failed to update profile: %w", err)
 			}
@@ -483,8 +483,8 @@ func UpdateProfileLevel(ctx context.Context, clientID, newLevel int) error {
 		return nil
 	}
 	return db.WithContext(ctx).
-		Table("client_profiles").
-		Where("client_id = ?", clientID).
+		Model(&models.Profile{}).
+		Where("id = ?", clientID).
 		Update("level", newLevel).Error
 }
 
@@ -497,7 +497,7 @@ func RecordBatchAnswers(ctx context.Context, history []*models.UserQuestionHisto
 	if db == nil {
 		return nil
 	}
-	return db.WithContext(ctx).CreateInBatches(history, 50).Error
+	return db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(history, 50).Error
 }
 
 // --- Sort It Out ---
@@ -510,7 +510,7 @@ func GetDistinctPairTypes(ctx context.Context, topicID string, chapterNo int) ([
 	}
 	var pairTypes []string
 	err := scope(db.WithContext(ctx).Model(&models.SortItOutQuestion{}), topicID, chapterNo).
-		Distinct("pair_type").Pluck("pair_type", &pairTypes).Error
+		Distinct("set_code").Pluck("set_code", &pairTypes).Error
 	return pairTypes, err
 }
 
@@ -522,7 +522,7 @@ func GetSortItOutQuestions(ctx context.Context, topicID string, chapterNo int, p
 	}
 	query := scope(db.WithContext(ctx).Model(&models.SortItOutQuestion{}), topicID, chapterNo)
 	if pairType != "" {
-		query = query.Where("pair_type = ?", pairType)
+		query = query.Where("set_code = ?", pairType)
 	}
 	var codes []string
 	if err := query.Pluck("question_code", &codes).Error; err != nil {
@@ -566,32 +566,20 @@ func GetSortItOutQuestionsByCodes(ctx context.Context, codes []string) ([]models
 
 // --- Match the Following ---
 
-// GetMatchPairsByQuestionIDs loads pairs for the given board IDs, ordered by pair_order.
-func GetMatchPairsByQuestionIDs(ctx context.Context, boardIDs []int) (map[int][]models.MatchPair, error) {
-	result := make(map[int][]models.MatchPair)
-	if len(boardIDs) == 0 {
-		return result, nil
-	}
+// GetMatchPairs loads every pair of a subject (and optional chapter). Pair counts per
+// chapter are small, and the service needs all of them to deal fresh boards each game.
+func GetMatchPairs(ctx context.Context, topicID string, chapterNo int) ([]models.MatchPair, error) {
 	db := GetDB()
 	if db == nil {
-		return result, nil
+		return nil, nil
 	}
 	var pairs []models.MatchPair
-	if err := db.WithContext(ctx).
-		Where("board_id IN ?", boardIDs).
-		Order("board_id, pair_order").
-		Find(&pairs).Error; err != nil {
-		return nil, err
-	}
-	for _, p := range pairs {
-		p.ID = fmt.Sprintf("%d-%d", p.BoardID, p.PairOrder)
-		result[p.BoardID] = append(result[p.BoardID], p)
-	}
-	return result, nil
+	err := scope(db.WithContext(ctx).Model(&models.MatchPair{}), topicID, chapterNo).Find(&pairs).Error
+	return pairs, err
 }
 
-// GetMatchTheFollowingQuestionsByCodes loads boards by code, preserving the requested order.
-func GetMatchTheFollowingQuestionsByCodes(ctx context.Context, codes []string) ([]models.MatchTheFollowingQuestion, error) {
+// GetMatchPairsByCodes loads pairs by code, preserving the requested order.
+func GetMatchPairsByCodes(ctx context.Context, codes []string) ([]models.MatchPair, error) {
 	if len(codes) == 0 {
 		return nil, nil
 	}
@@ -599,40 +587,19 @@ func GetMatchTheFollowingQuestionsByCodes(ctx context.Context, codes []string) (
 	if db == nil {
 		return nil, nil
 	}
-	var questions []models.MatchTheFollowingQuestion
-	if err := db.WithContext(ctx).Where("question_code IN ?", codes).Find(&questions).Error; err != nil {
+	var pairs []models.MatchPair
+	if err := db.WithContext(ctx).Where("question_code IN ?", codes).Find(&pairs).Error; err != nil {
 		return nil, err
 	}
-	byCode := make(map[string]models.MatchTheFollowingQuestion, len(questions))
-	for _, q := range questions {
-		byCode[q.QuestionCode] = q
+	byCode := make(map[string]models.MatchPair, len(pairs))
+	for _, p := range pairs {
+		byCode[p.ID] = p
 	}
-	ordered := make([]models.MatchTheFollowingQuestion, 0, len(codes))
+	ordered := make([]models.MatchPair, 0, len(codes))
 	for _, code := range codes {
-		if q, ok := byCode[code]; ok {
-			ordered = append(ordered, q)
+		if p, ok := byCode[code]; ok {
+			ordered = append(ordered, p)
 		}
 	}
 	return ordered, nil
-}
-
-// GetMatchTheFollowingQuestions samples up to limit boards from a subject/chapter.
-func GetMatchTheFollowingQuestions(ctx context.Context, topicID string, chapterNo, limit int) ([]models.MatchTheFollowingQuestion, error) {
-	db := GetDB()
-	if db == nil {
-		return nil, nil
-	}
-	var codes []string
-	if err := scope(db.WithContext(ctx).Model(&models.MatchTheFollowingQuestion{}), topicID, chapterNo).
-		Pluck("question_code", &codes).Error; err != nil {
-		return nil, err
-	}
-	if len(codes) == 0 {
-		return nil, nil
-	}
-	var questions []models.MatchTheFollowingQuestion
-	err := db.WithContext(ctx).
-		Where("question_code IN ?", sampleRandomCodes(codes, limit)).
-		Find(&questions).Error
-	return questions, err
 }
