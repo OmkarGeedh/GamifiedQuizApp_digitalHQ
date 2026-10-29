@@ -48,4 +48,3 @@ func TestGetProfileOptions_PublicEndpoint(t *testing.T) {
 		t.Errorf("Expected non-empty subjects list")
 	}
 }
-

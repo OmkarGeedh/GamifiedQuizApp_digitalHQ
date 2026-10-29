@@ -5,8 +5,7 @@ import (
 	/*
 		"crypto/rand"
 		"math/big"
-	*/
-)
+	*/)
 
 // GenerateOtp generates a numeric OTP of the specified length (hardcoded to 123456 for testing)
 func GenerateOtp(length int) (string, error) {

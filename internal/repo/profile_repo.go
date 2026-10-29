@@ -184,4 +184,3 @@ func RebuildWeeklyLeaderboardFromDB(ctx context.Context) (int, error) {
 	}
 	return len(entries), nil
 }
-

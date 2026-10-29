@@ -450,5 +450,3 @@ func GenerateTokensForClient(ctx context.Context, clientRecord *models.Client) (
 
 	return accessStr, refreshStr, nil
 }
-
-
