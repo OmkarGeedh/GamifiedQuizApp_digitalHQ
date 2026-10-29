@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -179,6 +180,59 @@ func CompleteSessionHandler(c *gin.Context) {
 		return
 	}
 	response.Success(c, status, "Quiz completed", res)
+}
+
+// Sudden Death over HTTP. Responses carry the ordered game events
+// (question / answer_result / power_up_result / game_over / error) — see docs/sudden_death.md.
+
+// SuddenDeathQuestionHandler returns (and on first call starts the clock of) the current question.
+// POST /api/v1/quiz/sudden-death/question
+func SuddenDeathQuestionHandler(c *gin.Context) {
+	var req ws.JoinGameData
+	handleSuddenDeathTurn(c, &req, func(ctx context.Context, clientID int) (*ws.TurnResponse, error) {
+		return ws.CurrentTurn(ctx, clientID, req.Session, time.Now())
+	})
+}
+
+// SuddenDeathAnswerHandler grades an answer, "skip" or "timeout" for the current question.
+// POST /api/v1/quiz/sudden-death/answer
+func SuddenDeathAnswerHandler(c *gin.Context) {
+	var req ws.SubmitAnswerData
+	handleSuddenDeathTurn(c, &req, func(ctx context.Context, clientID int) (*ws.TurnResponse, error) {
+		return ws.SubmitTurn(ctx, clientID, req.Session, req, time.Now())
+	})
+}
+
+// SuddenDeathPowerUpHandler applies add_time to the current question.
+// POST /api/v1/quiz/sudden-death/power-up
+func SuddenDeathPowerUpHandler(c *gin.Context) {
+	var req ws.UsePowerUpData
+	handleSuddenDeathTurn(c, &req, func(ctx context.Context, clientID int) (*ws.TurnResponse, error) {
+		return ws.UseTurnPowerUp(ctx, clientID, req.Session, req, time.Now())
+	})
+}
+
+func handleSuddenDeathTurn(c *gin.Context, req any, run func(ctx context.Context, clientID int) (*ws.TurnResponse, error)) {
+	clientID, ok := middleware.GetAuthenticatedClientID(c)
+	if !ok {
+		response.Error(c, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	if err := c.ShouldBindJSON(req); err != nil {
+		response.Error(c, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	res, err := run(c.Request.Context(), clientID)
+	if err != nil {
+		status := http.StatusInternalServerError
+		var te *ws.TurnError
+		if errors.As(err, &te) {
+			status = te.Status
+		}
+		response.Error(c, status, err.Error())
+		return
+	}
+	response.Success(c, http.StatusOK, "OK", res)
 }
 
 // CompleteSortItOutHandler finalizes a Sort It Out swipe mini-game session.

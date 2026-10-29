@@ -24,6 +24,9 @@ func RegisterGameRoutes(router *gin.Engine) {
 		grp.POST("/fifty-fifty", handlers.FiftyFiftyHandler)
 		grp.POST("/sort-it-out/complete", handlers.CompleteSortItOutHandler)
 		grp.POST("/match-the-following/complete", handlers.CompleteMatchTheFollowingHandler)
+		grp.POST("/sudden-death/question", handlers.SuddenDeathQuestionHandler)
+		grp.POST("/sudden-death/answer", handlers.SuddenDeathAnswerHandler)
+		grp.POST("/sudden-death/power-up", handlers.SuddenDeathPowerUpHandler)
 		grp.GET("/history", handlers.GetGameHistoryHandler)
 	}
 

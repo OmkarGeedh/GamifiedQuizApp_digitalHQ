@@ -133,7 +133,7 @@ func TestRouteRegistrationBothPrefixes(t *testing.T) {
 	}
 
 	// Test sort-it-out completion endpoint exists under both /quiz and /api/v1/quiz (not 404)
-	for _, path := range []string{"/quiz/sort-it-out/complete", "/api/v1/quiz/sort-it-out/complete"} {
+	for _, path := range []string{"/quiz/sort-it-out/complete", "/api/v1/quiz/sort-it-out/complete", "/quiz/sudden-death/question", "/api/v1/quiz/sudden-death/answer", "/quiz/sudden-death/power-up", "/api/v1/quiz/sudden-death/power-up"} {
 		req, _ := http.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Origin", "http://localhost:3000")

@@ -29,7 +29,8 @@ flowchart TD
 
 ### Why AppSail?
 - Standard Catalyst Serverless Functions only natively support Node.js, Python, and Java, and do not support long-lived WebSocket connections (`/ws/game`).
-- **AppSail** allows deploying custom OCI Docker containers, providing full support for compiled **Go binaries**, high-throughput **Gin HTTP routing**, and low-latency **gorilla/websocket** connections.
+- **AppSail** allows deploying custom OCI Docker containers, providing full support for compiled **Go binaries** and **Gin HTTP routing**.
+- **WebSockets do not work through AppSail's edge** (it returns `101` without the `Upgrade` header and forwards no frames). Sudden Death therefore runs over HTTP; see [catalyst_websocket_issue.md](catalyst_websocket_issue.md).
 
 ---
 

@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand/v2"
@@ -308,41 +309,7 @@ func (gs *GameSession) handleAnswer(ctx context.Context, rawData json.RawMessage
 	// Stop question timer immediately upon answer receipt
 	stopTimer(qTimer)
 
-	var isCorrect, isSkipped bool
-	var pointsEarned int
-	var resolvedCorrect string
-
-	if strings.EqualFold(cleanOption, "skip") {
-		isCorrect = false
-		isSkipped = true
-		pointsEarned = 0
-		resolvedCorrect = q.CorrectOption
-		gs.Session.ComboStreak = 0
-		if gs.Session.IsSuddenDeath() {
-			gs.Session.SkippedCount++
-		}
-	} else {
-		isCorrect, _, resolvedCorrect = services.GradeAnswer(&q, nil, cleanOption, data.SelectedText)
-		isSkipped = false
-		if isCorrect {
-			gs.Session.ComboStreak++
-			if gs.Session.ComboStreak > gs.Session.BestStreak {
-				gs.Session.BestStreak = gs.Session.ComboStreak
-			}
-			gs.Session.CorrectCount++
-			if gs.Session.IsSuddenDeath() {
-				pointsEarned = services.CalculateSuddenDeathAnswerPoints(true, gs.Session.ComboStreak)
-				if gs.Session.ComboStreak%services.SuddenDeathStreakSize == 0 {
-					gs.Session.StreakMilestones++
-				}
-			} else {
-				pointsEarned = services.CalculateMCQAnswerPoints(true)
-			}
-		} else {
-			gs.Session.ComboStreak = 0
-		}
-	}
-	gs.Session.Score += pointsEarned
+	isCorrect, isSkipped, pointsEarned, resolvedCorrect := scoreAnswer(gs.Session, &q, cleanOption, data.SelectedText)
 	currentScore := gs.Session.Score
 
 	// Clamp time taken for audit recording
@@ -356,6 +323,7 @@ func (gs *GameSession) handleAnswer(ctx context.Context, rawData json.RawMessage
 	historyRecord := &models.UserQuestionHistory{
 		ClientID:       gs.ClientID,
 		SessionID:      gs.Session.ID,
+		GameMode:       gs.Session.GameMode,
 		QuestionCode:   q.QuestionCode,
 		SelectedOption: cleanOption,
 		IsCorrect:      isCorrect,
@@ -414,6 +382,7 @@ func (gs *GameSession) handleTimeout(ctx context.Context, tTimer *time.Timer) {
 	historyRecord := &models.UserQuestionHistory{
 		ClientID:       gs.ClientID,
 		SessionID:      gs.Session.ID,
+		GameMode:       gs.Session.GameMode,
 		QuestionCode:   q.QuestionCode,
 		SelectedOption: "timeout",
 		IsCorrect:      false,
@@ -531,57 +500,13 @@ func (gs *GameSession) handleGameEnd(ctx context.Context) {
 	endReason := gs.endReason
 	gs.mu.Unlock()
 
-	completedSuccessfully := endReason == EndReasonCompleted || endReason == EndReasonCleared
-	gs.Session.CompletedSuccessfully = completedSuccessfully
-	gs.Session.EndReason = endReason
-	if gs.Session.IsSuddenDeath() {
-		gs.Session.Score = gs.Session.CorrectCount*services.MCQCorrectAnswerPoints + gs.Session.StreakMilestones*services.SuddenDeathStreakPoints
-	} else {
-		gs.Session.Score = gs.Session.CorrectCount * services.MCQCorrectAnswerPoints
-	}
-	reward := services.CalculateGameRewards(gs.Session.Score, gs.Session.CorrectCount, gs.Session.TotalQuestions)
-	if gs.Session.IsSuddenDeath() {
-		reward = services.CalculateSuddenDeathRewards(gs.Session.CorrectCount, gs.Session.TotalQuestions, gs.Session.StreakMilestones, completedSuccessfully)
-	}
-
-	// Fetch profile for level info
-	profile, err := services.GetOrCreateProfile(ctx, gs.ClientID)
-	newLevel := 1
-	didLevelUp := false
-	if err != nil {
-		log.Printf("[ws] session %s: failed to load profile for reward calculation: %v", gs.ID, err)
+	gameOver, err := finalizeRun(ctx, gs.ClientID, gs.Session, endReason)
+	if errors.Is(err, errPrepareRewards) {
+		log.Printf("[ws] session %s: %v", gs.ID, err)
 		gs.stopAfterPersistenceFailure("failed to prepare game rewards")
 		return
 	}
-	oldLevel := profile.Level
-	newLevel = services.CalculateNewLevel(profile.Experience + reward.XP)
-	didLevelUp = newLevel > oldLevel
-
-	var levelUpReward *LevelUpRewardPayload
-	levelBonusCoins := 0
-	levelBonusGems := 0
-	if didLevelUp && profile != nil {
-		levelsGained := newLevel - profile.Level
-		levelBonusCoins = levelsGained * 50
-		levelBonusGems = levelsGained
-		levelUpReward = &LevelUpRewardPayload{
-			Coins: levelBonusCoins,
-			// XP is deliberately left at 0. docs/points_calculation.md keeps the
-			// level-up event out of xp_awarded, and the REST completion endpoint
-			// (services.CompleteSession) also leaves it unset. Assigning reward.XP
-			// here would double-count it against XPEarned in this same frame.
-			Gems: levelBonusGems,
-		}
-	}
-
-	// Atomic finalization in PostgreSQL
-	if err := repo.FinalizeSession(
-		ctx,
-		gs.Session,
-		reward.Coins+levelBonusCoins,
-		reward.XP,
-		reward.Gems+levelBonusGems,
-	); err != nil {
+	if err != nil {
 		log.Printf("[ws] session %s: finalization failed: %v", gs.ID, err)
 		gs.sendError(ErrCodeInternalError, "failed to finalize game session")
 		gs.mu.Lock()
@@ -592,34 +517,7 @@ func (gs *GameSession) handleGameEnd(ctx context.Context) {
 		}
 		return
 	}
-
-	if didLevelUp && profile != nil {
-		if err := repo.UpdateProfileLevel(ctx, gs.ClientID, newLevel); err != nil {
-			log.Printf("[ws] session %s: failed to persist level %d: %v", gs.ID, newLevel, err)
-		}
-	}
-
-	// Send final game_over summary frame
-	gs.sendToPlayer(OutboundMessage{
-		Type: MsgTypeGameOver,
-		Data: GameOverPayload{
-			FinalScore:            gs.Session.Score,
-			TotalQuestions:        gs.Session.TotalQuestions,
-			CorrectCount:          gs.Session.CorrectCount,
-			SkippedCount:          gs.Session.SkippedCount,
-			BestStreak:            gs.Session.BestStreak,
-			CoinsEarned:           reward.Coins,
-			XPEarned:              reward.XP,
-			GemsEarned:            reward.Gems,
-			NewLevel:              newLevel,
-			DidLevelUp:            didLevelUp,
-			LevelUpReward:         levelUpReward,
-			GameMode:              gs.Session.GameMode,
-			EndReason:             endReason,
-			EndedEarly:            !completedSuccessfully,
-			CompletedSuccessfully: completedSuccessfully,
-		},
-	})
+	gs.sendToPlayer(OutboundMessage{Type: MsgTypeGameOver, Data: *gameOver})
 
 	// Graceful close: wait 1s grace period, then close connection (Guarantee 1)
 	gs.mu.Lock()
@@ -768,4 +666,97 @@ func (gs *GameSession) sendError(code, message string) {
 			Message: message,
 		},
 	})
+}
+
+// scoreAnswer grades option for q and applies streak/score/skip bookkeeping to s.
+func scoreAnswer(s *models.GameSession, q *models.SessionQuestion, option, selectedText string) (isCorrect, isSkipped bool, pointsEarned int, resolvedCorrect string) {
+	if strings.EqualFold(option, "skip") {
+		s.ComboStreak = 0
+		if s.IsSuddenDeath() {
+			s.SkippedCount++
+		}
+		return false, true, 0, q.CorrectOption
+	}
+	isCorrect, _, resolvedCorrect = services.GradeAnswer(q, nil, option, selectedText)
+	if !isCorrect {
+		s.ComboStreak = 0
+		return false, false, 0, resolvedCorrect
+	}
+	s.ComboStreak++
+	if s.ComboStreak > s.BestStreak {
+		s.BestStreak = s.ComboStreak
+	}
+	s.CorrectCount++
+	if s.IsSuddenDeath() {
+		pointsEarned = services.CalculateSuddenDeathAnswerPoints(true, s.ComboStreak)
+		if s.ComboStreak%services.SuddenDeathStreakSize == 0 {
+			s.StreakMilestones++
+		}
+	} else {
+		pointsEarned = services.CalculateMCQAnswerPoints(true)
+	}
+	s.Score += pointsEarned
+	return true, false, pointsEarned, resolvedCorrect
+}
+
+var errPrepareRewards = errors.New("failed to load profile for reward calculation")
+
+// finalizeRun computes the final score and rewards for a finished run, commits them
+// atomically and returns the game_over payload. s.Status becomes finished.
+func finalizeRun(ctx context.Context, clientID int, s *models.GameSession, endReason string) (*GameOverPayload, error) {
+	completedSuccessfully := endReason == EndReasonCompleted || endReason == EndReasonCleared
+	s.CompletedSuccessfully = completedSuccessfully
+	s.EndReason = endReason
+	var reward services.GameRewardSummary
+	if s.IsSuddenDeath() {
+		s.Score = s.CorrectCount*services.MCQCorrectAnswerPoints + s.StreakMilestones*services.SuddenDeathStreakPoints
+		reward = services.CalculateSuddenDeathRewards(s.CorrectCount, s.TotalQuestions, s.StreakMilestones, completedSuccessfully)
+	} else {
+		s.Score = s.CorrectCount * services.MCQCorrectAnswerPoints
+		reward = services.CalculateGameRewards(s.Score, s.CorrectCount, s.TotalQuestions)
+	}
+
+	profile, err := services.GetOrCreateProfile(ctx, clientID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errPrepareRewards, err)
+	}
+	newLevel := services.CalculateNewLevel(profile.Experience + reward.XP)
+	didLevelUp := newLevel > profile.Level
+
+	var levelUpReward *LevelUpRewardPayload
+	levelBonusCoins, levelBonusGems := 0, 0
+	if didLevelUp {
+		levelsGained := newLevel - profile.Level
+		levelBonusCoins = levelsGained * 50
+		levelBonusGems = levelsGained
+		// XP stays 0: docs/points_calculation.md keeps the level-up event out of xp_awarded.
+		levelUpReward = &LevelUpRewardPayload{Coins: levelBonusCoins, Gems: levelBonusGems}
+	}
+
+	if err := repo.FinalizeSession(ctx, s, reward.Coins+levelBonusCoins, reward.XP, reward.Gems+levelBonusGems); err != nil {
+		return nil, err
+	}
+	if didLevelUp {
+		if err := repo.UpdateProfileLevel(ctx, clientID, newLevel); err != nil {
+			log.Printf("[ws] session %s: failed to persist level %d: %v", s.ID, newLevel, err)
+		}
+	}
+
+	return &GameOverPayload{
+		FinalScore:            s.Score,
+		TotalQuestions:        s.TotalQuestions,
+		CorrectCount:          s.CorrectCount,
+		SkippedCount:          s.SkippedCount,
+		BestStreak:            s.BestStreak,
+		CoinsEarned:           reward.Coins,
+		XPEarned:              reward.XP,
+		GemsEarned:            reward.Gems,
+		NewLevel:              newLevel,
+		DidLevelUp:            didLevelUp,
+		LevelUpReward:         levelUpReward,
+		GameMode:              s.GameMode,
+		EndReason:             endReason,
+		EndedEarly:            !completedSuccessfully,
+		CompletedSuccessfully: completedSuccessfully,
+	}, nil
 }

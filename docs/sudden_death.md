@@ -1,167 +1,125 @@
-# Sudden Death WebSocket API contract
+# Sudden Death HTTP API contract
 
-Sudden Death is a backend-authoritative, two-option quiz mode served over
-`GET /ws/game` (also available at `GET /api/v1/ws/game`). The backend owns
-question selection and shuffling, grading, timing, progression, scoring, and
-rewards.
+Sudden Death is a backend-authoritative, two-option quiz mode played as HTTP turns.
+The backend owns question selection and shuffling, grading, timing, progression,
+scoring, and rewards. It runs over HTTP because Zoho Catalyst does not carry
+WebSocket traffic; see [catalyst_websocket_issue.md](catalyst_websocket_issue.md).
+Implementation: `internal/ws/turns.go` (HTTP) sharing `scoreAnswer` / `finalizeRun`
+with the legacy socket game.
 
-## Session creation and question contract
+## Session creation
 
-Create the session with `POST /api/v1/quiz/sessions/create` and
-`game_mode: "sudden_death"` before opening the socket.
+`POST /api/v1/quiz/sessions/create` with `game_mode: "sudden_death"`, `topic`
+(subject code, e.g. `accounts`) and optional `chapter_no`. Questions come from
+`sudden_death_questions` (exactly two options each). Explicit `question_codes` are
+rejected if any is missing or not a Sudden Death question. The response omits
+`correct_option`; the shuffled correct mapping stays on the server.
 
-Every selected question must:
+## Endpoints
 
-- have `question_type: "sudden_death"`;
-- contain exactly two non-empty options; and
-- identify one of those options as correct.
+All are `POST`, authenticated (`Authorization: Bearer`), available at `/quiz/...`
+and `/api/v1/quiz/...`, and return `data.events`: the ordered game events.
 
-Explicit `question_codes` are rejected if any requested question is missing or
-belongs to another mode. WebSocket recovery also reloads questions by topic and
-mode, so MCQ questions cannot enter a Sudden Death session. The session creation
-response omits `correct_option`; the shuffled correct mapping remains on the
-server.
+| Endpoint | Body | Events returned |
+|---|---|---|
+| `/quiz/sudden-death/question` | `{session}` | `question` (starts its clock on first call; idempotent resync) — or `answer_result` + `game_over` if the deadline already passed |
+| `/quiz/sudden-death/answer` | `{session, question, option, selected_text?, time_taken_ms}` | `answer_result`, then `question` (next) or `game_over` |
+| `/quiz/sudden-death/power-up` | `{session, question, power_up: "add_time"}` | `power_up_result` |
 
-## Connection and resync
-
-| Property | Value |
-| --- | --- |
-| Endpoint | `GET /ws/game` or `GET /api/v1/ws/game` |
-| Auth | `clientAccessToken` cookie, bearer header, or `?token=` query |
-| Required query | `session_id` |
-| Question timer | 15 seconds, server authoritative |
-
-The first server frame is the active `question`. A reconnect or an idempotent
-`join_game` request returns that question with the current
-`remaining_time_ms`.
+Gameplay rejections are returned as an `error` event with HTTP 200 (see error codes).
+HTTP errors are reserved for transport problems: `400` bad body / not a Sudden Death
+session, `401` auth, `403` another player's session, `404` unknown session, `500`
+persistence/finalization failure.
 
 ```json
 {
-  "type": "join_game",
-  "data": { "session": "<session-uuid>" }
+  "success": true,
+  "data": {
+    "events": [
+      { "type": "answer_result", "data": { "question": "acc11-01-sd-0003", "is_correct": true, "...": "..." } },
+      { "type": "question", "data": { "question": "acc11-01-sd-0007", "remaining_time_ms": 15000, "...": "..." } }
+    ]
+  }
 }
 ```
 
-The in-process session retains the authoritative deadline, including an
-accepted `add_time` extension. During a disconnect the remaining budget is
-paused and resumes when the player reconnects. Deadline state is not currently
-durable across a backend process restart.
+## Timing
 
-## Question frame
+| Rule | Value |
+|---|---|
+| Question time | 15 s, server authoritative (`question_deadline` on the cached session) |
+| Clock start | first `/question` call for that question; the next question's deadline also includes the 400 ms result transition |
+| HTTP grace | an answer received up to 1 s after the deadline is still graded (network jitter); later is a timeout |
+| Timeout | client posts `option: "timeout"` when `remaining_time_ms` runs out; any later request also resolves it |
+
+There is no disconnect pause: a backgrounded app keeps the clock running. Sessions
+expire after 5 minutes of inactivity (`SessionInactivityTTL`).
+
+## Question event
 
 ```json
 {
   "type": "question",
   "data": {
-    "question": "sd_acc_001",
-    "prompt": "Which account is debited when goods are purchased for cash?",
+    "question": "acc11-01-sd-0003",
+    "prompt": "Which scholar defined book-keeping as 'an art of recording business dealings in a set of books'?",
     "options": [
-      { "option": "a", "text": "Purchases Account" },
-      { "option": "b", "text": "Cash Account" }
+      { "option": "a", "text": "J. R. Batliboi" },
+      { "option": "b", "text": "Luca Pacioli" }
     ],
-    "points": 10,
+    "points": 3,
     "time_limit_ms": 15000,
     "remaining_time_ms": 15000,
     "question_number": 1,
-    "total_questions": 10
+    "total_questions": 10,
+    "server_timestamp_ms": 1793286822422
   }
 }
 ```
 
-Option order is shuffled per session. Clients must submit the displayed option
-letter. The original database letter cannot make a shuffled answer correct, and
+Option order is shuffled per session. Clients submit the displayed option letter.
 `selected_text` cannot override a contradictory option letter.
 
-## Submit answer and Skip
+## Skip and Add 5 seconds
+
+`option: "skip"` awards zero points, resets the streak, increments
+`skipped_count`, and advances. It does not end the run.
+
+`add_time` may be used once per run, before the deadline. It extends the
+authoritative deadline by exactly 5000 ms:
 
 ```json
-{
-  "type": "submit_answer",
-  "data": {
-    "question": "sd_acc_001",
-    "option": "a",
-    "selected_text": "optional compatibility value",
-    "time_taken_ms": 2500
-  }
-}
+{ "type": "power_up_result", "data": { "question": "acc11-01-sd-0003", "power_up": "add_time", "added_time_ms": 5000, "remaining_time_ms": 17200 } }
 ```
 
-Use `"option": "skip"` for Skip. Skip awards zero points, resets the current
-streak, increments `skipped_count`, and advances to the next question. It does
-not end the run.
-
-The backend checks receive time against the authoritative deadline before
-accepting an answer or Skip. At or after the deadline, timeout wins.
-
-An `answer_result` reports backend-authoritative correctness, the shuffled
-`correct_option`, points earned, total score, skip status, and timeout status.
-
-## Add 5 seconds
-
-Sudden Death supports one `add_time` use per in-process session:
-
-```json
-{
-  "type": "use_power_up",
-  "data": {
-    "session": "<session-uuid>",
-    "question": "sd_acc_001",
-    "power_up": "add_time"
-  }
-}
-```
-
-If accepted before the deadline, the backend extends the actual question
-deadline and timer by exactly 5000 milliseconds and replies:
-
-```json
-{
-  "type": "power_up_result",
-  "data": {
-    "question": "sd_acc_001",
-    "power_up": "add_time",
-    "added_time_ms": 5000,
-    "remaining_time_ms": 9200
-  }
-}
-```
-
-Stale, late, duplicate, inactive-session, and post-answer requests return an
-`error` frame without closing an otherwise healthy connection. Wallet debit
-ownership is unchanged by this protocol; the backend does not introduce a new
-automatic debit here.
-
-`fifty_fifty` is rejected with `unsupported_power_up` in Sudden Death because
-the mode already has only two options. Existing MCQ 50:50 behavior is unchanged.
+`fifty_fifty` is rejected with `unsupported_power_up` (the mode has two options).
+Wallet debits for power-ups are unchanged by this protocol.
 
 ## Progression and completion
 
 | Outcome | Result |
-| --- | --- |
+|---|---|
 | Correct | Award points and continue |
 | Skip | Zero points, reset streak, continue |
 | Wrong | Zero points and end with `wrong_answer` |
 | Timeout | Zero points and end with `timeout` |
 | Reach the end | End with `completed` |
-| Inactivity/abandonment | Persist `abandoned` |
+| Inactivity | Session expires and is treated as `abandoned` |
 
 Only reaching the end without a wrong answer or timeout sets
-`completed_successfully: true`. A run containing skips can still complete.
-Terminal handling is idempotent, so competing late events cannot produce a
-second `game_over`.
+`completed_successfully: true`. A run with skips can still complete. Each answer
+takes a per-question lock, so a double tap cannot be graded twice.
 
 ## Scoring and rewards
 
 - Correct answer: 10 points.
 - Every third consecutive correct answer: additional 5 points.
-- Skip: 0 points and resets the current streak.
-- Wrong answer or timeout: 0 points and ends the run.
+- Skip, wrong answer, timeout: 0 points (the latter two end the run).
 - No speed bonus.
 
-The separate XP and coin formulas are documented in
-[points_calculation.md](points_calculation.md).
+XP and coin formulas: [points_calculation.md](points_calculation.md).
 
-## Game-over frame
+## Game-over event
 
 ```json
 {
@@ -186,18 +144,12 @@ The separate XP and coin formulas are documented in
 }
 ```
 
-`level_up_reward` is a separate economy event and is omitted when no level-up
-occurs. `game_over` is emitted exactly once, followed by a normal WebSocket
-close.
+`level_up_reward` is a separate economy event and is omitted when no level-up occurs.
+Rewards are committed atomically with the session (`repo.FinalizeSession`) before
+`game_over` is returned.
 
-## Error codes
+## Error codes (`error` event)
 
-Common codes are `invalid_payload`, `missing_question`, `stale_answer`,
-`missing_option`, `unsupported_power_up`, `power_up_already_used`,
-`session_mismatch`, `session_not_active`, `transition_in_progress`, and
-`internal_error`.
-
-An error frame does not advance the question. Persistence or finalization
-failures are logged; a failed authoritative finalization returns
-`internal_error` and closes the connection instead of reporting a successful
-game over.
+`missing_question`, `missing_option`, `stale_answer` (wrong/old question, question
+not served yet, or duplicate submit), `unsupported_power_up`,
+`power_up_already_used`, `session_not_active`. An error never advances the question.

@@ -123,11 +123,15 @@ func (ContentCount) TableName() string {
 
 // GameSession tracks a single quiz session for a player.
 type GameSession struct {
-	ID                    string     `gorm:"column:id;type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
-	ClientID              int        `gorm:"column:client_id;not null;index:idx_game_sessions_client;index:idx_game_sessions_client_status,priority:1" json:"client_id"`
-	TopicID               string     `gorm:"column:topic_id;size:64;not null;default:'general'" json:"topic_id"`
-	GameMode              string     `gorm:"column:game_mode;size:20;not null;default:'mcq'" json:"game_mode"`
-	ChapterNo             int        `gorm:"-" json:"chapter_no,omitempty"`
+	ID        string `gorm:"column:id;type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	ClientID  int    `gorm:"column:client_id;not null;index:idx_game_sessions_client;index:idx_game_sessions_client_status,priority:1" json:"client_id"`
+	TopicID   string `gorm:"column:topic_id;size:64;not null;default:'general'" json:"topic_id"`
+	GameMode  string `gorm:"column:game_mode;size:20;not null;default:'mcq'" json:"game_mode"`
+	ChapterNo int    `gorm:"-" json:"chapter_no,omitempty"`
+	// QuestionDeadline and AddTimeUsed drive server-authoritative timing for the
+	// HTTP Sudden Death flow (internal/ws/turns.go). Nil deadline = current question not served yet.
+	QuestionDeadline      *time.Time `gorm:"-" json:"question_deadline,omitempty"`
+	AddTimeUsed           bool       `gorm:"-" json:"add_time_used,omitempty"`
 	PairType              string     `gorm:"column:pair_type;size:32" json:"pair_type,omitempty"`
 	TotalQuestions        int        `gorm:"column:total_questions;not null;default:10" json:"total_questions"`
 	CurrentIdx            int        `gorm:"column:current_idx;not null;default:0" json:"current_idx"`
