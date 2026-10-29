@@ -180,24 +180,26 @@ func ClientAuthMiddleware(c *gin.Context) {
 		}()
 	}
 
-	// The active-client check is cached in-process for clientAuthCacheTTL so gameplay
+	// The active-client check is cached in Redis for clientAuthCacheTTL so gameplay
 	// requests skip the PostgreSQL round trip; a blocked/deleted player is locked out
-	// within that window.
-	cacheKey := fmt.Sprintf("auth:client:%d", clientID)
-	if cached, ok := cache.Local.Get(cacheKey); ok {
-		client = cached.(ClientClaims)
-	} else if config.DB != nil {
+	// within that window. Without Redis every request checks PostgreSQL.
+	if config.DB != nil {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			dbErr = config.DB.WithContext(c.Request.Context()).
+			ctx := c.Request.Context()
+			cacheKey := fmt.Sprintf("quiz:auth:client:%d", clientID)
+			if cache.GetJSON(ctx, cacheKey, &client) {
+				return
+			}
+			dbErr = config.DB.WithContext(ctx).
 				Table("clients").
 				Select("id, username, email, status, phone").
 				Where("id = ? AND status != ?", clientID, "deleted").
 				Limit(1).
 				Take(&client).Error
 			if dbErr == nil {
-				cache.Local.Set(cacheKey, client, clientAuthCacheTTL)
+				_ = cache.SetJSON(ctx, cacheKey, client, clientAuthCacheTTL)
 			}
 		}()
 	}

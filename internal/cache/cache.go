@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -21,6 +22,7 @@ const (
 	WeeklyLeaderboardPrevKey  = "quiz:leaderboard:weekly:prev"
 	WeeklyLeaderboardTTL      = 7 * 24 * time.Hour
 	AvailableTopicsCatalogKey = "quiz:catalog:available_topics"
+	ContentCountsCatalogKey   = "quiz:catalog:content_counts"
 )
 
 // SingleFlight group to coalesce duplicate concurrent cache misses (thundering herd mitigation)
@@ -46,6 +48,31 @@ func QuestionCatalogKey(topicID, gameMode string) string {
 // IsRedisAvailable returns true if the global Redis client is connected
 func IsRedisAvailable() bool {
 	return config.RedisClient != nil
+}
+
+// GetJSON decodes the Redis value at key into dst. It reports false on a miss, a
+// decode error, or when Redis is unavailable (all caching lives in Redis only).
+func GetJSON(ctx context.Context, key string, dst any) bool {
+	if config.RedisClient == nil {
+		return false
+	}
+	data, err := config.RedisClient.Get(ctx, key).Bytes()
+	if err != nil {
+		return false
+	}
+	return json.Unmarshal(data, dst) == nil
+}
+
+// SetJSON stores v at key in Redis with ttl. It is a no-op when Redis is unavailable.
+func SetJSON(ctx context.Context, key string, v any, ttl time.Duration) error {
+	if config.RedisClient == nil {
+		return nil
+	}
+	data, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	return config.RedisClient.Set(ctx, key, data, ttl).Err()
 }
 
 // AcquireAnswerLock attempts to acquire an atomic lock to prevent duplicate answer submissions in < 0.1ms.

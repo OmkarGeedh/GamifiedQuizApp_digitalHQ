@@ -131,8 +131,13 @@ func GetQuestionByCode(ctx context.Context, code string) (*models.Question, erro
 	return &qs[0], nil
 }
 
-// GetContentCounts returns per subject/chapter/mode question counts, cached for an hour.
+// GetContentCounts returns per subject/chapter/mode question counts, cached in Redis
+// for an hour (content only changes on re-seed).
 func GetContentCounts(ctx context.Context) ([]models.ContentCount, error) {
+	var cached []models.ContentCount
+	if cache.GetJSON(ctx, cache.ContentCountsCatalogKey, &cached) {
+		return cached, nil
+	}
 	val, err, _ := cache.RequestGroup.Do("content_counts", func() (interface{}, error) {
 		db := GetDB()
 		if db == nil {
@@ -142,6 +147,9 @@ func GetContentCounts(ctx context.Context) ([]models.ContentCount, error) {
 		err := db.WithContext(ctx).
 			Order("sort_order, topic_id, chapter_no, game_mode").
 			Find(&rows).Error
+		if err == nil && len(rows) > 0 {
+			_ = cache.SetJSON(ctx, cache.ContentCountsCatalogKey, rows, cache.CatalogCacheTTL)
+		}
 		return rows, err
 	})
 	if err != nil {
