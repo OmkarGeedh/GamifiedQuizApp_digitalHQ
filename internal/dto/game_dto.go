@@ -145,13 +145,37 @@ func (r *FiftyFiftyRequestDTO) Validate() error {
 // CompleteSessionRequestDTO validates a session completion request.
 type CompleteSessionRequestDTO struct {
 	Session string `json:"session" binding:"required"`
+	// Answers lets the client grade locally during play and send every answer with
+	// complete: one request per game instead of one per question. Answers already
+	// sent through /quiz/answers/evaluate are ignored.
+	Answers []SessionAnswerDTO `json:"answers,omitempty"`
 }
 
-// Validate ensures the session field is non-empty.
+// SessionAnswerDTO is one answer inside a batched complete request.
+type SessionAnswerDTO struct {
+	Question     string `json:"question"`
+	Option       string `json:"option"`
+	SelectedText string `json:"selected_text,omitempty"`
+	TimeTakenMs  int    `json:"time_taken_ms"`
+}
+
+// Validate ensures the session field is non-empty and answers are well formed.
 func (r *CompleteSessionRequestDTO) Validate() error {
 	r.Session = strings.TrimSpace(r.Session)
 	if r.Session == "" {
 		return errors.New("session is required")
+	}
+	if len(r.Answers) > 100 {
+		return errors.New("answers must not exceed 100")
+	}
+	for i := range r.Answers {
+		a := &r.Answers[i]
+		a.Question = strings.TrimSpace(a.Question)
+		a.Option = strings.ToLower(strings.TrimSpace(a.Option))
+		if a.Question == "" || a.Option == "" {
+			return errors.New("each answer needs question and option")
+		}
+		a.TimeTakenMs = max(0, a.TimeTakenMs)
 	}
 	return nil
 }

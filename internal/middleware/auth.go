@@ -6,13 +6,18 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/cache"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/config"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/utils"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/utils/response"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 )
+
+// clientAuthCacheTTL bounds how long a cached active-client check is trusted.
+const clientAuthCacheTTL = time.Minute
 
 type ClientClaims struct {
 	ID       int     `gorm:"column:id" db:"id" json:"id"`
@@ -175,7 +180,13 @@ func ClientAuthMiddleware(c *gin.Context) {
 		}()
 	}
 
-	if config.DB != nil {
+	// The active-client check is cached in-process for clientAuthCacheTTL so gameplay
+	// requests skip the PostgreSQL round trip; a blocked/deleted player is locked out
+	// within that window.
+	cacheKey := fmt.Sprintf("auth:client:%d", clientID)
+	if cached, ok := cache.Local.Get(cacheKey); ok {
+		client = cached.(ClientClaims)
+	} else if config.DB != nil {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -185,6 +196,9 @@ func ClientAuthMiddleware(c *gin.Context) {
 				Where("id = ? AND status != ?", clientID, "deleted").
 				Limit(1).
 				Take(&client).Error
+			if dbErr == nil {
+				cache.Local.Set(cacheKey, client, clientAuthCacheTTL)
+			}
 		}()
 	}
 

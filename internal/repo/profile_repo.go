@@ -46,22 +46,15 @@ func UpdateProfile(ctx context.Context, profile *models.Profile) error {
 	return nil
 }
 
-// activeDaysKept is how many days of play history clients.active_days keeps.
-const activeDaysKept = 31
-
-// RecordDailyActivity adds dateStr (YYYY-MM-DD) to the player's active_days, keeping
-// only the last activeDaysKept days.
+// RecordDailyActivity marks dateStr (YYYY-MM-DD) as a day the player was active.
 func RecordDailyActivity(ctx context.Context, clientID int, dateStr string) error {
 	db := GetDB()
 	if db == nil {
 		return nil
 	}
-	return db.WithContext(ctx).Exec(`
-UPDATE clients SET active_days = ARRAY(
-    SELECT DISTINCT d FROM unnest(array_append(active_days, ?::date)) AS d
-    WHERE d > ?::date - ? ORDER BY d)
-WHERE id = ? AND NOT (?::date = ANY (active_days))`,
-		dateStr, dateStr, activeDaysKept, clientID, dateStr).Error
+	return db.WithContext(ctx).Exec(
+		`INSERT INTO client_activity_days (client_id, day) VALUES (?, ?) ON CONFLICT DO NOTHING`,
+		clientID, dateStr).Error
 }
 
 func GetLast7DaysStreak(ctx context.Context, clientID int) ([]dto.DayStreakDTO, error) {
@@ -72,7 +65,7 @@ func GetLast7DaysStreak(ctx context.Context, clientID int) ([]dto.DayStreakDTO, 
 	now := time.Now().UTC()
 	var activeDays []string
 	err := db.WithContext(ctx).Raw(
-		`SELECT to_char(d, 'YYYY-MM-DD') FROM clients, unnest(active_days) AS d WHERE id = ? AND d > ?::date - 7`,
+		`SELECT to_char(day, 'YYYY-MM-DD') FROM client_activity_days WHERE client_id = ? AND day > ?::date - 7`,
 		clientID, now.Format("2006-01-02")).
 		Scan(&activeDays).Error
 	if err != nil {

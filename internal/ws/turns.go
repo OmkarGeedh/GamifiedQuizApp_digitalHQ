@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -118,8 +119,10 @@ func (t *turn) serve(afterTransition bool) {
 	t.emit(MsgTypeQuestion, payload)
 }
 
-func (t *turn) record(ctx context.Context, q *models.SessionQuestion, option string, correct bool, timeTakenMs, points int) {
-	_ = repo.RecordAnswer(ctx, &models.UserQuestionHistory{
+// record writes answer history in the background so the turn response never waits
+// on PostgreSQL; the session itself lives in Redis.
+func (t *turn) record(_ context.Context, q *models.SessionQuestion, option string, correct bool, timeTakenMs, points int) {
+	rec := &models.UserQuestionHistory{
 		ClientID:       t.clientID,
 		SessionID:      t.s.ID,
 		GameMode:       t.s.GameMode,
@@ -128,7 +131,14 @@ func (t *turn) record(ctx context.Context, q *models.SessionQuestion, option str
 		IsCorrect:      correct,
 		TimeTakenMs:    max(0, min(timeTakenMs, questionTimeLimitSec*1000+int(addTimeDuration.Milliseconds()))),
 		PointsAwarded:  points,
-	})
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := repo.RecordAnswer(ctx, rec); err != nil {
+			log.Printf("[sudden-death] async persist answer failed for %s: %v", rec.QuestionCode, err)
+		}
+	}()
 }
 
 func (t *turn) end(ctx context.Context, reason string) error {

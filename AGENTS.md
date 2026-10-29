@@ -30,14 +30,14 @@ Tests create their own content via `internal/handlers/content_fixture_test.go` (
 
 The backend never migrates or seeds. Schema, content CSVs and seeds live in `../SkillVerse-SQL_Migration` (see its AGENTS.md); `make migrate-up && make seed` there.
 
-Tables (9): `clients` (login + profile + balances + streak in one row), `wallet_ledger`, `subjects` (chapter titles in `chapters jsonb`), `mcq_questions`, `sudden_death_questions`, `sort_it_out_questions`, `match_pairs`, `user_question_history`, `leaderboard_game_results`. Game sessions live only in Redis (in-memory fallback).
+Tables (11, relational, natural keys): `clients` (login + profile + balances + streak counters in one row), `client_activity_days`, `wallet_ledger`, `subjects`, `chapters` (PK `subject, chapter_no`; every content row references it), `mcq_questions`, `sudden_death_questions`, `sort_it_out_questions`, `match_pairs`, `user_question_history`, `leaderboard_game_results`. Game sessions live only in Redis (in-memory fallback).
 
 - Content tables are read directly and are read-only for the backend (never write content with GORM). Each row has `question_code` (PK), `subject`, `chapter_no`; models in `internal/models/game_model.go`. `v_content_counts` (subject → chapter → per-mode counts) feeds `GET /subjects` and Match board titles.
 - API `topic_id` / `topic` = `subjects.code` (`accounts`, `economics`, `maths1`, `maths2`). Optional `chapter_no` narrows a session.
 - Question codes: `<subject short>-<ch>-<mode>-<n>`, ≤ 20 chars (e.g. `acc11-04-mcq-0012`); unique across all games, so `GetQuestionsByCodes` checks the MCQ and Sudden Death tables.
 - Sort It Out `pair_type` = `set_code` (items of one game share it; buckets are `bucket_a/b`).
 - Match the Following: `match_pairs` stores single pairs. `services.DealMatchBoards` shuffles a subject/chapter's pairs and deals them evenly into boards of 4 per chapter (no repeated left/right text on a board), titled "<subject> · <chapter>" with session-local codes `board-<n>`. Pair IDs are pair question codes; history is written per pair.
-- `Profile` and `Client` both map to `clients` (`Profile.ClientID` = `id`). Signup creates the full row with starter balances via DB defaults; `GetOrCreateProfile` only fills an empty `full_name` from the username. Streak days are `clients.active_days` (`RecordDailyActivity`).
+- `Profile` and `Client` both map to `clients` (`Profile.ClientID` = `id`). Signup creates the full row with starter balances via DB defaults; `GetOrCreateProfile` only fills an empty `full_name` from the username. Streak days are rows in `client_activity_days` (`RecordDailyActivity`).
 - `user_question_history` PK is `(session_id, question_code)`; inserts use `ON CONFLICT DO NOTHING`. `game_mode` is NOT NULL without default — always set `GameMode`.
 - `leaderboard_game_results` (PK `session_id`) is created by migrations; do not reintroduce `AutoMigrate`.
 - Demo login: `player@example.com` / `secretpassword123` (seeded by the migration repo).
@@ -56,6 +56,14 @@ All gameplay is HTTP. **Zoho Catalyst does not tunnel WebSockets** (101 without 
 Sudden Death HTTP turns live in `internal/ws/turns.go` and return ordered events (`question`, `answer_result`, `power_up_result`, `game_over`, `error`). Timing is server-authoritative via `question_deadline` / `add_time_used` on the cached session (+1 s HTTP grace). Scoring (`scoreAnswer`) and finalization (`finalizeRun`) in `internal/ws/session_handlers.go` are shared with the legacy socket game — keep rules in one place.
 
 `/ws/game` and `/ws/echo` still exist but no client uses them; they are deletion candidates. Don't build new features on WebSockets while hosted on Catalyst.
+
+## Latency rules (production DB is remote: every query is a full network round trip)
+
+- Gameplay requests must not touch PostgreSQL synchronously. Sessions are created, read and updated in Redis (`repo.CreateSession/GetSessionByID/UpdateSession`); answer history is written in a background goroutine (`EvaluateAnswer`, Sudden Death `turn.record`).
+- The auth middleware caches the active-client check in-process for 1 minute (`cache.Local`, `clientAuthCacheTTL`).
+- MCQ: the client grades locally (the session carries `correct_option`) and sends all answers with `POST /quiz/sessions/complete` (`answers`); the server re-grades from the Redis session via `applyAnswer`. `/quiz/answers/evaluate` still works; answers sent both ways count once.
+- Completing a game is one SQL statement (`repo.finalizeSQL`: leaderboard row → ledger → activity day → balances/level via writable CTEs, idempotent on `session_id`) plus the profile read.
+- Locally (DB next to the server) evaluate ≈ 1–2 ms and complete ≈ 5 ms; on Catalyst the time is the DB round trip, so keep the DB and Redis in the same region as AppSail.
 
 ## Scoring is deliberately fixed
 

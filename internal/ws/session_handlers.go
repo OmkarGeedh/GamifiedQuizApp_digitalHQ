@@ -733,13 +733,8 @@ func finalizeRun(ctx context.Context, clientID int, s *models.GameSession, endRe
 		levelUpReward = &LevelUpRewardPayload{Coins: levelBonusCoins, Gems: levelBonusGems}
 	}
 
-	if err := repo.FinalizeSession(ctx, s, reward.Coins+levelBonusCoins, reward.XP, reward.Gems+levelBonusGems); err != nil {
+	if err := repo.FinalizeSession(ctx, s, reward.Coins+levelBonusCoins, reward.XP, reward.Gems+levelBonusGems, newLevel); err != nil {
 		return nil, err
-	}
-	if didLevelUp {
-		if err := repo.UpdateProfileLevel(ctx, clientID, newLevel); err != nil {
-			log.Printf("[ws] session %s: failed to persist level %d: %v", s.ID, newLevel, err)
-		}
 	}
 
 	return &GameOverPayload{

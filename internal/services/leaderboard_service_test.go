@@ -632,7 +632,7 @@ func TestLeaderboard_PersistenceForEveryGameMode(t *testing.T) {
 			Status:   models.SessionStatusFinished,
 		}
 		// FinalizeSession must persist LeaderboardGameResult
-		if err := repo.FinalizeSession(ctx, sess, 10, 10, 1); err != nil {
+		if err := repo.FinalizeSession(ctx, sess, 10, 10, 1, 1); err != nil {
 			t.Fatalf("FinalizeSession failed for mode %s: %v", m.mode, err)
 		}
 	}

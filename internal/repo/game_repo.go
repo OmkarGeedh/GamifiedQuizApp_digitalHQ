@@ -368,88 +368,56 @@ func GetClientGameHistory(ctx context.Context, clientID, limit, offset int) ([]m
 
 // --- Finalization (Atomic Transaction) ---
 
-// FinalizeSession atomically commits rewards to wallet_ledger, updates the player's balances,
-// increments Redis real-time leaderboard (ZINCRBY), and cleans up ephemeral session keys.
-func FinalizeSession(ctx context.Context, session *models.GameSession, coins, xp, gems int) error {
+// finalizeSQL commits a finished game in one statement (one round trip, atomic):
+// reward ledger rows, balances + level, today's activity day and the leaderboard row.
+// The leaderboard insert is the idempotency guard: if the session was already
+// finalized nothing else is written.
+const finalizeSQL = `
+WITH result AS (
+    INSERT INTO leaderboard_game_results (session_id, client_id, topic_id, game_mode, final_score, completed_at)
+    VALUES (@session, @client, @topic, @mode, @score, @now)
+    ON CONFLICT (session_id) DO NOTHING
+    RETURNING client_id
+), ledger AS (
+    INSERT INTO wallet_ledger (client_id, transaction_type, amount, currency, reference_id)
+    SELECT r.client_id, @tx_type, v.amount, v.currency, @session
+    FROM result r, (VALUES (CAST(@coins AS int), 'coins'), (CAST(@xp AS int), 'experience'), (CAST(@gems AS int), 'gems')) AS v (amount, currency)
+    WHERE v.amount > 0
+), activity AS (
+    INSERT INTO client_activity_days (client_id, day)
+    SELECT client_id, CAST(@now AS date) FROM result
+    ON CONFLICT DO NOTHING
+)
+UPDATE clients c
+SET coins = coins + @coins, gems = gems + @gems, experience = experience + @xp,
+    weekly_score = weekly_score + @score, level = GREATEST(level, @level), updated_at = now()
+FROM result r
+WHERE c.id = r.client_id`
+
+// FinalizeSession commits rewards, level, streak day and the leaderboard result in one
+// round trip, then updates the Redis leaderboard and clears ephemeral session keys.
+func FinalizeSession(ctx context.Context, session *models.GameSession, coins, xp, gems, level int) error {
 	now := time.Now().UTC()
 	session.Status = models.SessionStatusFinished
 	session.EndedAt = &now
 
 	db := GetDB()
 	if db != nil {
-		err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			// 1. Write immutable wallet ledger entries in single batch
-			ledgerEntries := []models.WalletLedger{}
-			if coins > 0 {
-				ledgerEntries = append(ledgerEntries, models.WalletLedger{
-					ClientID:        session.ClientID,
-					TransactionType: models.TxTypeQuizReward,
-					Amount:          coins,
-					Currency:        models.CurrencyCoins,
-					ReferenceID:     session.ID,
-				})
-			}
-			if xp > 0 {
-				ledgerEntries = append(ledgerEntries, models.WalletLedger{
-					ClientID:        session.ClientID,
-					TransactionType: models.TxTypeQuizReward,
-					Amount:          xp,
-					Currency:        models.CurrencyExperience,
-					ReferenceID:     session.ID,
-				})
-			}
-			if gems > 0 {
-				ledgerEntries = append(ledgerEntries, models.WalletLedger{
-					ClientID:        session.ClientID,
-					TransactionType: models.TxTypeQuizReward,
-					Amount:          gems,
-					Currency:        models.CurrencyGems,
-					ReferenceID:     session.ID,
-				})
-			}
-			if len(ledgerEntries) > 0 {
-				if err := tx.CreateInBatches(ledgerEntries, len(ledgerEntries)).Error; err != nil {
-					return fmt.Errorf("failed to write wallet ledger: %w", err)
-				}
-			}
-
-			// 2. Update profile balances atomically
-			profileUpdate := map[string]interface{}{
-				"coins":        gorm.Expr("coins + ?", coins),
-				"gems":         gorm.Expr("gems + ?", gems),
-				"experience":   gorm.Expr("experience + ?", xp),
-				"weekly_score": gorm.Expr("weekly_score + ?", session.Score),
-			}
-			if err := tx.Model(&models.Profile{}).
-				Where("id = ?", session.ClientID).
-				Updates(profileUpdate).Error; err != nil {
-				return fmt.Errorf("failed to update profile: %w", err)
-			}
-
-			// 3. Record daily streak activity
-			todayStr := now.Format("2006-01-02")
-			_ = RecordDailyActivity(ctx, session.ClientID, todayStr)
-
-			// 4. Record durable leaderboard game result (idempotent via session_id unique index)
-			leaderboardResult := models.LeaderboardGameResult{
-				SessionID:   session.ID,
-				ClientID:    session.ClientID,
-				TopicID:     session.TopicID,
-				GameMode:    session.GameMode,
-				FinalScore:  session.Score,
-				CompletedAt: now,
-			}
-			if err := tx.Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "session_id"}},
-				DoNothing: true,
-			}).Create(&leaderboardResult).Error; err != nil {
-				return fmt.Errorf("failed to record leaderboard game result: %w", err)
-			}
-
-			return nil
-		})
+		err := db.WithContext(ctx).Exec(finalizeSQL, map[string]any{
+			"session": session.ID,
+			"client":  session.ClientID,
+			"topic":   session.TopicID,
+			"mode":    session.GameMode,
+			"score":   session.Score,
+			"now":     now,
+			"tx_type": models.TxTypeQuizReward,
+			"coins":   coins,
+			"xp":      xp,
+			"gems":    gems,
+			"level":   level,
+		}).Error
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to finalize session: %w", err)
 		}
 	} else {
 		// Record in-memory for testing when db is nil
@@ -463,29 +431,17 @@ func FinalizeSession(ctx context.Context, session *models.GameSession, coins, xp
 		})
 	}
 
-	// 4. Redis Real-Time Leaderboard Update (< 0.2ms)
+	// Redis real-time leaderboard update
 	if session.Score > 0 {
 		_ = cache.UpdateWeeklyLeaderboard(ctx, session.ClientID, session.Score)
 	}
 
-	// 5. Invalidate profile cache and clear client active exclusion lock
+	// Invalidate profile cache and clear client active exclusion lock
 	_ = cache.InvalidateCachedProfile(ctx, session.ClientID)
 	_ = ClearClientActiveSession(ctx, session.ClientID)
 	_ = CacheSession(ctx, session)
 
 	return nil
-}
-
-// UpdateProfileLevel updates only the level column on the player's profile.
-func UpdateProfileLevel(ctx context.Context, clientID, newLevel int) error {
-	db := GetDB()
-	if db == nil {
-		return nil
-	}
-	return db.WithContext(ctx).
-		Model(&models.Profile{}).
-		Where("id = ?", clientID).
-		Update("level", newLevel).Error
 }
 
 // RecordBatchAnswers performs efficient batch insertion into user_question_history.

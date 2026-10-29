@@ -517,18 +517,51 @@ func EvaluateAnswer(ctx context.Context, clientID int, req *dto.SubmitAnswerRequ
 		return nil, http.StatusConflict, errors.New("quiz session expired due to 5 minutes of inactivity and has been abandoned")
 	}
 
-	// 2. Atomic duplicate check via Redis/RAM mutex in < 0.1ms (eliminates synchronous DB query)
-	if !cache.AcquireAnswerLock(ctx, req.Session, req.Question) {
-		return nil, http.StatusConflict, errors.New("question has already been answered in this session")
+	result, historyRecord, status, err := applyAnswer(ctx, clientID, session, dto.SessionAnswerDTO{
+		Question:     req.Question,
+		Option:       req.Option,
+		SelectedText: req.SelectedText,
+		TimeTakenMs:  req.TimeTakenMs,
+	})
+	if err != nil {
+		return nil, status, err
 	}
 
-	// 3. Find question in session state (fallback to DB question if session state is empty)
-	var questionExplanation *string
+	// 7. Persist updated session state in Redis RAM (< 0.2ms)
+	if err := repo.UpdateSession(ctx, session); err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to update session state: %w", err)
+	}
 
+	// 8. Decouple PostgreSQL history insert to detached background worker
+	// Eliminates 15ms-30ms disk WAL latency from client hot path
+	go func(rec *models.UserQuestionHistory) {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := repo.RecordAnswer(bgCtx, rec); err != nil {
+			log.Printf("[rest] async persist answer failed for %s: %v", rec.QuestionCode, err)
+		}
+	}(historyRecord)
+
+	go RefreshSessionTTL(context.Background(), session.ID)
+
+	return result, http.StatusOK, nil
+}
+
+// applyAnswer grades one answer against the session's questions (Redis state), updates
+// the session's score/streak counters in memory and returns the result plus the history
+// row to persist. The caller saves the session. A repeated answer returns 409.
+func applyAnswer(ctx context.Context, clientID int, session *models.GameSession, ans dto.SessionAnswerDTO) (*dto.AnswerResultDTO, *models.UserQuestionHistory, int, error) {
+	// Atomic duplicate check via Redis/RAM mutex (no DB query)
+	if !cache.AcquireAnswerLock(ctx, session.ID, ans.Question) {
+		return nil, nil, http.StatusConflict, errors.New("question has already been answered in this session")
+	}
+
+	// Find question in session state (fallback to DB question if session state is empty)
+	var questionExplanation *string
 	sessionQuestions, _ := session.GetQuestions()
 	var matchedSQ *models.SessionQuestion
 	for _, sq := range sessionQuestions {
-		if sq.QuestionCode == req.Question {
+		if sq.QuestionCode == ans.Question {
 			matchedSQ = &sq
 			break
 		}
@@ -538,25 +571,21 @@ func EvaluateAnswer(ctx context.Context, clientID int, req *dto.SubmitAnswerRequ
 	if matchedSQ != nil {
 		questionExplanation = matchedSQ.Explanation
 	} else {
-		// Fallback to database
 		var err error
-		fallbackQ, err = repo.GetQuestionByCode(ctx, req.Question)
+		fallbackQ, err = repo.GetQuestionByCode(ctx, ans.Question)
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil, http.StatusNotFound, errors.New("question not found")
+				return nil, nil, http.StatusNotFound, errors.New("question not found")
 			}
-			return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch question: %w", err)
+			return nil, nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch question: %w", err)
 		}
 		questionExplanation = fallbackQ.Explanation
 	}
 
-	// 4. Grade the answer with robust multi-layered verification
-	isCorrect, isSkipped, resolvedCorrectOption := GradeAnswer(matchedSQ, fallbackQ, req.Option, req.SelectedText)
+	isCorrect, isSkipped, resolvedCorrectOption := GradeAnswer(matchedSQ, fallbackQ, ans.Option, ans.SelectedText)
 
-	// 5. Award fixed MCQ points after the backend has evaluated correctness.
+	// Award fixed MCQ points after the backend has evaluated correctness.
 	pointsEarned := 0
-	coinsEarned := 0
-
 	if isCorrect {
 		session.ComboStreak++
 		if session.ComboStreak > session.BestStreak {
@@ -577,52 +606,30 @@ func EvaluateAnswer(ctx context.Context, clientID int, req *dto.SubmitAnswerRequ
 			session.SkippedCount++
 		}
 	}
-
 	session.Score += pointsEarned
 	session.CurrentIdx++
 
-	// 6. Record the answer in the immutable history table
-	historyRecord := &models.UserQuestionHistory{
+	history := &models.UserQuestionHistory{
 		ClientID:       clientID,
-		SessionID:      req.Session,
+		SessionID:      session.ID,
 		GameMode:       session.GameMode,
-		QuestionCode:   req.Question,
-		SelectedOption: req.Option,
+		QuestionCode:   ans.Question,
+		SelectedOption: ans.Option,
 		IsCorrect:      isCorrect,
-		TimeTakenMs:    req.TimeTakenMs,
+		TimeTakenMs:    ans.TimeTakenMs,
 		PointsAwarded:  pointsEarned,
-		CoinsAwarded:   coinsEarned,
 	}
-
-	// 7. Persist updated session state in Redis RAM (< 0.2ms)
-	if err := repo.UpdateSession(ctx, session); err != nil {
-		return nil, http.StatusInternalServerError, fmt.Errorf("failed to update session state: %w", err)
-	}
-
-	// 8. Decouple PostgreSQL history insert to detached background worker
-	// Eliminates 15ms-30ms disk WAL latency from client hot path
-	go func(rec *models.UserQuestionHistory) {
-		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := repo.RecordAnswer(bgCtx, rec); err != nil {
-			log.Printf("[rest] async persist answer failed for %s: %v", rec.QuestionCode, err)
-		}
-	}(historyRecord)
-
-	go RefreshSessionTTL(context.Background(), session.ID)
-
 	return &dto.AnswerResultDTO{
-		Question:      req.Question,
-		Option:        req.Option,
+		Question:      ans.Question,
+		Option:        ans.Option,
 		CorrectOption: strings.ToLower(resolvedCorrectOption),
 		IsCorrect:     isCorrect,
 		IsSkipped:     isSkipped,
 		Explanation:   questionExplanation,
 		PointsEarned:  pointsEarned,
-		CoinsEarned:   coinsEarned,
 		ComboStreak:   session.ComboStreak,
 		TotalScore:    session.Score,
-	}, http.StatusOK, nil
+	}, history, http.StatusOK, nil
 }
 
 // --- 50:50 Power-Up ---
@@ -721,6 +728,37 @@ func CompleteSession(ctx context.Context, clientID int, req *dto.CompleteSession
 		return nil, http.StatusConflict, errors.New("quiz session expired due to 5 minutes of inactivity and has been abandoned")
 	}
 
+	// Grade answers sent with complete (client graded locally during play). History is
+	// written concurrently with finalization so it adds no round trip.
+	var historyDone chan struct{}
+	if len(req.Answers) > 0 {
+		history := make([]*models.UserQuestionHistory, 0, len(req.Answers))
+		for _, ans := range req.Answers {
+			_, rec, status, err := applyAnswer(ctx, clientID, session, ans)
+			if status == http.StatusConflict {
+				continue // already answered through /quiz/answers/evaluate
+			}
+			if err != nil {
+				return nil, status, err
+			}
+			history = append(history, rec)
+		}
+		historyDone = make(chan struct{})
+		go func() {
+			defer close(historyDone)
+			bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			if err := repo.RecordBatchAnswers(bgCtx, history); err != nil {
+				log.Printf("[rest] persist batched answers failed for %s: %v", session.ID, err)
+			}
+		}()
+	}
+	defer func() {
+		if historyDone != nil {
+			<-historyDone
+		}
+	}()
+
 	// Recompute the final score from backend-owned correctness so sessions
 	// always finish under the deterministic MCQ rule, including sessions that
 	// may have started before a scoring deployment.
@@ -769,15 +807,14 @@ func CompleteSession(ctx context.Context, clientID int, req *dto.CompleteSession
 		reward.Coins+levelBonusCoins,
 		reward.XP,
 		reward.Gems+levelBonusGems,
+		newLevel,
 	); err != nil {
 		return nil, http.StatusInternalServerError, fmt.Errorf("failed to finalize session: %w", err)
 	}
 	ClearSessionTTL(ctx, session.ID)
 
-	// If level changed, update level column separately
 	if didLevelUp {
 		profile.Level = newLevel
-		_ = updateProfileLevel(ctx, clientID, newLevel)
 	}
 
 	accuracy := 0.0
@@ -997,6 +1034,7 @@ func CompleteSortItOutSession(ctx context.Context, clientID int, req *dto.Comple
 		reward.Coins+levelBonusCoins,
 		reward.XP,
 		reward.Gems+levelBonusGems,
+		newLevel,
 	); err != nil {
 		return nil, http.StatusInternalServerError, fmt.Errorf("failed to finalize session: %w", err)
 	}
@@ -1004,7 +1042,6 @@ func CompleteSortItOutSession(ctx context.Context, clientID int, req *dto.Comple
 
 	if didLevelUp && profile != nil {
 		profile.Level = newLevel
-		_ = updateProfileLevel(ctx, clientID, newLevel)
 	}
 
 	accuracy := 0.0
@@ -1262,6 +1299,7 @@ func CompleteMatchTheFollowingSession(ctx context.Context, clientID int, req *dt
 		reward.Coins+levelBonusCoins,
 		reward.XP,
 		reward.Gems+levelBonusGems,
+		newLevel,
 	); err != nil {
 		return nil, http.StatusInternalServerError, fmt.Errorf("failed to finalize session: %w", err)
 	}
@@ -1269,7 +1307,6 @@ func CompleteMatchTheFollowingSession(ctx context.Context, clientID int, req *dt
 
 	if didLevelUp && profile != nil {
 		profile.Level = newLevel
-		_ = updateProfileLevel(ctx, clientID, newLevel)
 	}
 
 	accuracy := 0.0
@@ -1648,11 +1685,6 @@ func CalculateNewLevel(totalExperience int) int {
 		level++
 	}
 	return level
-}
-
-// updateProfileLevel updates only the level column on the profile.
-func updateProfileLevel(ctx context.Context, clientID, newLevel int) error {
-	return repo.UpdateProfileLevel(ctx, clientID, newLevel)
 }
 
 // --- Question Shuffling & Sanitization ---

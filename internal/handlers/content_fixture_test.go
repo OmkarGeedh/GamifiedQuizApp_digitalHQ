@@ -20,7 +20,8 @@ func newContentFixture(t *testing.T) *contentFixture {
 	t.Helper()
 	topic := "t" + strings.ReplaceAll(uuid.NewString(), "-", "")[:7]
 	f := &contentFixture{t: t, Topic: topic}
-	f.exec(`INSERT INTO subjects (code, short_code, grade, name, chapters) VALUES (?, ?, 11, 'Test', '{"1": "Test"}')`, topic, topic)
+	f.exec(`INSERT INTO subjects (code, short_code, grade, name) VALUES (?, ?, 11, 'Test')`, topic, topic)
+	f.exec(`INSERT INTO chapters (subject, chapter_no, title) VALUES (?, 1, 'Test')`, topic)
 	t.Cleanup(func() { config.DB.Exec("DELETE FROM subjects WHERE code = ?", topic) })
 	return f
 }
