@@ -61,6 +61,7 @@ func setupTestEngine() *gin.Engine {
 	routes.RegisterProfileRoutes(r)
 	routes.RegisterGameRoutes(r)
 	routes.RegisterWalletRoutes(r)
+	routes.RegisterSpinWheelRoutes(r)
 	routes.RegisterLeaderboardRoutes(r)
 
 	r.NoMethod(func(c *gin.Context) {

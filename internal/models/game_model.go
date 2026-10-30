@@ -247,6 +247,7 @@ const (
 	TxTypeShopPurchase    = "shop_purchase"
 	TxTypeManualDebit     = "manual_debit"
 	TxTypeManualCredit    = "manual_credit"
+	TxTypeSpinReward      = "spin_reward"
 )
 
 // Transaction direction constants
