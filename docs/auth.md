@@ -28,7 +28,7 @@ graph TD
     subgraph State[State & Storage]
         Redis[(Redis 7 Cache<br/>Cooldowns, Blacklist, OTPs)]
         MemFallback[(sync.Map In-Memory Fallback<br/>Offline Resiliency)]
-        PG[(PostgreSQL 16<br/>clients, client_profiles)]
+        PG[(PostgreSQL 18<br/>clients)]
     end
 
     Security --> Redis

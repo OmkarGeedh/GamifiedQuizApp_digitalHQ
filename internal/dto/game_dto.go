@@ -11,7 +11,9 @@ import (
 
 // CreateSessionRequestDTO validates input for starting a new quiz session.
 type CreateSessionRequestDTO struct {
-	TopicID       string   `json:"topic" binding:"required"`
+	TopicID string `json:"topic" binding:"required"`
+	// ChapterNo limits questions to one chapter of the subject; 0 means the whole subject.
+	ChapterNo     int      `json:"chapter_no,omitempty"`
 	QuestionCount int      `json:"question_count"`
 	AbandonStale  bool     `json:"abandon_stale,omitempty"`
 	QuestionCodes []string `json:"question_codes,omitempty"`
@@ -27,6 +29,9 @@ func (r *CreateSessionRequestDTO) Validate() error {
 	r.TopicID = strings.TrimSpace(r.TopicID)
 	if r.TopicID == "" {
 		return errors.New("topic is required")
+	}
+	if r.ChapterNo < 0 || r.ChapterNo > 99 {
+		return errors.New("chapter_no must be between 1 and 99")
 	}
 
 	// Normalize and validate the mode. An empty value keeps the historical
@@ -140,13 +145,37 @@ func (r *FiftyFiftyRequestDTO) Validate() error {
 // CompleteSessionRequestDTO validates a session completion request.
 type CompleteSessionRequestDTO struct {
 	Session string `json:"session" binding:"required"`
+	// Answers lets the client grade locally during play and send every answer with
+	// complete: one request per game instead of one per question. Answers already
+	// sent through /quiz/answers/evaluate are ignored.
+	Answers []SessionAnswerDTO `json:"answers,omitempty"`
 }
 
-// Validate ensures the session field is non-empty.
+// SessionAnswerDTO is one answer inside a batched complete request.
+type SessionAnswerDTO struct {
+	Question     string `json:"question"`
+	Option       string `json:"option"`
+	SelectedText string `json:"selected_text,omitempty"`
+	TimeTakenMs  int    `json:"time_taken_ms"`
+}
+
+// Validate ensures the session field is non-empty and answers are well formed.
 func (r *CompleteSessionRequestDTO) Validate() error {
 	r.Session = strings.TrimSpace(r.Session)
 	if r.Session == "" {
 		return errors.New("session is required")
+	}
+	if len(r.Answers) > 100 {
+		return errors.New("answers must not exceed 100")
+	}
+	for i := range r.Answers {
+		a := &r.Answers[i]
+		a.Question = strings.TrimSpace(a.Question)
+		a.Option = strings.ToLower(strings.TrimSpace(a.Option))
+		if a.Question == "" || a.Option == "" {
+			return errors.New("each answer needs question and option")
+		}
+		a.TimeTakenMs = max(0, a.TimeTakenMs)
 	}
 	return nil
 }
@@ -432,4 +461,18 @@ type CompleteMatchTheFollowingResponseDTO struct {
 	Level              LevelInfoDTO          `json:"level"`
 	Streak             StreakInfoDTO         `json:"streak"`
 	BoardsReview       []MatchBoardReviewDTO `json:"boards_review"`
+}
+
+// SubjectDTO lists a subject's chapters with per-game question counts (learning mode / topic picker).
+type SubjectDTO struct {
+	TopicID  string       `json:"topic_id"`
+	Name     string       `json:"name"`
+	Grade    int          `json:"grade"`
+	Chapters []ChapterDTO `json:"chapters"`
+}
+
+type ChapterDTO struct {
+	ChapterNo int            `json:"chapter_no"`
+	Title     string         `json:"title"`
+	Counts    map[string]int `json:"counts"`
 }

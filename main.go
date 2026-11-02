@@ -13,7 +13,6 @@ import (
 
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/config"
 	db "github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/database"
-	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/models"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/routes"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/services"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/ws"
@@ -40,11 +39,6 @@ func main() {
 	config.DB = pgDB
 	if sqlDB, err := pgDB.DB(); err == nil {
 		defer sqlDB.Close()
-	}
-
-	// AutoMigrate ensures leaderboard_game_results table exists in all environments
-	if err := pgDB.AutoMigrate(&models.LeaderboardGameResult{}); err != nil {
-		log.Printf("Warning: AutoMigrate leaderboard_game_results failed: %v\n", err)
 	}
 
 	// 3. Initialize Redis connection
@@ -126,6 +120,7 @@ func main() {
 	routes.RegisterProfileRoutes(r)
 	routes.RegisterGameRoutes(r)
 	routes.RegisterWalletRoutes(r)
+	routes.RegisterSpinWheelRoutes(r)
 	routes.RegisterLeaderboardRoutes(r)
 
 	// 5b. Start background session inactivity sweeper (TTL: 5 minutes, sweeps every 1 minute)
@@ -148,9 +143,12 @@ func main() {
 	})
 
 	// 6. Start Server with Graceful Shutdown
-	port := os.Getenv("PORT")
+	port := os.Getenv("X_ZOHO_CATALYST_LISTEN_PORT")
 	if port == "" {
-		port = os.Getenv("X_ZOHO_CATALYST_LISTEN_PORT")
+		port = os.Getenv("X_ZOHO_CATALYST_APPSAIL_PORT")
+	}
+	if port == "" {
+		port = os.Getenv("PORT")
 	}
 	if port == "" {
 		port = "8080"

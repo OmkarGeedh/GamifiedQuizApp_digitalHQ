@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -83,10 +84,14 @@ func setupTestApp(t *testing.T) (*gin.Engine, string) {
 
 func TestE2E_MCQ_REST_Workflow(t *testing.T) {
 	r, token := setupTestApp(t)
+	content := newContentFixture(t)
+	for n := 1; n <= 6; n++ {
+		content.MCQ(n, fmt.Sprintf("Question %d?", n), "Alpha", "Beta", "Gamma", "Delta", "a")
+	}
 
 	// 1. Unauthorized request check
 	t.Run("Unauthorized request rejected with 401", func(t *testing.T) {
-		req, _ := http.NewRequest(http.MethodGet, "/api/v1/topics/accounting/questions", nil)
+		req, _ := http.NewRequest(http.MethodGet, "/api/v1/topics/"+content.Topic+"/questions", nil)
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, req)
 
@@ -97,7 +102,7 @@ func TestE2E_MCQ_REST_Workflow(t *testing.T) {
 
 	// 2. Fetch Topic Questions
 	t.Run("Fetch accounting questions", func(t *testing.T) {
-		req, _ := http.NewRequest(http.MethodGet, "/api/v1/topics/accounting/questions?limit=5", nil)
+		req, _ := http.NewRequest(http.MethodGet, "/api/v1/topics/"+content.Topic+"/questions?limit=5", nil)
 		req.Header.Set("Authorization", "Bearer "+token)
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, req)
@@ -139,7 +144,7 @@ func TestE2E_MCQ_REST_Workflow(t *testing.T) {
 	// 3. Create Quiz Session
 	t.Run("Create new quiz session", func(t *testing.T) {
 		body, _ := json.Marshal(dto.CreateSessionRequestDTO{
-			TopicID:       "accounting",
+			TopicID:       content.Topic,
 			QuestionCount: 5,
 		})
 		req, _ := http.NewRequest(http.MethodPost, "/api/v1/quiz/sessions/create", bytes.NewReader(body))
@@ -176,7 +181,7 @@ func TestE2E_MCQ_REST_Workflow(t *testing.T) {
 	// 4. Duplicate Session Creation Rejected
 	t.Run("Reject concurrent active session creation", func(t *testing.T) {
 		body, _ := json.Marshal(dto.CreateSessionRequestDTO{
-			TopicID:       "accounting",
+			TopicID:       content.Topic,
 			QuestionCount: 5,
 		})
 		req, _ := http.NewRequest(http.MethodPost, "/api/v1/quiz/sessions/create", bytes.NewReader(body))
@@ -325,7 +330,7 @@ func TestE2E_MCQ_REST_Workflow(t *testing.T) {
 	// 9. Complete Session and Claim Rewards
 	t.Run("Complete session awards wallet ledger and profile updates", func(t *testing.T) {
 		var profileBefore models.Profile
-		if err := config.DB.Where("client_id = ?", 1).First(&profileBefore).Error; err != nil {
+		if err := config.DB.Where("id = ?", 1).First(&profileBefore).Error; err != nil {
 			t.Fatalf("Failed to load profile before completion: %v", err)
 		}
 
@@ -436,7 +441,7 @@ func TestE2E_MCQ_REST_Workflow(t *testing.T) {
 		}
 
 		var profileAfter models.Profile
-		if err := config.DB.Where("client_id = ?", 1).First(&profileAfter).Error; err != nil {
+		if err := config.DB.Where("id = ?", 1).First(&profileAfter).Error; err != nil {
 			t.Fatalf("Failed to load profile after completion: %v", err)
 		}
 		if profileAfter.Coins-profileBefore.Coins != expectedCoins {
@@ -478,7 +483,7 @@ func TestE2E_MCQ_REST_Workflow(t *testing.T) {
 	t.Run("Abandon active session", func(t *testing.T) {
 		// Create a new session to abandon
 		body, _ := json.Marshal(dto.CreateSessionRequestDTO{
-			TopicID:       "accounting",
+			TopicID:       content.Topic,
 			QuestionCount: 5,
 		})
 		req, _ := http.NewRequest(http.MethodPost, "/api/v1/quiz/sessions/create", bytes.NewReader(body))
@@ -525,6 +530,10 @@ func totalBreakdown(values map[string]int) int {
 
 func TestE2E_WebSocket_LiveGame(t *testing.T) {
 	r, token := setupTestApp(t)
+	content := newContentFixture(t)
+	for n := 1; n <= 3; n++ {
+		content.MCQ(n, fmt.Sprintf("Question %d?", n), "Alpha", "Beta", "Gamma", "Delta", "a")
+	}
 
 	// Clean up any stale sessions
 	_ = repo.ClearClientActiveSession(context.Background(), 1)
@@ -535,7 +544,7 @@ func TestE2E_WebSocket_LiveGame(t *testing.T) {
 
 	// 1. Create a session for WebSocket play
 	body, _ := json.Marshal(dto.CreateSessionRequestDTO{
-		TopicID:       "accounting",
+		TopicID:       content.Topic,
 		QuestionCount: 3,
 	})
 	req, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/quiz/sessions/create", bytes.NewReader(body))
@@ -629,27 +638,185 @@ func TestE2E_WebSocket_LiveGame(t *testing.T) {
 	t.Logf("WebSocket live test passed: Question=%s, Result=%+v", qPayload.Question, resultPayload)
 }
 
+func TestWebSocket_EchoDiagnostics(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	routes.RegisterGameRoutes(r)
+
+	server := httptest.NewServer(r)
+	defer server.Close()
+
+	serverURL, _ := url.Parse(server.URL)
+	wsURL := fmt.Sprintf("ws://%s/ws/echo", serverURL.Host)
+
+	wsConn, httpResp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("WebSocket echo dial failed: %v (HTTP Status: %v)", err, httpResp)
+	}
+	defer wsConn.Close()
+
+	// Read initial connected diagnostics message
+	_ = wsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var welcomeMsg struct {
+		Type string `json:"type"`
+		Data struct {
+			Status       string `json:"status"`
+			Platform     string `json:"platform"`
+			PingInterval string `json:"ping_interval"`
+		} `json:"data"`
+	}
+	if err := wsConn.ReadJSON(&welcomeMsg); err != nil {
+		t.Fatalf("Failed to read echo welcome message: %v", err)
+	}
+	if welcomeMsg.Type != "connected" || welcomeMsg.Data.Status != "ok" {
+		t.Fatalf("Unexpected welcome payload: %+v", welcomeMsg)
+	}
+
+	// Send message and expect echo back
+	if err := wsConn.WriteMessage(websocket.TextMessage, []byte("hello catalyst")); err != nil {
+		t.Fatalf("Failed to write to echo socket: %v", err)
+	}
+
+	_ = wsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var echoResp struct {
+		Type string `json:"type"`
+		Data string `json:"data"`
+	}
+	if err := wsConn.ReadJSON(&echoResp); err != nil {
+		t.Fatalf("Failed to read echo response: %v", err)
+	}
+	if echoResp.Type != "echo" || echoResp.Data != "hello catalyst" {
+		t.Fatalf("Unexpected echo response: %+v", echoResp)
+	}
+}
+
+func TestWebSocket_StructuredErrorOnMissingSession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	secret := "test_jwt_secret_structured_error"
+	t.Setenv("JWT_SECRET", secret)
+	if config.AppConfig != nil && config.AppConfig.Server.JWTSecret != "" {
+		secret = config.AppConfig.Server.JWTSecret
+	}
+
+	tokenObj := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"client_id": 1,
+		"exp":       time.Now().Add(1 * time.Hour).Unix(),
+	})
+	token, _ := tokenObj.SignedString([]byte(secret))
+
+	r := gin.New()
+	routes.RegisterGameRoutes(r)
+
+	server := httptest.NewServer(r)
+	defer server.Close()
+
+	serverURL, _ := url.Parse(server.URL)
+
+	missingSessionURL := fmt.Sprintf("ws://%s/ws/game?token=%s", serverURL.Host, token)
+	wsConn, _, err := websocket.DefaultDialer.Dial(missingSessionURL, nil)
+	if err != nil {
+		t.Fatalf("Expected WS dial to succeed with structured error frame, got err: %v", err)
+	}
+	defer wsConn.Close()
+
+	_ = wsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var errFrame struct {
+		Type string `json:"type"`
+		Data struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"data"`
+	}
+	if err := wsConn.ReadJSON(&errFrame); err != nil {
+		t.Fatalf("Failed to read error frame: %v", err)
+	}
+	if errFrame.Type != "error" || errFrame.Data.Code != "SESSION_REQUIRED" {
+		t.Fatalf("Expected SESSION_REQUIRED error, got %+v", errFrame)
+	}
+}
+
+func TestWebSocket_SessionParamFlexibilityAndStructuredErrors(t *testing.T) {
+	r, token := setupTestApp(t)
+	server := httptest.NewServer(r)
+	defer server.Close()
+
+	serverURL, _ := url.Parse(server.URL)
+
+	// 1. Missing session on WS dial returns structured SESSION_REQUIRED frame
+	missingSessionURL := fmt.Sprintf("ws://%s/ws/game?token=%s", serverURL.Host, token)
+	wsConn, _, err := websocket.DefaultDialer.Dial(missingSessionURL, nil)
+	if err != nil {
+		t.Fatalf("Expected WS dial to succeed with structured error frame, got err: %v", err)
+	}
+	defer wsConn.Close()
+
+	_ = wsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var errFrame struct {
+		Type string `json:"type"`
+		Data struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"data"`
+	}
+	if err := wsConn.ReadJSON(&errFrame); err != nil {
+		t.Fatalf("Failed to read error frame: %v", err)
+	}
+	if errFrame.Type != "error" || errFrame.Data.Code != "SESSION_REQUIRED" {
+		t.Fatalf("Expected SESSION_REQUIRED error, got %+v", errFrame)
+	}
+
+	// 2. Create session and connect using ?sessionId= (camelCase)
+	content := newContentFixture(t)
+	content.MCQ(1, "What is Go?", "Language", "Animal", "Car", "Food", "a")
+	topic := content.Topic
+	_ = repo.ClearClientActiveSession(context.Background(), 1)
+
+	createBody, _ := json.Marshal(dto.CreateSessionRequestDTO{
+		TopicID:       topic,
+		QuestionCount: 1,
+	})
+	createReq, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/quiz/sessions/create", bytes.NewReader(createBody))
+	createReq.Header.Set("Authorization", "Bearer "+token)
+	createReq.Header.Set("Content-Type", "application/json")
+	res, err := http.DefaultClient.Do(createReq)
+	if err != nil {
+		t.Fatalf("failed create session: %v", err)
+	}
+	defer res.Body.Close()
+
+	var createResp struct {
+		Data dto.SessionCreatedResponseDTO `json:"data"`
+	}
+	_ = json.NewDecoder(res.Body).Decode(&createResp)
+	createdSession := createResp.Data.Session
+
+	// Connect using ?sessionId=
+	camelURL := fmt.Sprintf("ws://%s/ws/game?sessionId=%s&token=%s", serverURL.Host, createdSession, token)
+	camelConn, _, err := websocket.DefaultDialer.Dial(camelURL, nil)
+	if err != nil {
+		t.Fatalf("WS dial with ?sessionId= failed: %v", err)
+	}
+	defer camelConn.Close()
+
+	_ = camelConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var qMsg ws.OutboundMessage
+	if err := camelConn.ReadJSON(&qMsg); err != nil {
+		t.Fatalf("Failed to read question on ?sessionId= connection: %v", err)
+	}
+	if qMsg.Type != ws.MsgTypeQuestion {
+		t.Fatalf("Expected 'question' type, got %s", qMsg.Type)
+	}
+}
+
 func TestSuddenDeathSessionContractAndFiltering(t *testing.T) {
 	r, token := setupTestApp(t)
-	topic := "sd-contract-" + uuid.NewString()
-	recoveryTopic := "sd-recovery-" + uuid.NewString()
-	sdCodeA := "sd_" + strings.ReplaceAll(uuid.NewString()[:12], "-", "")
-	sdCodeB := "sd_" + strings.ReplaceAll(uuid.NewString()[:12], "-", "")
-	mcqCode := "mcq_" + strings.ReplaceAll(uuid.NewString()[:11], "-", "")
-	recoveryMCQCode := "mcq_" + strings.ReplaceAll(uuid.NewString()[:11], "-", "")
-
-	questions := []models.Question{
-		{QuestionCode: sdCodeA, QuestionType: models.GameModeSuddenDeath, TopicID: topic, Prompt: "Sudden Death A", OptionA: "Correct", OptionB: "Wrong", OptionC: "", OptionD: "", CorrectOption: "a", Points: 10, Difficulty: 1},
-		{QuestionCode: sdCodeB, QuestionType: models.GameModeSuddenDeath, TopicID: topic, Prompt: "Sudden Death B", OptionA: "Wrong", OptionB: "Correct", OptionC: "", OptionD: "", CorrectOption: "b", Points: 10, Difficulty: 1},
-		{QuestionCode: mcqCode, QuestionType: models.GameModeMCQ, TopicID: topic, Prompt: "MCQ", OptionA: "A", OptionB: "B", OptionC: "C", OptionD: "D", CorrectOption: "a", Points: 10, Difficulty: 1},
-		{QuestionCode: recoveryMCQCode, QuestionType: models.GameModeMCQ, TopicID: recoveryTopic, Prompt: "Recovery MCQ", OptionA: "A", OptionB: "B", OptionC: "C", OptionD: "D", CorrectOption: "a", Points: 10, Difficulty: 1},
-	}
-	if err := config.DB.Create(&questions).Error; err != nil {
-		t.Fatalf("create question fixtures: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = config.DB.Where("topic_id IN ?", []string{topic, recoveryTopic}).Delete(&models.Question{}).Error
-	})
+	content := newContentFixture(t)
+	recovery := newContentFixture(t)
+	topic, recoveryTopic := content.Topic, recovery.Topic
+	sdCodeA := content.SuddenDeath(1, "Sudden Death A", "Correct", "Wrong", "a")
+	content.SuddenDeath(2, "Sudden Death B", "Wrong", "Correct", "b")
+	mcqCode := content.MCQ(1, "MCQ", "A", "B", "C", "D", "a")
+	recovery.MCQ(1, "Recovery MCQ", "A", "B", "C", "D", "a")
 
 	abandonActive := func() {
 		_ = repo.ClearClientActiveSession(context.Background(), 1)
@@ -850,15 +1017,20 @@ func TestCompleteSortItOutHandler(t *testing.T) {
 		}
 	})
 
+	content := newContentFixture(t)
+	sortSet := content.SortSet(1, "Debit", "Credit", map[string]string{
+		"Cash received": "a", "Capital introduced": "b", "Rent paid": "a", "Loan taken": "b", "Machinery bought": "a",
+	})
+
 	t.Run("Full Sort It Out Game Flow: Create, Upfront Answers, Batch Submit, and Audit Review", func(t *testing.T) {
 		// Clean up any stale in-progress session for client 1
 		_ = repo.ClearClientActiveSession(context.Background(), 1)
 
 		// 1. Create sort_it_out session
 		createBody, _ := json.Marshal(dto.CreateSessionRequestDTO{
-			TopicID:                 "accounting",
+			TopicID:                 content.Topic,
 			GameMode:                models.GameModeSortItOut,
-			PairType:                "credit_debit",
+			PairType:                sortSet,
 			QuestionCount:           5,
 			TimeLimitPerQuestionSec: 7,
 		})
@@ -883,8 +1055,8 @@ func TestCompleteSortItOutHandler(t *testing.T) {
 		if createResp.Data.GameMode != models.GameModeSortItOut {
 			t.Fatalf("expected game_mode sort_it_out, got %s", createResp.Data.GameMode)
 		}
-		if createResp.Data.PairType != "credit_debit" {
-			t.Fatalf("expected pair_type credit_debit, got %s", createResp.Data.PairType)
+		if createResp.Data.PairType != sortSet {
+			t.Fatalf("expected pair_type %s, got %s", sortSet, createResp.Data.PairType)
 		}
 		if createResp.Data.TimeLimitPerQuestionSec != 7 {
 			t.Fatalf("expected TimeLimitPerQuestionSec=7, got %d", createResp.Data.TimeLimitPerQuestionSec)
@@ -898,8 +1070,8 @@ func TestCompleteSortItOutHandler(t *testing.T) {
 
 		// Verify all questions have upfront correct_option and pair_type
 		for i, q := range createResp.Data.Questions {
-			if q.PairType != "credit_debit" {
-				t.Fatalf("question %s: expected pair_type credit_debit, got %s", q.Question, q.PairType)
+			if q.PairType != sortSet {
+				t.Fatalf("question %s: expected pair_type %s, got %s", q.Question, sortSet, q.PairType)
 			}
 			if q.CorrectOption == "" {
 				t.Fatalf("question %s: expected upfront correct_option, got empty", q.Question)
@@ -943,8 +1115,8 @@ func TestCompleteSortItOutHandler(t *testing.T) {
 		if data.Session != sessionID {
 			t.Fatalf("expected session ID %s, got %s", sessionID, data.Session)
 		}
-		if data.PairType != "credit_debit" {
-			t.Fatalf("expected pair_type credit_debit, got %s", data.PairType)
+		if data.PairType != sortSet {
+			t.Fatalf("expected pair_type %s, got %s", sortSet, data.PairType)
 		}
 		if data.CorrectCount != len(answers) {
 			t.Fatalf("expected %d correct answers, got %d", len(answers), data.CorrectCount)
@@ -1043,51 +1215,13 @@ func TestCompleteMatchTheFollowingHandler(t *testing.T) {
 		// Clean up any stale in-progress session for client 1
 		_ = repo.ClearClientActiveSession(context.Background(), 1)
 
-		// Seed fixture questions and pairs for match_the_following test
-		q1ID := uuid.New().String()
-		q2ID := uuid.New().String()
-		q3ID := uuid.New().String()
-		_ = config.DB.Where("question_code LIKE ?", "mtf_test_%").Delete(&models.MatchTheFollowingQuestion{}).Error
-		code1 := "mtf_test_" + uuid.New().String()[:8]
-		code2 := "mtf_test_" + uuid.New().String()[:8]
-		code3 := "mtf_test_" + uuid.New().String()[:8]
-		testQuestions := []models.MatchTheFollowingQuestion{
-			{ID: q1ID, QuestionCode: code1, TopicID: "accounting", Prompt: "Board 1", Points: 40, Difficulty: 1, TimeLimitSec: 25},
-			{ID: q2ID, QuestionCode: code2, TopicID: "accounting", Prompt: "Board 2", Points: 40, Difficulty: 1, TimeLimitSec: 25},
-			{ID: q3ID, QuestionCode: code3, TopicID: "accounting", Prompt: "Board 3", Points: 40, Difficulty: 1, TimeLimitSec: 25},
-		}
-		testPairs := []models.MatchPair{
-			{ID: uuid.New().String(), QuestionID: q1ID, PairOrder: 1, LeftText: "L1", RightText: "R1"},
-			{ID: uuid.New().String(), QuestionID: q1ID, PairOrder: 2, LeftText: "L2", RightText: "R2"},
-			{ID: uuid.New().String(), QuestionID: q1ID, PairOrder: 3, LeftText: "L3", RightText: "R3"},
-			{ID: uuid.New().String(), QuestionID: q1ID, PairOrder: 4, LeftText: "L4", RightText: "R4"},
+		content := newContentFixture(t)
+		pairCodes := content.MatchPairs(12) // dealt as 3 boards of 4
 
-			{ID: uuid.New().String(), QuestionID: q2ID, PairOrder: 1, LeftText: "L1", RightText: "R1"},
-			{ID: uuid.New().String(), QuestionID: q2ID, PairOrder: 2, LeftText: "L2", RightText: "R2"},
-			{ID: uuid.New().String(), QuestionID: q2ID, PairOrder: 3, LeftText: "L3", RightText: "R3"},
-			{ID: uuid.New().String(), QuestionID: q2ID, PairOrder: 4, LeftText: "L4", RightText: "R4"},
-
-			{ID: uuid.New().String(), QuestionID: q3ID, PairOrder: 1, LeftText: "L1", RightText: "R1"},
-			{ID: uuid.New().String(), QuestionID: q3ID, PairOrder: 2, LeftText: "L2", RightText: "R2"},
-			{ID: uuid.New().String(), QuestionID: q3ID, PairOrder: 3, LeftText: "L3", RightText: "R3"},
-			{ID: uuid.New().String(), QuestionID: q3ID, PairOrder: 4, LeftText: "L4", RightText: "R4"},
-		}
-		if err := config.DB.Create(&testQuestions).Error; err != nil {
-			t.Fatalf("failed to insert test questions: %v", err)
-		}
-		if err := config.DB.Create(&testPairs).Error; err != nil {
-			t.Fatalf("failed to insert test pairs: %v", err)
-		}
-		t.Cleanup(func() {
-			_ = config.DB.Where("question_id IN ?", []string{q1ID, q2ID, q3ID}).Delete(&models.MatchPair{}).Error
-			_ = config.DB.Where("id IN ?", []string{q1ID, q2ID, q3ID}).Delete(&models.MatchTheFollowingQuestion{}).Error
-		})
-
-		// 1. Create match_the_following session
+		// 1. Create match_the_following session: the chapter's pairs are dealt into boards
 		createBody, _ := json.Marshal(dto.CreateSessionRequestDTO{
-			TopicID:                 "accounting",
+			TopicID:                 content.Topic,
 			GameMode:                models.GameModeMatchTheFollowing,
-			QuestionCodes:           []string{code1, code2, code3},
 			QuestionCount:           3,
 			TimeLimitPerQuestionSec: 25,
 		})
@@ -1120,6 +1254,11 @@ func TestCompleteMatchTheFollowingHandler(t *testing.T) {
 		}
 		if len(createResp.Data.Boards) != 3 {
 			t.Fatalf("expected 3 boards in create response, got %d", len(createResp.Data.Boards))
+		}
+		for _, board := range createResp.Data.Boards {
+			if board.Prompt != "Test · Test" {
+				t.Fatalf("expected board titled by subject and chapter, got %q", board.Prompt)
+			}
 		}
 
 		sessionID := createResp.Data.Session
@@ -1196,7 +1335,7 @@ func TestCompleteMatchTheFollowingHandler(t *testing.T) {
 		}
 
 		var completeResp struct {
-			Success bool                                 `json:"success"`
+			Success bool                                     `json:"success"`
 			Data    dto.CompleteMatchTheFollowingResponseDTO `json:"data"`
 		}
 		if err := json.Unmarshal(completeW.Body.Bytes(), &completeResp); err != nil {
@@ -1261,6 +1400,24 @@ func TestCompleteMatchTheFollowingHandler(t *testing.T) {
 		}
 		if _, ok := data.ScoreBreakdown["mistake_penalty"]; !ok {
 			t.Fatal("missing mistake_penalty in score breakdown")
+		}
+
+		// History is recorded per pair: 12 dealt pairs, 10 matched, all codes from the fixture.
+		var history []models.UserQuestionHistory
+		if err := config.DB.Where("session_id = ?", sessionID).Find(&history).Error; err != nil {
+			t.Fatalf("failed to load history: %v", err)
+		}
+		matched := 0
+		for _, h := range history {
+			if !slices.Contains(pairCodes, h.QuestionCode) {
+				t.Fatalf("history row %q is not a fixture pair code", h.QuestionCode)
+			}
+			if h.IsCorrect {
+				matched++
+			}
+		}
+		if len(history) != 12 || matched != 10 {
+			t.Fatalf("expected 12 pair history rows with 10 matched, got %d rows / %d matched", len(history), matched)
 		}
 
 		// 3. Second submission should return 409 Conflict

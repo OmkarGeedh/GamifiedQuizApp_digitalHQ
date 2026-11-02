@@ -133,5 +133,3 @@ func (r *ResetPasswordVerifyRequest) Validate() error {
 	}
 	return nil
 }
-
-

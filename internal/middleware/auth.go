@@ -6,13 +6,18 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/cache"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/config"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/utils"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/utils/response"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 )
+
+// clientAuthCacheTTL bounds how long a cached active-client check is trusted.
+const clientAuthCacheTTL = time.Minute
 
 type ClientClaims struct {
 	ID       int     `gorm:"column:id" db:"id" json:"id"`
@@ -57,6 +62,34 @@ func ClientAuthMiddleware(c *gin.Context) {
 	}
 	if tokenStr == "" {
 		tokenStr = c.Query("accessToken")
+	}
+	if tokenStr == "" {
+		tokenStr = c.Query("auth_token")
+	}
+	if tokenStr == "" {
+		tokenStr = c.Query("authToken")
+	}
+	if tokenStr == "" {
+		tokenStr = c.Query("jwt")
+	}
+	if tokenStr == "" {
+		// Fallback for browser WebSocket clients passing token in Sec-WebSocket-Protocol
+		if proto := c.GetHeader("Sec-WebSocket-Protocol"); proto != "" {
+			parts := strings.Split(proto, ",")
+			for _, part := range parts {
+				trimmed := strings.TrimSpace(part)
+				if strings.EqualFold(trimmed, "bearer") ||
+					strings.EqualFold(trimmed, "access_token") ||
+					strings.EqualFold(trimmed, "token") ||
+					strings.EqualFold(trimmed, "jwt") {
+					continue
+				}
+				if len(trimmed) > 0 {
+					tokenStr = trimmed
+					break
+				}
+			}
+		}
 	}
 
 	if tokenStr == "" {
@@ -112,6 +145,9 @@ func ClientAuthMiddleware(c *gin.Context) {
 
 	clientIDVal, ok := claims["client_id"]
 	if !ok || clientIDVal == nil {
+		clientIDVal, ok = claims["id"]
+	}
+	if !ok || clientIDVal == nil {
 		ClearClientAuthCookies(c)
 		response.Error(c, http.StatusUnauthorized, "Invalid token payload (client_id missing)")
 		return
@@ -144,16 +180,27 @@ func ClientAuthMiddleware(c *gin.Context) {
 		}()
 	}
 
+	// The active-client check is cached in Redis for clientAuthCacheTTL so gameplay
+	// requests skip the PostgreSQL round trip; a blocked/deleted player is locked out
+	// within that window. Without Redis every request checks PostgreSQL.
 	if config.DB != nil {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			dbErr = config.DB.WithContext(c.Request.Context()).
+			ctx := c.Request.Context()
+			cacheKey := fmt.Sprintf("quiz:auth:client:%d", clientID)
+			if cache.GetJSON(ctx, cacheKey, &client) {
+				return
+			}
+			dbErr = config.DB.WithContext(ctx).
 				Table("clients").
 				Select("id, username, email, status, phone").
 				Where("id = ? AND status != ?", clientID, "deleted").
 				Limit(1).
 				Take(&client).Error
+			if dbErr == nil {
+				_ = cache.SetJSON(ctx, cacheKey, client, clientAuthCacheTTL)
+			}
 		}()
 	}
 

@@ -29,7 +29,8 @@ flowchart TD
 
 ### Why AppSail?
 - Standard Catalyst Serverless Functions only natively support Node.js, Python, and Java, and do not support long-lived WebSocket connections (`/ws/game`).
-- **AppSail** allows deploying custom OCI Docker containers, providing full support for compiled **Go binaries**, high-throughput **Gin HTTP routing**, and low-latency **gorilla/websocket** connections.
+- **AppSail** allows deploying custom OCI Docker containers, providing full support for compiled **Go binaries** and **Gin HTTP routing**.
+- **WebSockets do not work through AppSail's edge** (it returns `101` without the `Upgrade` header and forwards no frames). Sudden Death therefore runs over HTTP; see [catalyst_websocket_issue.md](catalyst_websocket_issue.md).
 
 ---
 
@@ -212,12 +213,19 @@ The AppSail Go web server is decoupled from database DDL and does not run schema
 ### AppSail WebSocket Ingress
 - **Direct Domain Routing**: Connect to the AppSail access URL (`wss://<service-name>-<zaid>.<env>.catalystappsail.com/ws/game`), **not** `catalystserverless.com`. Standard Catalyst API Gateways or basic functions do not forward raw WebSocket upgrades.
 - **Protocol**: Modern browsers enforce `wss://` (TLS). Calling unencrypted `ws://` to Catalyst HTTPS will trigger browser security mixed-content blocks.
-- **Proxy Idle Timeout Protection**: AppSail edge proxies terminate idle requests after **30 seconds**. The Go backend automatically configures `PingInterval = 15s` and `TCPKeepAlive = 15s` when running on Catalyst (`CLOUD_PROVIDER=zoho` or detected port) to keep the proxy tunnel open.
-- **Handshake Authentication**: Browsers cannot send custom HTTP headers during a WebSocket handshake. Authenticate via query parameters:
+- **Proxy Idle Timeout Protection**: AppSail edge proxies terminate idle requests after **30 seconds**. The Go backend automatically configures `PingInterval = 15s` and `TCPKeepAlive = 15s` when running on Catalyst (`CLOUD_PROVIDER=zoho` or detected port/project environment) to keep the proxy tunnel open.
+- **Handshake Authentication**: Browsers cannot send custom HTTP headers during a WebSocket handshake. Authenticate via query parameters or the `Sec-WebSocket-Protocol` header:
   ```
   wss://<appsail-url>/ws/game?session_id=<UUID>&token=<JWT_ACCESS_TOKEN>
   ```
-  *(Also accepts `access_token` or `accessToken`).*
+  *(Also accepts `access_token`, `accessToken`, `auth_token`, or `jwt`, and `sessionId` or `session` for the session UUID).*
+- **Connectivity Diagnostic Probe (`/ws/echo`)**:
+  Verify WebSocket upgrade and proxy forwarding instantly without creating game sessions:
+  ```javascript
+  const socket = new WebSocket("wss://<appsail-url>/ws/echo");
+  socket.onopen = () => socket.send("ping");
+  socket.onmessage = (event) => console.log("Echo response:", event.data);
+  ```
 
 ### Scale-to-Zero Best Practices
 AppSail automatically scales down instances to **0** after 5 minutes of no activity, charging **zero compute credits**.

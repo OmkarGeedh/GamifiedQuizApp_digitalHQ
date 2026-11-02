@@ -151,7 +151,7 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 	if req.GameMode == models.GameModeSortItOut {
 		pairType := req.PairType
 		if pairType == "" {
-			pairTypes, err := repo.GetDistinctPairTypes(ctx, req.TopicID, models.GameModeSortItOut)
+			pairTypes, err := repo.GetDistinctPairTypes(ctx, req.TopicID, req.ChapterNo)
 			if err != nil {
 				return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch pair types: %w", err)
 			}
@@ -179,7 +179,7 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 				req.QuestionCount = 10
 			}
 			var err error
-			questions, err = repo.GetSortItOutQuestions(ctx, req.TopicID, pairType, req.QuestionCount)
+			questions, err = repo.GetSortItOutQuestions(ctx, req.TopicID, req.ChapterNo, pairType, req.QuestionCount)
 			if err != nil {
 				return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch questions: %w", err)
 			}
@@ -242,6 +242,7 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 		session := &models.GameSession{
 			ClientID:       clientID,
 			TopicID:        req.TopicID,
+			ChapterNo:      req.ChapterNo,
 			GameMode:       req.GameMode,
 			PairType:       pairType,
 			TotalQuestions: len(sessionQuestions),
@@ -269,34 +270,28 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 
 	// Special flow for Match the Following multi-board matching puzzle
 	if req.GameMode == models.GameModeMatchTheFollowing {
-		var questions []models.MatchTheFollowingQuestion
+		var pairs []models.MatchPair
+		var err error
 		if len(req.QuestionCodes) > 0 {
-			var err error
-			questions, err = repo.GetMatchTheFollowingQuestionsByCodes(ctx, req.QuestionCodes)
+			pairs, err = repo.GetMatchPairsByCodes(ctx, req.QuestionCodes)
 			if err != nil {
 				return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch requested questions: %w", err)
 			}
-			if len(questions) != len(req.QuestionCodes) {
+			if len(pairs) != len(req.QuestionCodes) {
 				return nil, http.StatusBadRequest, errors.New("all requested question_codes must exist")
 			}
 		} else {
-			if req.QuestionCount <= 0 {
-				req.QuestionCount = 10
-			}
-			var err error
-			questions, err = repo.GetMatchTheFollowingQuestions(ctx, req.TopicID, req.QuestionCount)
+			pairs, err = repo.GetMatchPairs(ctx, req.TopicID, req.ChapterNo)
 			if err != nil {
 				return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch questions: %w", err)
 			}
-			if len(questions) == 0 {
-				return nil, http.StatusNotFound, errors.New("no match_the_following questions found for the selected topic")
-			}
-			rand.Shuffle(len(questions), func(i, j int) {
-				questions[i], questions[j] = questions[j], questions[i]
-			})
-			if len(questions) > req.QuestionCount {
-				questions = questions[:req.QuestionCount]
-			}
+		}
+		boards := DealMatchBoards(pairs, len(req.QuestionCodes) == 0)
+		if len(boards) == 0 {
+			return nil, http.StatusNotFound, errors.New("no match_the_following questions found for the selected topic")
+		}
+		if len(req.QuestionCodes) == 0 && req.QuestionCount > 0 && len(boards) > req.QuestionCount {
+			boards = boards[:req.QuestionCount]
 		}
 
 		timeLimitPerQuestion := req.TimeLimitPerQuestionSec
@@ -304,36 +299,25 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 			timeLimitPerQuestion = 25
 		}
 
-		questionIDs := make([]string, len(questions))
-		for i, q := range questions {
-			questionIDs[i] = q.ID
-		}
-		pairsMap, err := repo.GetMatchPairsByQuestionIDs(ctx, questionIDs)
-		if err != nil {
-			return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch match pairs: %w", err)
-		}
+		titles := matchBoardTitles(ctx)
+		sessionQuestions := make([]models.SessionQuestion, 0, len(boards))
+		boardDTOs := make([]dto.MatchBoardDTO, 0, len(boards))
 
-		sessionQuestions := make([]models.SessionQuestion, 0, len(questions))
-		boardDTOs := make([]dto.MatchBoardDTO, 0, len(questions))
+		for i, board := range boards {
+			code := fmt.Sprintf("board-%d", i+1)
+			prompt := titles(board[0].TopicID, board[0].ChapterNo)
+			leftItems := make([]dto.MatchPairItemDTO, 0, len(board))
+			rightItems := make([]dto.MatchPairItemDTO, 0, len(board))
+			solMap := make(map[string]string, len(board))
+			difficulty := 1
 
-		for _, q := range questions {
-			pairs := pairsMap[q.ID]
-			leftItems := make([]dto.MatchPairItemDTO, 0, len(pairs))
-			rightItems := make([]dto.MatchPairItemDTO, 0, len(pairs))
-			solMap := make(map[string]string, len(pairs))
-
-			for _, p := range pairs {
+			for _, p := range board {
 				leftID := fmt.Sprintf("%s_l", p.ID)
 				rightID := fmt.Sprintf("%s_r", p.ID)
-				leftItems = append(leftItems, dto.MatchPairItemDTO{
-					ID:   leftID,
-					Text: p.LeftText,
-				})
-				rightItems = append(rightItems, dto.MatchPairItemDTO{
-					ID:   rightID,
-					Text: p.RightText,
-				})
+				leftItems = append(leftItems, dto.MatchPairItemDTO{ID: leftID, Text: p.LeftText})
+				rightItems = append(rightItems, dto.MatchPairItemDTO{ID: rightID, Text: p.RightText})
 				solMap[leftID] = rightID
+				difficulty = max(difficulty, p.Difficulty)
 			}
 
 			// Shuffle right items to prevent across-the-row matching
@@ -341,32 +325,27 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 				rightItems[i], rightItems[j] = rightItems[j], rightItems[i]
 			})
 
-			sq := models.SessionQuestion{
-				QuestionCode: q.QuestionCode,
-				Prompt:       q.Prompt,
-				Difficulty:   q.Difficulty,
+			sessionQuestions = append(sessionQuestions, models.SessionQuestion{
+				QuestionCode: code,
+				Prompt:       prompt,
+				Difficulty:   difficulty,
 				Points:       40,
-				Hint:         q.Hint,
-				Explanation:  q.Explanation,
-				MatchPairs:   pairs,
-			}
-			sessionQuestions = append(sessionQuestions, sq)
-
+				MatchPairs:   board,
+			})
 			boardDTOs = append(boardDTOs, dto.MatchBoardDTO{
-				QuestionCode: q.QuestionCode,
-				Prompt:       q.Prompt,
+				QuestionCode: code,
+				Prompt:       prompt,
 				TimeLimitSec: timeLimitPerQuestion,
 				LeftItems:    leftItems,
 				RightItems:   rightItems,
 				SolutionMap:  solMap,
-				Hint:         q.Hint,
-				Explanation:  q.Explanation,
 			})
 		}
 
 		session := &models.GameSession{
 			ClientID:       clientID,
 			TopicID:        req.TopicID,
+			ChapterNo:      req.ChapterNo,
 			GameMode:       req.GameMode,
 			TotalQuestions: len(sessionQuestions),
 			Status:         models.SessionStatusInProgress,
@@ -397,7 +376,7 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 	}
 
 	// Validate topic has enough questions
-	count, err := repo.CountQuestionsByTopicAndMode(ctx, req.TopicID, targetType)
+	count, err := repo.CountQuestionsByTopicAndMode(ctx, req.TopicID, req.ChapterNo, targetType)
 	if err != nil {
 		return nil, http.StatusInternalServerError, fmt.Errorf("failed to check question count: %w", err)
 	}
@@ -429,7 +408,7 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 	}
 	if len(questions) == 0 {
 		var err error
-		questions, err = repo.GetQuestionsByTopicAndMode(ctx, req.TopicID, targetType, req.QuestionCount)
+		questions, err = repo.GetQuestionsByTopicAndMode(ctx, req.TopicID, req.ChapterNo, targetType, req.QuestionCount)
 		if err != nil {
 			return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch questions: %w", err)
 		}
@@ -460,6 +439,7 @@ func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequ
 	session := &models.GameSession{
 		ClientID:       clientID,
 		TopicID:        req.TopicID,
+		ChapterNo:      req.ChapterNo,
 		GameMode:       req.GameMode,
 		TotalQuestions: len(sessionQuestions),
 		Status:         models.SessionStatusInProgress,
@@ -537,18 +517,51 @@ func EvaluateAnswer(ctx context.Context, clientID int, req *dto.SubmitAnswerRequ
 		return nil, http.StatusConflict, errors.New("quiz session expired due to 5 minutes of inactivity and has been abandoned")
 	}
 
-	// 2. Atomic duplicate check via Redis/RAM mutex in < 0.1ms (eliminates synchronous DB query)
-	if !cache.AcquireAnswerLock(ctx, req.Session, req.Question) {
-		return nil, http.StatusConflict, errors.New("question has already been answered in this session")
+	result, historyRecord, status, err := applyAnswer(ctx, clientID, session, dto.SessionAnswerDTO{
+		Question:     req.Question,
+		Option:       req.Option,
+		SelectedText: req.SelectedText,
+		TimeTakenMs:  req.TimeTakenMs,
+	})
+	if err != nil {
+		return nil, status, err
 	}
 
-	// 3. Find question in session state (fallback to DB question if session state is empty)
-	var questionExplanation *string
+	// 7. Persist updated session state in Redis RAM (< 0.2ms)
+	if err := repo.UpdateSession(ctx, session); err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to update session state: %w", err)
+	}
 
+	// 8. Decouple PostgreSQL history insert to detached background worker
+	// Eliminates 15ms-30ms disk WAL latency from client hot path
+	go func(rec *models.UserQuestionHistory) {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := repo.RecordAnswer(bgCtx, rec); err != nil {
+			log.Printf("[rest] async persist answer failed for %s: %v", rec.QuestionCode, err)
+		}
+	}(historyRecord)
+
+	go RefreshSessionTTL(context.Background(), session.ID)
+
+	return result, http.StatusOK, nil
+}
+
+// applyAnswer grades one answer against the session's questions (Redis state), updates
+// the session's score/streak counters in memory and returns the result plus the history
+// row to persist. The caller saves the session. A repeated answer returns 409.
+func applyAnswer(ctx context.Context, clientID int, session *models.GameSession, ans dto.SessionAnswerDTO) (*dto.AnswerResultDTO, *models.UserQuestionHistory, int, error) {
+	// Atomic duplicate check via Redis/RAM mutex (no DB query)
+	if !cache.AcquireAnswerLock(ctx, session.ID, ans.Question) {
+		return nil, nil, http.StatusConflict, errors.New("question has already been answered in this session")
+	}
+
+	// Find question in session state (fallback to DB question if session state is empty)
+	var questionExplanation *string
 	sessionQuestions, _ := session.GetQuestions()
 	var matchedSQ *models.SessionQuestion
 	for _, sq := range sessionQuestions {
-		if sq.QuestionCode == req.Question {
+		if sq.QuestionCode == ans.Question {
 			matchedSQ = &sq
 			break
 		}
@@ -558,25 +571,21 @@ func EvaluateAnswer(ctx context.Context, clientID int, req *dto.SubmitAnswerRequ
 	if matchedSQ != nil {
 		questionExplanation = matchedSQ.Explanation
 	} else {
-		// Fallback to database
 		var err error
-		fallbackQ, err = repo.GetQuestionByCode(ctx, req.Question)
+		fallbackQ, err = repo.GetQuestionByCode(ctx, ans.Question)
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil, http.StatusNotFound, errors.New("question not found")
+				return nil, nil, http.StatusNotFound, errors.New("question not found")
 			}
-			return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch question: %w", err)
+			return nil, nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch question: %w", err)
 		}
 		questionExplanation = fallbackQ.Explanation
 	}
 
-	// 4. Grade the answer with robust multi-layered verification
-	isCorrect, isSkipped, resolvedCorrectOption := GradeAnswer(matchedSQ, fallbackQ, req.Option, req.SelectedText)
+	isCorrect, isSkipped, resolvedCorrectOption := GradeAnswer(matchedSQ, fallbackQ, ans.Option, ans.SelectedText)
 
-	// 5. Award fixed MCQ points after the backend has evaluated correctness.
+	// Award fixed MCQ points after the backend has evaluated correctness.
 	pointsEarned := 0
-	coinsEarned := 0
-
 	if isCorrect {
 		session.ComboStreak++
 		if session.ComboStreak > session.BestStreak {
@@ -597,52 +606,30 @@ func EvaluateAnswer(ctx context.Context, clientID int, req *dto.SubmitAnswerRequ
 			session.SkippedCount++
 		}
 	}
-
 	session.Score += pointsEarned
 	session.CurrentIdx++
 
-	// 6. Record the answer in the immutable history table
-	historyRecord := &models.UserQuestionHistory{
+	history := &models.UserQuestionHistory{
 		ClientID:       clientID,
-		SessionID:      req.Session,
+		SessionID:      session.ID,
 		GameMode:       session.GameMode,
-		QuestionCode:   req.Question,
-		SelectedOption: req.Option,
+		QuestionCode:   ans.Question,
+		SelectedOption: ans.Option,
 		IsCorrect:      isCorrect,
-		TimeTakenMs:    req.TimeTakenMs,
+		TimeTakenMs:    ans.TimeTakenMs,
 		PointsAwarded:  pointsEarned,
-		CoinsAwarded:   coinsEarned,
 	}
-
-	// 7. Persist updated session state in Redis RAM (< 0.2ms)
-	if err := repo.UpdateSession(ctx, session); err != nil {
-		return nil, http.StatusInternalServerError, fmt.Errorf("failed to update session state: %w", err)
-	}
-
-	// 8. Decouple PostgreSQL history insert to detached background worker
-	// Eliminates 15ms-30ms disk WAL latency from client hot path
-	go func(rec *models.UserQuestionHistory) {
-		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := repo.RecordAnswer(bgCtx, rec); err != nil {
-			log.Printf("[rest] async persist answer failed for %s: %v", rec.QuestionCode, err)
-		}
-	}(historyRecord)
-
-	go RefreshSessionTTL(context.Background(), session.ID)
-
 	return &dto.AnswerResultDTO{
-		Question:      req.Question,
-		Option:        req.Option,
+		Question:      ans.Question,
+		Option:        ans.Option,
 		CorrectOption: strings.ToLower(resolvedCorrectOption),
 		IsCorrect:     isCorrect,
 		IsSkipped:     isSkipped,
 		Explanation:   questionExplanation,
 		PointsEarned:  pointsEarned,
-		CoinsEarned:   coinsEarned,
 		ComboStreak:   session.ComboStreak,
 		TotalScore:    session.Score,
-	}, http.StatusOK, nil
+	}, history, http.StatusOK, nil
 }
 
 // --- 50:50 Power-Up ---
@@ -741,6 +728,37 @@ func CompleteSession(ctx context.Context, clientID int, req *dto.CompleteSession
 		return nil, http.StatusConflict, errors.New("quiz session expired due to 5 minutes of inactivity and has been abandoned")
 	}
 
+	// Grade answers sent with complete (client graded locally during play). History is
+	// written concurrently with finalization so it adds no round trip.
+	var historyDone chan struct{}
+	if len(req.Answers) > 0 {
+		history := make([]*models.UserQuestionHistory, 0, len(req.Answers))
+		for _, ans := range req.Answers {
+			_, rec, status, err := applyAnswer(ctx, clientID, session, ans)
+			if status == http.StatusConflict {
+				continue // already answered through /quiz/answers/evaluate
+			}
+			if err != nil {
+				return nil, status, err
+			}
+			history = append(history, rec)
+		}
+		historyDone = make(chan struct{})
+		go func() {
+			defer close(historyDone)
+			bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			if err := repo.RecordBatchAnswers(bgCtx, history); err != nil {
+				log.Printf("[rest] persist batched answers failed for %s: %v", session.ID, err)
+			}
+		}()
+	}
+	defer func() {
+		if historyDone != nil {
+			<-historyDone
+		}
+	}()
+
 	// Recompute the final score from backend-owned correctness so sessions
 	// always finish under the deterministic MCQ rule, including sessions that
 	// may have started before a scoring deployment.
@@ -789,15 +807,14 @@ func CompleteSession(ctx context.Context, clientID int, req *dto.CompleteSession
 		reward.Coins+levelBonusCoins,
 		reward.XP,
 		reward.Gems+levelBonusGems,
+		newLevel,
 	); err != nil {
 		return nil, http.StatusInternalServerError, fmt.Errorf("failed to finalize session: %w", err)
 	}
 	ClearSessionTTL(ctx, session.ID)
 
-	// If level changed, update level column separately
 	if didLevelUp {
 		profile.Level = newLevel
-		_ = updateProfileLevel(ctx, clientID, newLevel)
 	}
 
 	accuracy := 0.0
@@ -1017,6 +1034,7 @@ func CompleteSortItOutSession(ctx context.Context, clientID int, req *dto.Comple
 		reward.Coins+levelBonusCoins,
 		reward.XP,
 		reward.Gems+levelBonusGems,
+		newLevel,
 	); err != nil {
 		return nil, http.StatusInternalServerError, fmt.Errorf("failed to finalize session: %w", err)
 	}
@@ -1024,7 +1042,6 @@ func CompleteSortItOutSession(ctx context.Context, clientID int, req *dto.Comple
 
 	if didLevelUp && profile != nil {
 		profile.Level = newLevel
-		_ = updateProfileLevel(ctx, clientID, newLevel)
 	}
 
 	accuracy := 0.0
@@ -1145,6 +1162,7 @@ func CompleteMatchTheFollowingSession(ctx context.Context, clientID int, req *dt
 		totalPairs := len(sq.MatchPairs)
 		matchedCount := 0
 		usedRightIDs := make(map[string]bool)
+		matchedPairs := make(map[string]bool, totalPairs)
 
 		for leftID, rightID := range boardSub.Matches {
 			if usedRightIDs[rightID] {
@@ -1156,6 +1174,7 @@ func CompleteMatchTheFollowingSession(ctx context.Context, clientID int, req *dt
 			}
 			if ok && (expectedRight == rightID || strings.TrimSuffix(expectedRight, "_r") == strings.TrimSuffix(rightID, "_r")) {
 				usedRightIDs[rightID] = true
+				matchedPairs[strings.TrimSuffix(leftID, "_l")] = true
 				matchedCount++
 			}
 		}
@@ -1202,17 +1221,23 @@ func CompleteMatchTheFollowingSession(ctx context.Context, clientID int, req *dt
 			Explanation:     sq.Explanation,
 		})
 
-		historyRecords = append(historyRecords, &models.UserQuestionHistory{
-			ClientID:       clientID,
-			SessionID:      session.ID,
-			GameMode:       models.GameModeMatchTheFollowing,
-			QuestionCode:   sq.QuestionCode,
-			SelectedOption: fmt.Sprintf("%d/%d", matchedCount, totalPairs),
-			IsCorrect:      isCleared,
-			TimeTakenMs:    boardSub.TimeTakenMs,
-			PointsAwarded:  totalBoardScore,
-			CoinsAwarded:   0,
-		})
+		// One history row per pair, so per-pair accuracy can be tracked across games.
+		for _, p := range sq.MatchPairs {
+			selected, points := "unmatched", 0
+			if matchedPairs[p.ID] {
+				selected, points = "matched", 10
+			}
+			historyRecords = append(historyRecords, &models.UserQuestionHistory{
+				ClientID:       clientID,
+				SessionID:      session.ID,
+				GameMode:       models.GameModeMatchTheFollowing,
+				QuestionCode:   p.ID,
+				SelectedOption: selected,
+				IsCorrect:      matchedPairs[p.ID],
+				TimeTakenMs:    boardSub.TimeTakenMs / max(totalPairs, 1),
+				PointsAwarded:  points,
+			})
+		}
 	}
 
 	session.Score = finalScore
@@ -1274,6 +1299,7 @@ func CompleteMatchTheFollowingSession(ctx context.Context, clientID int, req *dt
 		reward.Coins+levelBonusCoins,
 		reward.XP,
 		reward.Gems+levelBonusGems,
+		newLevel,
 	); err != nil {
 		return nil, http.StatusInternalServerError, fmt.Errorf("failed to finalize session: %w", err)
 	}
@@ -1281,7 +1307,6 @@ func CompleteMatchTheFollowingSession(ctx context.Context, clientID int, req *dt
 
 	if didLevelUp && profile != nil {
 		profile.Level = newLevel
-		_ = updateProfileLevel(ctx, clientID, newLevel)
 	}
 
 	accuracy := 0.0
@@ -1662,11 +1687,6 @@ func CalculateNewLevel(totalExperience int) int {
 	return level
 }
 
-// updateProfileLevel updates only the level column on the profile.
-func updateProfileLevel(ctx context.Context, clientID, newLevel int) error {
-	return repo.UpdateProfileLevel(ctx, clientID, newLevel)
-}
-
 // --- Question Shuffling & Sanitization ---
 
 type rawOption struct {
@@ -1741,7 +1761,7 @@ func ShuffleQuestion(q models.Question) models.SessionQuestion {
 		OriginalCorrect: origCorrectLetter,
 		CorrectText:     correctText,
 		Difficulty:      q.Difficulty,
-		Points:          q.Points,
+		Points:          MCQCorrectAnswerPoints,
 		Hint:            q.Hint,
 		Explanation:     q.Explanation,
 	}
@@ -1893,7 +1913,7 @@ func GetTopicQuestions(ctx context.Context, topicID string, limit int) (*dto.Top
 	if limit > 50 {
 		limit = 50
 	}
-	questions, err := repo.GetQuestionsByTopic(ctx, topicID, limit)
+	questions, err := repo.GetQuestionsByTopic(ctx, topicID, 0, limit)
 	if err != nil {
 		return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch questions: %w", err)
 	}
@@ -1919,4 +1939,24 @@ func GetTopicQuestions(ctx context.Context, topicID string, limit int) (*dto.Top
 		TimeLimitPerQuestionSec: DefaultTimeLimitSec,
 		Questions:               questionDTOs,
 	}, http.StatusOK, nil
+}
+
+// GetSubjects groups v_content_counts into subjects -> chapters -> per-mode counts.
+func GetSubjects(ctx context.Context) ([]dto.SubjectDTO, int, error) {
+	rows, err := repo.GetContentCounts(ctx)
+	if err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch subjects: %w", err)
+	}
+	subjects := []dto.SubjectDTO{}
+	for _, r := range rows {
+		if n := len(subjects); n == 0 || subjects[n-1].TopicID != r.TopicID {
+			subjects = append(subjects, dto.SubjectDTO{TopicID: r.TopicID, Name: r.SubjectName, Grade: r.Grade})
+		}
+		s := &subjects[len(subjects)-1]
+		if n := len(s.Chapters); n == 0 || s.Chapters[n-1].ChapterNo != r.ChapterNo {
+			s.Chapters = append(s.Chapters, dto.ChapterDTO{ChapterNo: r.ChapterNo, Title: r.ChapterTitle, Counts: map[string]int{}})
+		}
+		s.Chapters[len(s.Chapters)-1].Counts[r.GameMode] = r.QuestionCount
+	}
+	return subjects, http.StatusOK, nil
 }

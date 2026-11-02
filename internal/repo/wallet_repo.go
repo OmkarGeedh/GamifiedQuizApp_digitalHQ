@@ -23,7 +23,7 @@ func GetWalletBalance(ctx context.Context, clientID int) (coins int, gems int, e
 	var profile models.Profile
 	err = GetDB().WithContext(ctx).
 		Select("coins, gems").
-		Where("client_id = ?", clientID).
+		Where("id = ?", clientID).
 		First(&profile).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -43,7 +43,7 @@ func DebitWalletBalance(ctx context.Context, clientID int, currency string, amou
 	err := GetDB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var profile models.Profile
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("client_id = ?", clientID).
+			Where("id = ?", clientID).
 			First(&profile).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return ErrProfileNotFound
@@ -70,7 +70,7 @@ func DebitWalletBalance(ctx context.Context, clientID int, currency string, amou
 
 		// Update cached aggregate on profile
 		if err := tx.Model(&models.Profile{}).
-			Where("client_id = ?", clientID).
+			Where("id = ?", clientID).
 			Updates(map[string]interface{}{
 				currency: remainingBalance,
 			}).Error; err != nil {
@@ -116,7 +116,7 @@ func CreditWalletBalance(ctx context.Context, clientID int, currency string, amo
 	err := GetDB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var profile models.Profile
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("client_id = ?", clientID).
+			Where("id = ?", clientID).
 			First(&profile).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return ErrProfileNotFound
@@ -136,7 +136,7 @@ func CreditWalletBalance(ctx context.Context, clientID int, currency string, amo
 		}
 
 		if err := tx.Model(&models.Profile{}).
-			Where("client_id = ?", clientID).
+			Where("id = ?", clientID).
 			Updates(map[string]interface{}{
 				currency: newBalance,
 			}).Error; err != nil {

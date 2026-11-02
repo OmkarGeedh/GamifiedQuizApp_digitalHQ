@@ -35,7 +35,13 @@ func TestDetectPlatform_And_Timing(t *testing.T) {
 		os.Unsetenv("CLOUD_PROVIDER")
 		os.Unsetenv("PLATFORM")
 		os.Unsetenv("X_ZOHO_CATALYST_LISTEN_PORT")
+		os.Unsetenv("X_ZOHO_CATALYST_APPSAIL_PORT")
 		os.Unsetenv("CATALYST_ENV")
+		os.Unsetenv("CATALYST_PROJECT_ID")
+		os.Unsetenv("CATALYST_ORG_ID")
+		os.Unsetenv("CATALYST_APP_NAME")
+		os.Unsetenv("CATALYST_ENVIRONMENT")
+		os.Unsetenv("ZOHO_CATALYST")
 		os.Unsetenv("AWS_REGION")
 		os.Unsetenv("AWS_EXECUTION_ENV")
 		os.Unsetenv("ECS_CONTAINER_METADATA_URI")
@@ -68,6 +74,32 @@ func TestDetectPlatform_And_Timing(t *testing.T) {
 	t.Run("Zoho Catalyst via Auto-detected Port", func(t *testing.T) {
 		clearEnv()
 		os.Setenv("X_ZOHO_CATALYST_LISTEN_PORT", "8080")
+		ws.InitPlatformTiming()
+
+		if ws.CurrentPlatform != ws.PlatformZoho {
+			t.Fatalf("expected PlatformZoho, got %s", ws.CurrentPlatform)
+		}
+		if ws.PingInterval != 15*time.Second {
+			t.Fatalf("expected PingInterval 15s, got %v", ws.PingInterval)
+		}
+	})
+
+	t.Run("Zoho Catalyst via CATALYST_PROJECT_ID", func(t *testing.T) {
+		clearEnv()
+		os.Setenv("CATALYST_PROJECT_ID", "1234567890")
+		ws.InitPlatformTiming()
+
+		if ws.CurrentPlatform != ws.PlatformZoho {
+			t.Fatalf("expected PlatformZoho, got %s", ws.CurrentPlatform)
+		}
+		if ws.PingInterval != 15*time.Second {
+			t.Fatalf("expected PingInterval 15s, got %v", ws.PingInterval)
+		}
+	})
+
+	t.Run("Zoho Catalyst via X_ZOHO_CATALYST_APPSAIL_PORT", func(t *testing.T) {
+		clearEnv()
+		os.Setenv("X_ZOHO_CATALYST_APPSAIL_PORT", "8080")
 		ws.InitPlatformTiming()
 
 		if ws.CurrentPlatform != ws.PlatformZoho {

@@ -43,6 +43,8 @@ flowchart TD
 ---
 
 ### Pillar 3: WebSocket Ingress & Routing
+
+> **Zoho Catalyst AppSail:** the direct container subdomain also fails — the edge returns `101` without `Upgrade: websocket` and forwards no frames (verified 2026-10-29). Gameplay no longer depends on WebSockets; Sudden Death uses `POST /quiz/sudden-death/*`. See [catalyst_websocket_issue.md](catalyst_websocket_issue.md).
 - [ ] **Protocol Switch Support**: Verify that the fronting reverse proxy / load balancer forwards `Upgrade: websocket` and `Connection: Upgrade` headers (`101 Switching Protocols`).
 - [ ] **Bypass Stateless API Gateways**: If an edge API Gateway does not support WebSocket hops (e.g. Zoho Catalyst API Gateway), route WebSocket clients directly to the persistent container subdomain (e.g. `*.catalystappsail.com`).
 - [ ] **Enforce TLS (`wss://`)**: On HTTPS production domains, ensure frontend clients dial `wss://` instead of `ws://` to prevent browser mixed-content blocks.

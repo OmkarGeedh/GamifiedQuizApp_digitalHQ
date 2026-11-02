@@ -61,6 +61,7 @@ func setupTestEngine() *gin.Engine {
 	routes.RegisterProfileRoutes(r)
 	routes.RegisterGameRoutes(r)
 	routes.RegisterWalletRoutes(r)
+	routes.RegisterSpinWheelRoutes(r)
 	routes.RegisterLeaderboardRoutes(r)
 
 	r.NoMethod(func(c *gin.Context) {
@@ -133,7 +134,7 @@ func TestRouteRegistrationBothPrefixes(t *testing.T) {
 	}
 
 	// Test sort-it-out completion endpoint exists under both /quiz and /api/v1/quiz (not 404)
-	for _, path := range []string{"/quiz/sort-it-out/complete", "/api/v1/quiz/sort-it-out/complete"} {
+	for _, path := range []string{"/quiz/sort-it-out/complete", "/api/v1/quiz/sort-it-out/complete", "/quiz/sudden-death/question", "/api/v1/quiz/sudden-death/answer", "/quiz/sudden-death/power-up", "/api/v1/quiz/sudden-death/power-up"} {
 		req, _ := http.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Origin", "http://localhost:3000")
@@ -158,8 +159,8 @@ func TestRouteRegistrationBothPrefixes(t *testing.T) {
 		}
 	}
 
-	// Test leaderboard endpoint exists under both /leaderboard and /api/v1/leaderboard (not 404)
-	for _, path := range []string{"/leaderboard", "/api/v1/leaderboard"} {
+	// Authenticated GET endpoints exist under both prefixes and reject anonymous calls with 401
+	for _, path := range []string{"/leaderboard", "/api/v1/leaderboard", "/subjects", "/api/v1/subjects"} {
 		req, _ := http.NewRequest(http.MethodGet, path, nil)
 		req.Header.Set("Origin", "http://localhost:3000")
 		w := httptest.NewRecorder()
@@ -171,6 +172,34 @@ func TestRouteRegistrationBothPrefixes(t *testing.T) {
 		// Since it requires authentication, it should respond with 401 Unauthorized
 		if w.Code != http.StatusUnauthorized {
 			t.Errorf("expected status 401 Unauthorized for unauthenticated %s, got %d", path, w.Code)
+		}
+	}
+
+	// Test WebSocket game endpoints exist and are authenticated (not 404, returns 401 unauth)
+	for _, path := range []string{"/ws/game", "/api/v1/ws/game", "/ws", "/api/v1/ws"} {
+		req, _ := http.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		if w.Code == http.StatusNotFound {
+			t.Errorf("expected WebSocket route %s to exist (not 404), got 404", path)
+		}
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("expected status 401 Unauthorized for unauthenticated %s, got %d", path, w.Code)
+		}
+	}
+
+	// Test WebSocket diagnostic echo endpoints exist and are unauthenticated (not 404, not 401)
+	for _, path := range []string{"/ws/echo", "/api/v1/ws/echo", "/ws/ping", "/api/v1/ws/ping"} {
+		req, _ := http.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		if w.Code == http.StatusNotFound {
+			t.Errorf("expected WebSocket echo route %s to exist (not 404), got 404", path)
+		}
+		if w.Code == http.StatusUnauthorized {
+			t.Errorf("expected WebSocket echo route %s to be unauthenticated, got 401", path)
 		}
 	}
 }

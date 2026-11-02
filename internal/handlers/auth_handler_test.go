@@ -295,5 +295,3 @@ func TestLogin_ProtectedRoutesAndRefreshToken(t *testing.T) {
 		t.Fatalf("Expected 401 after logout, got %d", wRevoked.Code)
 	}
 }
-
-
