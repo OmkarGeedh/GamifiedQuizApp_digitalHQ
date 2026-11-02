@@ -36,6 +36,30 @@ func Error(c *gin.Context, status int, message string) {
 	})
 }
 
+// CodedFieldError is a machine-readable field error: {"field": "name", "code": "display_name_taken"}.
+type CodedFieldError struct {
+	Field string `json:"field"`
+	Code  string `json:"code"`
+}
+
+type codedResponse struct {
+	Success   bool              `json:"success"`
+	Message   string            `json:"message"`
+	Data      any               `json:"data"` // always present (null)
+	Errors    []CodedFieldError `json:"errors"`
+	Timestamp string            `json:"timestamp"`
+}
+
+// ErrorWithCode writes an error envelope with "data": null and a field/code error entry.
+func ErrorWithCode(c *gin.Context, status int, message string, errors ...CodedFieldError) {
+	c.AbortWithStatusJSON(status, codedResponse{
+		Success:   false,
+		Message:   message,
+		Errors:    errors,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	})
+}
+
 func ValidationError(c *gin.Context, status int, message string, errors []FieldError) {
 	c.AbortWithStatusJSON(status, Response{
 		Success:   false,

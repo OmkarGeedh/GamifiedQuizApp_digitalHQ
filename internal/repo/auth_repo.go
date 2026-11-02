@@ -58,11 +58,13 @@ func CheckEmailExists(ctx context.Context, email string) (bool, error) {
 	return count > 0, nil
 }
 
+// CheckUsernameExists matches the uq_clients_display_name_ci index: case-insensitive,
+// ignoring surrounding spaces, and across all statuses (deleted accounts keep their name).
 func CheckUsernameExists(ctx context.Context, username string) (bool, error) {
 	var count int64
 	err := GetDB().WithContext(ctx).
 		Model(&models.Client{}).
-		Where("username = ? AND status != ?", username, "deleted").
+		Where("lower(trim(username)) = lower(trim(?))", username).
 		Count(&count).Error
 	if err != nil {
 		return false, err

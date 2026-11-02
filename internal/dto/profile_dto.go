@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // -----------------------------------------------------------------------------
@@ -167,14 +168,32 @@ type UpdateProfileRequestDTO struct {
 	Subjects  []string `json:"subjects,omitempty"`
 }
 
+const (
+	DisplayNameMinLen = 3
+	DisplayNameMaxLen = 30
+
+	// DisplayNameInvalidMessage is shown to the user as-is by the app.
+	DisplayNameInvalidMessage = "Display name must be 3 to 30 characters."
+)
+
+// ValidateDisplayName checks the length rules for an already-trimmed display name.
+// Length is counted in characters (runes), not bytes.
+func ValidateDisplayName(name string) error {
+	n := utf8.RuneCountInString(name)
+	if n < DisplayNameMinLen || n > DisplayNameMaxLen {
+		return errors.New(DisplayNameInvalidMessage)
+	}
+	return nil
+}
+
+// Validate trims the name and rejects an empty one. The length rule is enforced by
+// the service (via ValidateDisplayName) so a user re-saving their own legacy name,
+// which signup allowed outside 3-30 characters, is not locked out of other edits.
 func (r *UpdateProfileRequestDTO) Validate() error {
 	if r.Name != nil {
 		trimmed := strings.TrimSpace(*r.Name)
 		if trimmed == "" {
-			return errors.New("name cannot be empty")
-		}
-		if len(trimmed) < 2 {
-			return errors.New("name must be at least 2 characters long")
+			return errors.New(DisplayNameInvalidMessage)
 		}
 		*r.Name = trimmed
 	}

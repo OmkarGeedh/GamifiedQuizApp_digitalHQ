@@ -2,11 +2,13 @@ package repo
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/cache"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/dto"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/models"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
@@ -51,6 +53,40 @@ func UpdateProfile(ctx context.Context, profile *models.Profile) error {
 	if profile != nil {
 		_ = cache.InvalidateCachedProfile(ctx, profile.ClientID)
 	}
+	return nil
+}
+
+// ErrDisplayNameTaken is returned when another client already owns the display name.
+var ErrDisplayNameTaken = errors.New("display name already taken")
+
+// SaveProfileWithDisplayName persists the profile and, when displayName is non-nil,
+// writes it to both clients.username (returned by the session endpoint) and
+// client_profiles.full_name in one transaction. Uniqueness is decided by the
+// uq_clients_display_name_ci index (lower(trim(username))), so concurrent requests
+// for one name cannot both succeed; the loser is rolled back with ErrDisplayNameTaken.
+func SaveProfileWithDisplayName(ctx context.Context, profile *models.Profile, displayName *string) error {
+	db := GetDB()
+	if db == nil {
+		return errors.New("database unavailable")
+	}
+	err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if displayName != nil {
+			profile.FullName = *displayName
+			if err := tx.Model(&models.Client{}).
+				Where("id = ?", profile.ClientID).
+				Updates(map[string]any{"username": *displayName, "updated_at": time.Now().UTC()}).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Save(profile).Error
+	})
+	if err != nil {
+		if errors.Is(err, gorm.ErrDuplicatedKey) {
+			return ErrDisplayNameTaken
+		}
+		return err
+	}
+	_ = cache.InvalidateCachedProfile(ctx, profile.ClientID)
 	return nil
 }
 

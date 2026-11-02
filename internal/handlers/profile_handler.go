@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -23,6 +24,17 @@ func GetProfileOptionsHandler(c *gin.Context) {
 	response.Success(c, status, "Profile setup options fetched successfully", opts)
 }
 
+// respondProfileError maps a display-name conflict to the 409 envelope the app
+// expects; every other error keeps the plain {success, message} shape.
+func respondProfileError(c *gin.Context, status int, err error) {
+	if errors.Is(err, services.ErrDisplayNameTaken) {
+		response.ErrorWithCode(c, http.StatusConflict, "That display name is already taken.",
+			response.CodedFieldError{Field: "name", Code: "display_name_taken"})
+		return
+	}
+	response.Error(c, status, err.Error())
+}
+
 // SetupProfileHandler completes the 4-step profile setup onboarding flow.
 func SetupProfileHandler(c *gin.Context) {
 	clientID, ok := middleware.GetAuthenticatedClientID(c)
@@ -43,7 +55,7 @@ func SetupProfileHandler(c *gin.Context) {
 
 	res, status, err := services.SetupProfile(c.Request.Context(), clientID, &req)
 	if err != nil {
-		response.Error(c, status, err.Error())
+		respondProfileError(c, status, err)
 		return
 	}
 
@@ -60,7 +72,7 @@ func GetProfileHandler(c *gin.Context) {
 
 	res, status, err := services.GetMyProfile(c.Request.Context(), clientID)
 	if err != nil {
-		response.Error(c, status, err.Error())
+		respondProfileError(c, status, err)
 		return
 	}
 
@@ -87,7 +99,7 @@ func CreateProfileHandler(c *gin.Context) {
 
 	res, status, err := services.CreateMyProfile(c.Request.Context(), clientID, &req)
 	if err != nil {
-		response.Error(c, status, err.Error())
+		respondProfileError(c, status, err)
 		return
 	}
 
@@ -114,7 +126,7 @@ func UpdateProfileHandler(c *gin.Context) {
 
 	res, status, err := services.UpdateMyProfile(c.Request.Context(), clientID, &req)
 	if err != nil {
-		response.Error(c, status, err.Error())
+		respondProfileError(c, status, err)
 		return
 	}
 

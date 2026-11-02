@@ -19,6 +19,21 @@ import (
 	"gorm.io/gorm"
 )
 
+// ErrDisplayNameTaken is returned (with HTTP 409) when another user already has the display name.
+var ErrDisplayNameTaken = repo.ErrDisplayNameTaken
+
+// saveProfile persists the profile; a non-nil newName is also written to clients.username
+// (the value the session endpoint returns) in the same transaction.
+func saveProfile(ctx context.Context, profile *models.Profile, newName *string) (int, error) {
+	if err := repo.SaveProfileWithDisplayName(ctx, profile, newName); err != nil {
+		if errors.Is(err, repo.ErrDisplayNameTaken) {
+			return http.StatusConflict, ErrDisplayNameTaken
+		}
+		return http.StatusInternalServerError, fmt.Errorf("failed to save profile: %w", err)
+	}
+	return http.StatusOK, nil
+}
+
 // CalculateExperienceForLevel returns the total XP required to reach the next level
 func CalculateExperienceForLevel(level int) int {
 	if level <= 1 {
@@ -276,7 +291,7 @@ func GetMyProfile(ctx context.Context, clientID int) (*dto.ProfileResponseDTO, i
 
 	res := &dto.ProfileResponseDTO{
 		UUID:            profile.UUID,
-		Name:            profile.FullName,
+		Name:            client.Username, // same stored value the session endpoint returns
 		Email:           client.Email,
 		Phone:           client.Phone,
 		AvatarID:        avatarID,
@@ -320,7 +335,6 @@ func SetupProfile(ctx context.Context, clientID int, req *dto.ProfileSetupReques
 		return nil, http.StatusInternalServerError, fmt.Errorf("failed to retrieve profile: %w", err)
 	}
 
-	profile.FullName = req.Name
 	profile.AvatarID = req.AvatarID
 	if req.AvatarURL != nil && *req.AvatarURL != "" {
 		profile.AvatarURL = *req.AvatarURL
@@ -334,8 +348,8 @@ func SetupProfile(ctx context.Context, clientID int, req *dto.ProfileSetupReques
 	}
 	profile.IsOnboarded = true
 
-	if err := repo.UpdateProfile(ctx, profile); err != nil {
-		return nil, http.StatusInternalServerError, fmt.Errorf("failed to save profile setup: %w", err)
+	if status, err := saveProfile(ctx, profile, &req.Name); err != nil {
+		return nil, status, err
 	}
 
 	return GetMyProfile(ctx, clientID)
@@ -348,8 +362,9 @@ func CreateMyProfile(ctx context.Context, clientID int, req *dto.CreateProfileRe
 		return nil, http.StatusInternalServerError, fmt.Errorf("failed to initialize profile: %w", err)
 	}
 
+	var newName *string
 	if req.FullName != "" {
-		profile.FullName = req.FullName
+		newName = &req.FullName
 	}
 	if req.AvatarID != nil {
 		profile.AvatarID = *req.AvatarID
@@ -368,26 +383,47 @@ func CreateMyProfile(ctx context.Context, clientID int, req *dto.CreateProfileRe
 		profile.Subjects = string(b)
 		profile.IsOnboarded = true
 	}
+
+	if status, err := saveProfile(ctx, profile, newName); err != nil {
+		return nil, status, err
+	}
 	if req.Phone != nil {
 		_ = repo.UpdateClientPhone(ctx, clientID, req.Phone)
-	}
-
-	if err := repo.UpdateProfile(ctx, profile); err != nil {
-		return nil, http.StatusInternalServerError, fmt.Errorf("failed to update profile: %w", err)
 	}
 
 	return GetMyProfile(ctx, clientID)
 }
 
 func UpdateMyProfile(ctx context.Context, clientID int, req *dto.UpdateProfileRequestDTO) (*dto.ProfileResponseDTO, int, error) {
+	if err := req.Validate(); err != nil {
+		return nil, http.StatusBadRequest, err
+	}
+
+	// Validate the name before touching any data so a rejected request changes nothing.
+	var newName *string
+	if req.Name != nil && *req.Name != "" {
+		name := *req.Name
+		client, err := repo.GetClientByID(ctx, clientID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, http.StatusNotFound, errors.New("client not found")
+			}
+			return nil, http.StatusInternalServerError, fmt.Errorf("failed to retrieve client: %w", err)
+		}
+		// Re-saving the current name is always allowed, even if it predates the length rule.
+		if name != client.Username {
+			if err := dto.ValidateDisplayName(name); err != nil {
+				return nil, http.StatusBadRequest, err
+			}
+		}
+		newName = &name
+	}
+
 	profile, err := GetOrCreateProfile(ctx, clientID)
 	if err != nil {
 		return nil, http.StatusInternalServerError, fmt.Errorf("failed to retrieve profile: %w", err)
 	}
 
-	if req.Name != nil && *req.Name != "" {
-		profile.FullName = *req.Name
-	}
 	if req.AvatarID != nil && *req.AvatarID != "" {
 		profile.AvatarID = *req.AvatarID
 	}
@@ -404,12 +440,13 @@ func UpdateMyProfile(ctx context.Context, clientID int, req *dto.UpdateProfileRe
 		b, _ := json.Marshal(req.Subjects)
 		profile.Subjects = string(b)
 	}
+
+	if status, err := saveProfile(ctx, profile, newName); err != nil {
+		return nil, status, err
+	}
+	// Phone is best-effort and applied only once the rest of the request has succeeded.
 	if req.Phone != nil {
 		_ = repo.UpdateClientPhone(ctx, clientID, req.Phone)
-	}
-
-	if err := repo.UpdateProfile(ctx, profile); err != nil {
-		return nil, http.StatusInternalServerError, fmt.Errorf("failed to update profile: %w", err)
 	}
 
 	return GetMyProfile(ctx, clientID)

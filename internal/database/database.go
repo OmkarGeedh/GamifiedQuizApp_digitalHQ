@@ -20,6 +20,7 @@ func Connect(databaseURL string) (*gorm.DB, error) {
 			DSN:                  databaseURL,
 			PreferSimpleProtocol: true, // Disables prepared statement protocol for PgBouncer / Catalyst pooled connections
 		}), &gorm.Config{
+			TranslateError:         true,  // Maps unique violations to gorm.ErrDuplicatedKey (display-name conflicts)
 			PrepareStmt:            false, // Prevents SQLSTATE 08P01 "prepared statement already in use"
 			SkipDefaultTransaction: true,  // Disables implicit BEGIN/COMMIT on single queries (saves 1 RTT per operation)
 			Logger:                 logger.Default.LogMode(logger.Warn),
