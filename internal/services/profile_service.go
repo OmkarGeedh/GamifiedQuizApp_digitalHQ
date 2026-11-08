@@ -154,7 +154,7 @@ func GetOrCreateProfile(ctx context.Context, clientID int) (*models.Profile, err
 		}
 		return nil, err
 	}
-	now := time.Now().UTC()
+	now := streakNow().UTC()
 	todayStr := now.Format("2006-01-02")
 	todayDate, _ := time.Parse("2006-01-02", todayStr)
 
@@ -172,7 +172,17 @@ func GetOrCreateProfile(ctx context.Context, clientID int) (*models.Profile, err
 	lastActiveStr := profile.LastActiveDate.Format("2006-01-02")
 	if lastActiveStr != todayStr {
 		yesterdayStr := now.AddDate(0, 0, -1).Format("2006-01-02")
-		if lastActiveStr == yesterdayStr {
+		kept := lastActiveStr == yesterdayStr
+		if !kept {
+			// Missed one or more days: streak freezes (if the player has them)
+			// bridge the gap, otherwise the streak restarts.
+			var handled *models.Profile
+			kept, handled = bridgeMissedDays(ctx, profile, todayDate)
+			if handled != nil {
+				return handled, nil // a parallel request already counted today
+			}
+		}
+		if kept {
 			profile.CurrentStreak++
 			if profile.CurrentStreak > profile.HighestStreak {
 				profile.HighestStreak = profile.CurrentStreak

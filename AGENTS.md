@@ -71,6 +71,14 @@ Sudden Death HTTP turns live in `internal/ws/turns.go` and return ordered events
 
 Sessions have a 5-minute inactivity TTL (`services.SessionInactivityTTL`), refreshed on activity.
 
+## Daily goals
+
+`GET /daily-goals` and `POST /daily-goals/claim` (`docs/daily_goals.md`). Goals live in `services.DailyGoals`; progress is counted from `leaderboard_game_results` for the UTC day (no table of its own). A claim is a `wallet_ledger` row (`daily_goal_reward`, reference `dg:<goal>:<YYYYMMDD>`) written under a per-player advisory lock, so it pays once per day. Wallet credit/debit are separately capped and rate limited per player (`dto.MaxWalletCreditCoins/Gems`, `middleware.RateLimitPerClient`).
+
+## Streak rewards
+
+`GET /streak` and `POST /streak/claim` (`docs/streak_rewards.md`): bonuses at 3/7/14/30 days (`services.StreakMilestones`), once per streak, as `streak_bonus` ledger rows. Daily goals and streak rewards share `repo.claimReward` (one transaction, per-player advisory lock). The streak itself still counts days the profile was loaded (app opened), not days a game was finished. Streak freezes (`POST /streak/freeze`, `bridgeMissedDays` in `streak_service.go`) need `clients.streak_freezes` from migration 000007 in the migration repo: apply it before deploying. The column is deliberately not on `models.Profile`; only `repo/streak_freeze_repo.go` touches it.
+
 ## Dual route registration
 
 Every endpoint exists at the root and under `/api/v1`: each `Register*Routes` builds routes in a closure invoked for both groups. Add endpoints **inside the closure**; `internal/routes/routes_test.go` asserts the mirror. CORS is an inline func in `main.go` duplicated in `routes_test.go` — change both.

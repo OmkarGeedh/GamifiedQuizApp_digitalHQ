@@ -49,6 +49,11 @@ func NewDB(t *testing.T) *gorm.DB {
 	)`).Error; err != nil {
 		t.Fatalf("create client_activity_days: %v", err)
 	}
+	// clients.streak_freezes comes from migration 000007 in the migration repo; it is
+	// not a model field, so add it here.
+	if err := db.Exec(`ALTER TABLE clients ADD COLUMN streak_freezes INTEGER NOT NULL DEFAULT 0`).Error; err != nil {
+		t.Fatalf("add streak_freezes: %v", err)
+	}
 	if err := db.Exec(`CREATE UNIQUE INDEX uq_clients_display_name_ci ON clients (lower(trim(username)))`).Error; err != nil {
 		t.Fatalf("create display-name index: %v", err)
 	}

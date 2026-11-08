@@ -248,6 +248,8 @@ const (
 	TxTypeManualDebit     = "manual_debit"
 	TxTypeManualCredit    = "manual_credit"
 	TxTypeSpinReward      = "spin_reward"
+	TxTypeDailyGoalReward = "daily_goal_reward"
+	TxTypeStreakFreeze    = "streak_freeze_purchase"
 )
 
 // Transaction direction constants

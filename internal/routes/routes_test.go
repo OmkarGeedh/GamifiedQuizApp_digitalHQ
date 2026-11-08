@@ -62,6 +62,8 @@ func setupTestEngine() *gin.Engine {
 	routes.RegisterGameRoutes(r)
 	routes.RegisterWalletRoutes(r)
 	routes.RegisterSpinWheelRoutes(r)
+	routes.RegisterDailyGoalsRoutes(r)
+	routes.RegisterStreakRoutes(r)
 	routes.RegisterLeaderboardRoutes(r)
 
 	r.NoMethod(func(c *gin.Context) {
@@ -147,7 +149,7 @@ func TestRouteRegistrationBothPrefixes(t *testing.T) {
 	}
 
 	// Test match-the-following completion endpoint exists under both /quiz and /api/v1/quiz (not 404)
-	for _, path := range []string{"/quiz/match-the-following/complete", "/api/v1/quiz/match-the-following/complete"} {
+	for _, path := range []string{"/quiz/match-the-following/complete", "/api/v1/quiz/match-the-following/complete", "/daily-goals/claim", "/api/v1/daily-goals/claim", "/streak/claim", "/api/v1/streak/claim", "/streak/freeze", "/api/v1/streak/freeze"} {
 		req, _ := http.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Origin", "http://localhost:3000")
@@ -160,7 +162,7 @@ func TestRouteRegistrationBothPrefixes(t *testing.T) {
 	}
 
 	// Authenticated GET endpoints exist under both prefixes and reject anonymous calls with 401
-	for _, path := range []string{"/leaderboard", "/api/v1/leaderboard", "/subjects", "/api/v1/subjects"} {
+	for _, path := range []string{"/leaderboard", "/api/v1/leaderboard", "/subjects", "/api/v1/subjects", "/daily-goals", "/api/v1/daily-goals", "/streak", "/api/v1/streak"} {
 		req, _ := http.NewRequest(http.MethodGet, path, nil)
 		req.Header.Set("Origin", "http://localhost:3000")
 		w := httptest.NewRecorder()

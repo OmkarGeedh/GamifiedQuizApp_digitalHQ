@@ -121,6 +121,8 @@ func main() {
 	routes.RegisterGameRoutes(r)
 	routes.RegisterWalletRoutes(r)
 	routes.RegisterSpinWheelRoutes(r)
+	routes.RegisterDailyGoalsRoutes(r)
+	routes.RegisterStreakRoutes(r)
 	routes.RegisterLeaderboardRoutes(r)
 
 	// 5b. Start background session inactivity sweeper (TTL: 5 minutes, sweeps every 1 minute)
