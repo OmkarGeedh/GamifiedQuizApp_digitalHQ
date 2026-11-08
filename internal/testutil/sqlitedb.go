@@ -31,8 +31,23 @@ func NewDB(t *testing.T) *gorm.DB {
 	}
 	sqlDB.SetMaxOpenConns(1) // SQLite allows one writer; the unique index still decides races.
 
-	if err := db.AutoMigrate(&models.Client{}, &models.Profile{}, &models.StreakActivity{}); err != nil {
-		t.Fatalf("migrate: %v", err)
+	// Client and Profile share the clients table. Migrate Client first (it owns the
+	// account columns), then Profile (it adds the game columns); one combined call
+	// can create the table from Profile alone and lose the username column.
+	if err := db.AutoMigrate(&models.Client{}); err != nil {
+		t.Fatalf("migrate client: %v", err)
+	}
+	if err := db.AutoMigrate(&models.Profile{}); err != nil {
+		t.Fatalf("migrate profile: %v", err)
+	}
+	// Streak days live in client_activity_days, which has no model any more (the
+	// repo reads and writes it with plain SQL), so create the table directly.
+	if err := db.Exec(`CREATE TABLE IF NOT EXISTS client_activity_days (
+		client_id INTEGER NOT NULL,
+		day DATE NOT NULL,
+		PRIMARY KEY (client_id, day)
+	)`).Error; err != nil {
+		t.Fatalf("create client_activity_days: %v", err)
 	}
 	if err := db.Exec(`CREATE UNIQUE INDEX uq_clients_display_name_ci ON clients (lower(trim(username)))`).Error; err != nil {
 		t.Fatalf("create display-name index: %v", err)
@@ -50,9 +65,19 @@ func NewDB(t *testing.T) *gorm.DB {
 // SeedClient inserts an active client and returns its ID.
 func SeedClient(t *testing.T, db *gorm.DB, username string) int {
 	t.Helper()
-	c := models.Client{Username: username, Email: username + "@example.com", Password: "x", Status: "active"}
-	if err := db.Create(&c).Error; err != nil {
-		t.Fatalf("seed client %q: %v", username, err)
+	// Like a fresh signup: the game columns take their defaults and full_name is
+	// empty until the profile is set up. Plain SQL because Client has no full_name.
+	res := db.Exec(
+		`INSERT INTO clients (username, email, password, status, full_name, created_at, updated_at)
+		 VALUES (?, ?, 'x', 'active', '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+		username, username+"@example.com",
+	)
+	if res.Error != nil {
+		t.Fatalf("seed client %q: %v", username, res.Error)
 	}
-	return c.ID
+	var id int
+	if err := db.Raw(`SELECT id FROM clients WHERE username = ?`, username).Scan(&id).Error; err != nil {
+		t.Fatalf("read seeded client id %q: %v", username, err)
+	}
+	return id
 }

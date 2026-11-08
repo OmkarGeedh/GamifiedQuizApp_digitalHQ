@@ -2,6 +2,7 @@ package dto
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -30,6 +31,15 @@ func (r *WalletDebitRequestDTO) Validate() error {
 	return nil
 }
 
+// The most a single credit request may add. The app sends the credit itself
+// (spin and chest prizes, coin packs), so without a ceiling any signed-in
+// player could add any amount to their own wallet. These are far above
+// anything the app sends (its largest coin pack is 600 coins).
+const (
+	MaxWalletCreditCoins = 5000
+	MaxWalletCreditGems  = 500
+)
+
 // WalletCreditRequestDTO validates input for crediting player wallet balance.
 type WalletCreditRequestDTO struct {
 	Currency    string `json:"currency" binding:"required"`
@@ -46,6 +56,13 @@ func (r *WalletCreditRequestDTO) Validate() error {
 	}
 	if r.Amount <= 0 {
 		return errors.New("amount must be greater than zero")
+	}
+	limit := MaxWalletCreditCoins
+	if r.Currency == "gems" {
+		limit = MaxWalletCreditGems
+	}
+	if r.Amount > limit {
+		return fmt.Errorf("amount too large: at most %d %s per request", limit, r.Currency)
 	}
 	r.Reason = strings.TrimSpace(r.Reason)
 	if r.Reason == "" {
