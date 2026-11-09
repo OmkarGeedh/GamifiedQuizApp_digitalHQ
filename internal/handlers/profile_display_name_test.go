@@ -129,11 +129,12 @@ func TestUpdateProfileName_FreeNameSavedAndVisibleEverywhere(t *testing.T) {
 	assertName(t, r, id, "Brand New")
 
 	var prof models.Profile
-	if err := db.Where("client_id = ?", id).First(&prof).Error; err != nil {
+	// The profile is the player's clients row, keyed by id.
+	if err := db.Where("id = ?", id).First(&prof).Error; err != nil {
 		t.Fatal(err)
 	}
 	if prof.FullName != "Brand New" {
-		t.Fatalf("client_profiles.full_name = %q, want kept in sync", prof.FullName)
+		t.Fatalf("clients.full_name = %q, want kept in sync", prof.FullName)
 	}
 }
 

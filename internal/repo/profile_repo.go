@@ -92,6 +92,17 @@ func RecordDailyActivity(ctx context.Context, clientID int, dateStr string) erro
 		clientID, dateStr).Error
 }
 
+// lastSevenDaysSQL selects the player's active days from the last week as
+// 'YYYY-MM-DD' text. Production is PostgreSQL and runs the first query, exactly as
+// it always has. The tests run on SQLite (which has neither to_char nor ::date), so
+// they get an equivalent query; the day column holds ISO dates in both.
+func lastSevenDaysSQL(dialect string) string {
+	if dialect == "postgres" {
+		return `SELECT to_char(day, 'YYYY-MM-DD') FROM client_activity_days WHERE client_id = ? AND day > ?::date - 7`
+	}
+	return `SELECT substr(CAST(day AS TEXT), 1, 10) FROM client_activity_days WHERE client_id = ? AND day > date(?, '-7 days')`
+}
+
 func GetLast7DaysStreak(ctx context.Context, clientID int) ([]dto.DayStreakDTO, error) {
 	db := GetDB()
 	if db == nil {
@@ -99,8 +110,7 @@ func GetLast7DaysStreak(ctx context.Context, clientID int) ([]dto.DayStreakDTO, 
 	}
 	now := time.Now().UTC()
 	var activeDays []string
-	err := db.WithContext(ctx).Raw(
-		`SELECT to_char(day, 'YYYY-MM-DD') FROM client_activity_days WHERE client_id = ? AND day > ?::date - 7`,
+	err := db.WithContext(ctx).Raw(lastSevenDaysSQL(db.Dialector.Name()),
 		clientID, now.Format("2006-01-02")).
 		Scan(&activeDays).Error
 	if err != nil {
