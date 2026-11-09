@@ -79,6 +79,10 @@ Sessions have a 5-minute inactivity TTL (`services.SessionInactivityTTL`), refre
 
 `GET /streak` and `POST /streak/claim` (`docs/streak_rewards.md`): bonuses at 3/7/14/30 days (`services.StreakMilestones`), once per streak, as `streak_bonus` ledger rows. Daily goals and streak rewards share `repo.claimReward` (one transaction, per-player advisory lock). The streak itself still counts days the profile was loaded (app opened), not days a game was finished. Streak freezes (`POST /streak/freeze`, `bridgeMissedDays` in `streak_service.go`) need `clients.streak_freezes` from migration 000007 in the migration repo: apply it before deploying. The column is deliberately not on `models.Profile`; only `repo/streak_freeze_repo.go` touches it.
 
+## Analytics
+
+`POST /analytics/events` (`docs/analytics.md`): the app reports reminder choices, app opens and quitting a game into `analytics_events` (migration 000008). Event names are an allowlist (`dto.AnalyticsEventNames`); props are a flat object of numbers, booleans and short lowercase identifiers (no emails or names). It always answers 202: bad events are dropped one by one and a storage failure is only logged, because analytics must never break the app. Retention and usage reports read existing tables and live in the migration repo (`analytics/reports.sql`).
+
 ## Dual route registration
 
 Every endpoint exists at the root and under `/api/v1`: each `Register*Routes` builds routes in a closure invoked for both groups. Add endpoints **inside the closure**; `internal/routes/routes_test.go` asserts the mirror. CORS is an inline func in `main.go` duplicated in `routes_test.go` — change both.

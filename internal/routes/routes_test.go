@@ -64,6 +64,7 @@ func setupTestEngine() *gin.Engine {
 	routes.RegisterSpinWheelRoutes(r)
 	routes.RegisterDailyGoalsRoutes(r)
 	routes.RegisterStreakRoutes(r)
+	routes.RegisterAnalyticsRoutes(r)
 	routes.RegisterLeaderboardRoutes(r)
 
 	r.NoMethod(func(c *gin.Context) {
@@ -149,7 +150,7 @@ func TestRouteRegistrationBothPrefixes(t *testing.T) {
 	}
 
 	// Test match-the-following completion endpoint exists under both /quiz and /api/v1/quiz (not 404)
-	for _, path := range []string{"/quiz/match-the-following/complete", "/api/v1/quiz/match-the-following/complete", "/daily-goals/claim", "/api/v1/daily-goals/claim", "/streak/claim", "/api/v1/streak/claim", "/streak/freeze", "/api/v1/streak/freeze"} {
+	for _, path := range []string{"/quiz/match-the-following/complete", "/api/v1/quiz/match-the-following/complete", "/daily-goals/claim", "/api/v1/daily-goals/claim", "/streak/claim", "/api/v1/streak/claim", "/streak/freeze", "/api/v1/streak/freeze", "/analytics/events", "/api/v1/analytics/events"} {
 		req, _ := http.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Origin", "http://localhost:3000")
