@@ -125,9 +125,15 @@ func main() {
 	routes.RegisterStreakRoutes(r)
 	routes.RegisterAnalyticsRoutes(r)
 	routes.RegisterLeaderboardRoutes(r)
+	routes.RegisterBillingRoutes(r)
 
 	// 5b. Start background session inactivity sweeper (TTL: 5 minutes, sweeps every 1 minute)
 	services.StartSessionTTLSweeper(context.Background(), 1*time.Minute)
+
+	// 5c. Google Play Billing: report config (never secrets) and start the hourly
+	// reconciliation sweeper (no-op while billing is not configured).
+	services.LogBillingStatus()
+	services.StartBillingSweeper(context.Background(), time.Hour)
 
 	// Fallback 404 handler with JSON response
 	r.NoRoute(func(c *gin.Context) {

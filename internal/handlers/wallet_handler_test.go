@@ -105,7 +105,7 @@ func TestWallet_DebitAndCreditFlow(t *testing.T) {
 	creditBody, _ := json.Marshal(dto.WalletCreditRequestDTO{
 		Currency: "coins",
 		Amount:   50,
-		Reason:   "Test bonus top-up",
+		Reason:   "spin_wheel",
 	})
 	reqCredit, _ := http.NewRequest(http.MethodPost, "/api/v1/wallet/credit", bytes.NewReader(creditBody))
 	reqCredit.Header.Set("Authorization", "Bearer "+token)

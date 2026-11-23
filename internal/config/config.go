@@ -1,6 +1,8 @@
 package config
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -62,10 +64,96 @@ func (r RedisConfig) Endpoint() string {
 	return fmt.Sprintf("%s:%s", r.Host, r.Port)
 }
 
+// BillingConfig holds the Google Play Billing settings. Every secret here must
+// come from the hosting environment (Catalyst AppSail env vars), never from the
+// tracked .env file. Billing stays switched off (503) until it is complete.
+type BillingConfig struct {
+	// PackageName is the Android application id the purchases belong to.
+	PackageName string
+	// ServiceAccountJSON is the decoded Google service-account key used to call
+	// the Google Play Developer API (from GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_B64).
+	ServiceAccountJSON []byte
+	// AccountSecret keys the HMAC that links a Play purchase to one player
+	// (obfuscatedAccountId). Changing it orphans unverified purchases.
+	AccountSecret string
+	// AllowTestPurchases accepts license-tester purchases (not charged).
+	AllowTestPurchases bool
+	// RTDNToken is the shared secret required in the Pub/Sub push URL (?token=).
+	RTDNToken string
+	// RTDNAudience is the audience the Pub/Sub push OIDC token must carry.
+	RTDNAudience string
+	// RTDNServiceAccountEmail is the service account Pub/Sub signs pushes as.
+	RTDNServiceAccountEmail string
+
+	serviceAccountErr string
+}
+
+// Minimum length for the billing secrets, so a placeholder cannot slip through.
+const minBillingSecretLen = 32
+
+// VerifyProblems lists what is missing or malformed for purchase verification.
+// An empty list means verification can be switched on. Secrets are never echoed.
+func (b BillingConfig) VerifyProblems() []string {
+	var p []string
+	if strings.TrimSpace(b.PackageName) == "" {
+		p = append(p, "GOOGLE_PLAY_PACKAGE_NAME is empty")
+	}
+	if b.serviceAccountErr != "" {
+		p = append(p, "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_B64: "+b.serviceAccountErr)
+	} else if len(b.ServiceAccountJSON) == 0 {
+		p = append(p, "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_B64 is not set")
+	}
+	if len(b.AccountSecret) < minBillingSecretLen {
+		p = append(p, fmt.Sprintf("BILLING_ACCOUNT_SECRET must be at least %d characters", minBillingSecretLen))
+	}
+	return p
+}
+
+// RTDNProblems lists what is missing for accepting Real-time Developer
+// Notifications. Verification problems also block notifications.
+func (b BillingConfig) RTDNProblems() []string {
+	p := b.VerifyProblems()
+	if len(b.RTDNToken) < minBillingSecretLen {
+		p = append(p, fmt.Sprintf("GOOGLE_PLAY_RTDN_TOKEN must be at least %d characters", minBillingSecretLen))
+	}
+	if strings.TrimSpace(b.RTDNAudience) == "" {
+		p = append(p, "GOOGLE_PLAY_RTDN_AUDIENCE is empty")
+	}
+	if strings.TrimSpace(b.RTDNServiceAccountEmail) == "" {
+		p = append(p, "GOOGLE_PLAY_RTDN_PUSH_SA_EMAIL is empty")
+	}
+	return p
+}
+
+// decodeServiceAccount decodes and sanity-checks the base64 service-account key.
+func decodeServiceAccount(b64 string) ([]byte, string) {
+	b64 = strings.TrimSpace(b64)
+	if b64 == "" {
+		return nil, ""
+	}
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return nil, "not valid base64"
+	}
+	var key struct {
+		Type        string `json:"type"`
+		ClientEmail string `json:"client_email"`
+		PrivateKey  string `json:"private_key"`
+	}
+	if err := json.Unmarshal(raw, &key); err != nil {
+		return nil, "not valid JSON"
+	}
+	if key.Type != "service_account" || key.ClientEmail == "" || key.PrivateKey == "" {
+		return nil, "not a service-account key"
+	}
+	return raw, ""
+}
+
 type Config struct {
 	Server   ServerConfig
 	Database DatabaseConfig
 	Redis    RedisConfig
+	Billing  BillingConfig
 }
 
 // IsProduction returns true when running in production environment
@@ -152,6 +240,8 @@ func LoadEnv() error {
 	seedOnBoot := getEnv("SEED_ON_BOOT", strconv.FormatBool(!isProd)) == "true"
 	seedDemoUser := getEnv("SEED_DEMO_USER", strconv.FormatBool(!isProd)) == "true"
 
+	serviceAccountJSON, serviceAccountErr := decodeServiceAccount(os.Getenv("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_B64"))
+
 	defaultSSLMode := "disable"
 	if isProd {
 		defaultSSLMode = "require"
@@ -185,6 +275,16 @@ func LoadEnv() error {
 			Port:     getEnv("REDIS_PORT", "6379"),
 			Password: os.Getenv("REDIS_PASSWORD"),
 			DB:       redisDB,
+		},
+		Billing: BillingConfig{
+			PackageName:             getEnv("GOOGLE_PLAY_PACKAGE_NAME", "com.skillverse.skillverse_app"),
+			ServiceAccountJSON:      serviceAccountJSON,
+			AccountSecret:           os.Getenv("BILLING_ACCOUNT_SECRET"),
+			AllowTestPurchases:      getEnv("GOOGLE_PLAY_ALLOW_TEST_PURCHASES", strconv.FormatBool(!isProd)) == "true",
+			RTDNToken:               os.Getenv("GOOGLE_PLAY_RTDN_TOKEN"),
+			RTDNAudience:            os.Getenv("GOOGLE_PLAY_RTDN_AUDIENCE"),
+			RTDNServiceAccountEmail: os.Getenv("GOOGLE_PLAY_RTDN_PUSH_SA_EMAIL"),
+			serviceAccountErr:       serviceAccountErr,
 		},
 	}
 

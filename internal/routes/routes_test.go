@@ -66,6 +66,7 @@ func setupTestEngine() *gin.Engine {
 	routes.RegisterStreakRoutes(r)
 	routes.RegisterAnalyticsRoutes(r)
 	routes.RegisterLeaderboardRoutes(r)
+	routes.RegisterBillingRoutes(r)
 
 	r.NoMethod(func(c *gin.Context) {
 		c.JSON(http.StatusMethodNotAllowed, gin.H{
@@ -163,7 +164,7 @@ func TestRouteRegistrationBothPrefixes(t *testing.T) {
 	}
 
 	// Authenticated GET endpoints exist under both prefixes and reject anonymous calls with 401
-	for _, path := range []string{"/leaderboard", "/api/v1/leaderboard", "/subjects", "/api/v1/subjects", "/daily-goals", "/api/v1/daily-goals", "/streak", "/api/v1/streak"} {
+	for _, path := range []string{"/leaderboard", "/api/v1/leaderboard", "/subjects", "/api/v1/subjects", "/daily-goals", "/api/v1/daily-goals", "/streak", "/api/v1/streak", "/billing/products", "/api/v1/billing/products", "/billing/account-id", "/api/v1/billing/account-id", "/billing/subscription", "/api/v1/billing/subscription"} {
 		req, _ := http.NewRequest(http.MethodGet, path, nil)
 		req.Header.Set("Origin", "http://localhost:3000")
 		w := httptest.NewRecorder()
@@ -175,6 +176,29 @@ func TestRouteRegistrationBothPrefixes(t *testing.T) {
 		// Since it requires authentication, it should respond with 401 Unauthorized
 		if w.Code != http.StatusUnauthorized {
 			t.Errorf("expected status 401 Unauthorized for unauthenticated %s, got %d", path, w.Code)
+		}
+	}
+
+	// Purchase verification needs a signed-in player under both prefixes.
+	for _, path := range []string{"/billing/verify", "/api/v1/billing/verify"} {
+		req, _ := http.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("expected 401 for unauthenticated %s, got %d", path, w.Code)
+		}
+	}
+
+	// The Pub/Sub push endpoint exists under both prefixes and never accepts an
+	// unauthenticated push (401, or 503 when billing is not configured).
+	for _, path := range []string{"/billing/rtdn", "/api/v1/billing/rtdn"} {
+		req, _ := http.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != http.StatusUnauthorized && w.Code != http.StatusServiceUnavailable {
+			t.Errorf("expected 401/503 for unauthenticated push to %s, got %d", path, w.Code)
 		}
 	}
 

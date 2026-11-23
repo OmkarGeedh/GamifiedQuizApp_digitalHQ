@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/dto"
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/models"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/repo"
 )
 
@@ -50,22 +51,29 @@ func DebitWallet(ctx context.Context, clientID int, req *dto.WalletDebitRequestD
 	return res, http.StatusOK, nil
 }
 
-// CreditWallet adds currency to the player's wallet and records an audit log.
+// CreditWallet adds an in-game reward the app reports (spin wheel, chests).
+// Only the reasons in dto.ClientRewardRules are accepted, each with a per-credit
+// and a daily ceiling. Real-money purchases never come through here.
 func CreditWallet(ctx context.Context, clientID int, req *dto.WalletCreditRequestDTO) (*dto.WalletTransactionDTO, int, error) {
-	if err := req.Validate(); err != nil {
+	rule, err := req.Validate()
+	if err != nil {
 		return nil, http.StatusBadRequest, err
 	}
 
-	entry, balanceAfter, err := repo.CreditWalletBalance(ctx, clientID, req.Currency, req.Amount, req.Reason, req.ReferenceID)
+	credit := func() (*models.WalletLedger, int, error) {
+		return repo.CreditWalletBalance(ctx, clientID, req.Currency, req.Amount, req.Reason, req.ReferenceID, rule.MaxPerDay)
+	}
+	entry, balanceAfter, err := credit()
+	if errors.Is(err, repo.ErrProfileNotFound) {
+		if _, pErr := GetOrCreateProfile(ctx, clientID); pErr == nil {
+			entry, balanceAfter, err = credit()
+		}
+	}
 	if err != nil {
-		if errors.Is(err, repo.ErrProfileNotFound) {
-			if _, pErr := GetOrCreateProfile(ctx, clientID); pErr == nil {
-				entry, balanceAfter, err = repo.CreditWalletBalance(ctx, clientID, req.Currency, req.Amount, req.Reason, req.ReferenceID)
-			}
+		if errors.Is(err, repo.ErrDailyRewardLimit) {
+			return nil, http.StatusTooManyRequests, fmt.Errorf("daily limit reached for %s", req.Reason)
 		}
-		if err != nil {
-			return nil, http.StatusInternalServerError, fmt.Errorf("failed to process credit: %w", err)
-		}
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to process credit: %w", err)
 	}
 
 	res := &dto.WalletTransactionDTO{

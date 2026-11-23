@@ -31,14 +31,26 @@ func (r *WalletDebitRequestDTO) Validate() error {
 	return nil
 }
 
-// The most a single credit request may add. The app sends the credit itself
-// (spin and chest prizes, coin packs), so without a ceiling any signed-in
-// player could add any amount to their own wallet. These are far above
-// anything the app sends (its largest coin pack is 600 coins).
-const (
-	MaxWalletCreditCoins = 5000
-	MaxWalletCreditGems  = 500
-)
+// ClientRewardRule limits one kind of reward the app is allowed to report.
+type ClientRewardRule struct {
+	Currency     string
+	MaxPerCredit int // the largest single prize of this kind the app can award
+	MaxPerDay    int // total per player per UTC day, enforced in SQL
+}
+
+// ClientRewardRules is the only list of reasons POST /wallet/credit accepts.
+// The app still decides these prizes itself (spin wheel, chests), so each is
+// capped at the largest prize it can really give, plus a daily total. Anything
+// paid for with real money (coin packs, Premium) goes through /billing/verify,
+// which checks the purchase with Google Play; it can never be credited here.
+//
+// Values mirror Gamified-learning/lib/features/rewards/data/rewards_catalog.dart.
+var ClientRewardRules = map[string]ClientRewardRule{
+	"spin_wheel":          {Currency: "coins", MaxPerCredit: 100, MaxPerDay: 300},
+	"chest_reward_golden": {Currency: "coins", MaxPerCredit: 100, MaxPerDay: 2000},
+	"chest_reward_cyber":  {Currency: "coins", MaxPerCredit: 150, MaxPerDay: 1500},
+	"chest_reward_galaxy": {Currency: "gems", MaxPerCredit: 25, MaxPerDay: 250},
+}
 
 // WalletCreditRequestDTO validates input for crediting player wallet balance.
 type WalletCreditRequestDTO struct {
@@ -48,27 +60,31 @@ type WalletCreditRequestDTO struct {
 	ReferenceID string `json:"reference_id,omitempty"`
 }
 
-// Validate ensures currency and amount are valid.
-func (r *WalletCreditRequestDTO) Validate() error {
+// Validate ensures the reason is an allowed in-game reward and the amount is
+// within what that reward can give. It returns the rule to enforce.
+func (r *WalletCreditRequestDTO) Validate() (ClientRewardRule, error) {
 	r.Currency = strings.ToLower(strings.TrimSpace(r.Currency))
 	if r.Currency != "coins" && r.Currency != "gems" {
-		return errors.New("currency must be 'coins' or 'gems'")
+		return ClientRewardRule{}, errors.New("currency must be 'coins' or 'gems'")
 	}
 	if r.Amount <= 0 {
-		return errors.New("amount must be greater than zero")
+		return ClientRewardRule{}, errors.New("amount must be greater than zero")
 	}
-	limit := MaxWalletCreditCoins
-	if r.Currency == "gems" {
-		limit = MaxWalletCreditGems
+	r.Reason = strings.ToLower(strings.TrimSpace(r.Reason))
+	rule, ok := ClientRewardRules[r.Reason]
+	if !ok {
+		return ClientRewardRule{}, errors.New("this reward cannot be credited by the app")
 	}
-	if r.Amount > limit {
-		return fmt.Errorf("amount too large: at most %d %s per request", limit, r.Currency)
+	if rule.Currency != r.Currency {
+		return ClientRewardRule{}, fmt.Errorf("%s pays %s, not %s", r.Reason, rule.Currency, r.Currency)
 	}
-	r.Reason = strings.TrimSpace(r.Reason)
-	if r.Reason == "" {
-		r.Reason = "Wallet credit"
+	if r.Amount > rule.MaxPerCredit {
+		return ClientRewardRule{}, fmt.Errorf("amount too large: %s pays at most %d %s", r.Reason, rule.MaxPerCredit, rule.Currency)
 	}
-	return nil
+	if len(r.ReferenceID) > 64 {
+		return ClientRewardRule{}, errors.New("reference_id must be at most 64 characters")
+	}
+	return rule, nil
 }
 
 // WalletBalanceDTO represents current wallet balance.

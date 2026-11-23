@@ -86,3 +86,41 @@ func SeedClient(t *testing.T, db *gorm.DB, username string) int {
 	}
 	return id
 }
+
+// AddBillingTables creates SQLite stand-ins for wallet_ledger and the billing
+// tables of migration 000009_play_billing (same columns and UNIQUE keys).
+func AddBillingTables(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS wallet_ledger (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, client_id INTEGER NOT NULL, transaction_type TEXT NOT NULL,
+			direction TEXT NOT NULL DEFAULT 'credit', amount INTEGER NOT NULL CHECK (amount > 0), currency TEXT NOT NULL,
+			balance_after INTEGER NOT NULL DEFAULT 0, reference_id TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`,
+		`CREATE TABLE billing_products (
+			product_id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL,
+			coins INTEGER NOT NULL DEFAULT 0, gems INTEGER NOT NULL DEFAULT 0,
+			active BOOLEAN NOT NULL DEFAULT 1, sort_order INTEGER NOT NULL DEFAULT 0)`,
+		`CREATE TABLE play_purchases (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, client_id INTEGER NOT NULL, product_id TEXT NOT NULL,
+			purchase_token TEXT NOT NULL UNIQUE, order_id TEXT NOT NULL DEFAULT '', quantity INTEGER NOT NULL DEFAULT 1,
+			coins INTEGER NOT NULL DEFAULT 0, gems INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL DEFAULT 'granted',
+			consumed BOOLEAN NOT NULL DEFAULT 0, test_purchase BOOLEAN NOT NULL DEFAULT 0,
+			purchased_at DATETIME NOT NULL, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, revoked_at DATETIME)`,
+		`CREATE TABLE client_subscriptions (
+			purchase_token TEXT PRIMARY KEY, client_id INTEGER NOT NULL, product_id TEXT NOT NULL,
+			linked_purchase_token TEXT, status TEXT NOT NULL, expires_at DATETIME,
+			auto_renewing BOOLEAN NOT NULL DEFAULT 0, acknowledged BOOLEAN NOT NULL DEFAULT 0,
+			latest_order_id TEXT NOT NULL DEFAULT '', test_purchase BOOLEAN NOT NULL DEFAULT 0,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+		`CREATE TABLE billing_audit (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, client_id INTEGER, purchase_token_hash TEXT NOT NULL DEFAULT '',
+			product_id TEXT NOT NULL DEFAULT '', action TEXT NOT NULL, result TEXT NOT NULL,
+			reason TEXT NOT NULL DEFAULT '', created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+		`CREATE TABLE billing_rtdn_messages (message_id TEXT PRIMARY KEY, received_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+	}
+	for _, s := range stmts {
+		if err := db.Exec(s).Error; err != nil {
+			t.Fatalf("create billing tables: %v", err)
+		}
+	}
+}

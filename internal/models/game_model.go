@@ -250,6 +250,9 @@ const (
 	TxTypeSpinReward      = "spin_reward"
 	TxTypeDailyGoalReward = "daily_goal_reward"
 	TxTypeStreakFreeze    = "streak_freeze_purchase"
+	// Google Play Billing: a verified coin/gem pack, and taking it back after a refund.
+	TxTypeIAPPurchase = "iap_purchase"
+	TxTypeIAPRefund   = "iap_refund"
 )
 
 // Transaction direction constants

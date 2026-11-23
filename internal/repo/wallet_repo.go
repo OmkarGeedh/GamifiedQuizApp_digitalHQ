@@ -16,6 +16,8 @@ import (
 var (
 	ErrInsufficientFunds = errors.New("insufficient funds")
 	ErrProfileNotFound   = errors.New("profile not found")
+	// ErrDailyRewardLimit means today's total for this kind of reward is used up.
+	ErrDailyRewardLimit = errors.New("daily reward limit reached")
 )
 
 // GetWalletBalance fetches only the coin and gem counts for a client.
@@ -108,8 +110,12 @@ func DebitWalletBalance(ctx context.Context, clientID int, currency string, amou
 	return &ledgerEntry, remainingBalance, nil
 }
 
-// CreditWalletBalance atomically credits coins or gems and creates an audit ledger entry.
-func CreditWalletBalance(ctx context.Context, clientID int, currency string, amount int, reason string, refID string) (*models.WalletLedger, int, error) {
+// CreditWalletBalance atomically credits coins or gems and creates an audit
+// ledger entry of type txType. When dailyCap > 0, the credit is refused
+// (ErrDailyRewardLimit) if it would take today's (UTC) total of txType in this
+// currency above dailyCap. The check runs under the player's row lock, so
+// concurrent requests cannot both slip under the cap, with or without Redis.
+func CreditWalletBalance(ctx context.Context, clientID int, currency string, amount int, txType string, refID string, dailyCap int) (*models.WalletLedger, int, error) {
 	var ledgerEntry models.WalletLedger
 	var newBalance int
 
@@ -122,6 +128,21 @@ func CreditWalletBalance(ctx context.Context, clientID int, currency string, amo
 				return ErrProfileNotFound
 			}
 			return err
+		}
+
+		if dailyCap > 0 {
+			now := time.Now().UTC()
+			dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+			var today []int64
+			if err := tx.Raw(
+				`SELECT COALESCE(SUM(amount), 0) FROM wallet_ledger
+				  WHERE client_id = ? AND transaction_type = ? AND currency = ? AND direction = ? AND created_at >= ?`,
+				clientID, txType, currency, models.DirectionCredit, dayStart).Scan(&today).Error; err != nil {
+				return fmt.Errorf("failed to read today's rewards: %w", err)
+			}
+			if len(today) == 1 && today[0]+int64(amount) > int64(dailyCap) {
+				return ErrDailyRewardLimit
+			}
 		}
 
 		switch currency {
@@ -143,9 +164,12 @@ func CreditWalletBalance(ctx context.Context, clientID int, currency string, amo
 			return fmt.Errorf("failed to update profile balance: %w", err)
 		}
 
+		if txType == "" {
+			txType = models.TxTypeManualCredit
+		}
 		ledgerEntry = models.WalletLedger{
 			ClientID:        clientID,
-			TransactionType: models.TxTypeManualCredit,
+			TransactionType: txType,
 			Direction:       models.DirectionCredit,
 			Amount:          amount,
 			Currency:        currency,
