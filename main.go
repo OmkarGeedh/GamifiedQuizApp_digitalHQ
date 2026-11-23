@@ -27,13 +27,16 @@ func main() {
 		log.Printf("Warning loading .env: %v\n", err)
 	}
 	// Production must not run with the public fallback secrets from this repo.
+	// This only warns (loudly, on every start): refusing to start took the
+	// API down while Catalyst still had an unsafe JWT_SECRET. Set a private
+	// JWT_SECRET (32+ characters) in Catalyst to clear the warning.
 	if config.AppConfig.IsProduction() {
-		fatal, warnings := config.AppConfig.ProductionSecretProblems()
-		for _, w := range warnings {
+		critical, warnings := config.AppConfig.ProductionSecretProblems()
+		for _, w := range append(critical, warnings...) {
 			log.Printf("SECURITY WARNING: %s", w)
 		}
-		if len(fatal) > 0 {
-			log.Fatalf("Refusing to start in production: %s", strings.Join(fatal, "; "))
+		if len(critical) > 0 {
+			log.Printf("SECURITY WARNING: login tokens can be forged until this is fixed: %s", strings.Join(critical, "; "))
 		}
 	}
 	ws.InitPlatformTiming()

@@ -86,7 +86,7 @@ Sessions have a 5-minute inactivity TTL (`services.SessionInactivityTTL`), refre
 - Tables come from migrations 000009 (billing) and 000010 (topic packs, `client_power_ups`, `power_up_uses`, `ad_rewards`) in the migration repo; the repo reads them with plain SQL (`repo/billing_repo.go`, `repo/monetization_repo.go`). SQLite test stand-ins: `testutil.AddBillingTables`, `testutil.FundedPlayer`.
 - Exception to the latency rules: a power-up use, a purchase and an ad reward each run one short PostgreSQL transaction (they move value; answers stay Redis-only).
 - Topic packs: `CheckTopicAccess` at game start and on `/topics/:id/questions` (402 when locked). Quiz Pass: `services.IsPremium` (never trust the app).
-- Production refuses to start without a private `JWT_SECRET` (`config.ProductionSecretProblems`).
+- Production logs a `SECURITY WARNING` on start while `JWT_SECRET` is missing, short or the public default (`config.ProductionSecretProblems`). It must not refuse to start: that took the API down.
 
 ## Analytics
 

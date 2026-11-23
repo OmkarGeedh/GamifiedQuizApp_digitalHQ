@@ -151,7 +151,7 @@ App                                   Backend                                 Go
 | Forged Pub/Sub notification | OIDC JWT (audience and service-account email) plus a shared `?token=` secret, compared in constant time. The body is never trusted: state is re-read from the Play API. |
 | Test purchases in production | Rejected unless `GOOGLE_PLAY_ALLOW_TEST_PURCHASES=true`. |
 | Leaked secrets | Service-account key, HMAC secrets and the RTDN token are env vars only, never in `.env`. Raw purchase tokens are never logged; the audit log stores SHA-256 hashes. |
-| Forged login tokens through the public fallback JWT secret | **New:** production refuses to start unless `JWT_SECRET` is set to a private value of 32+ characters. It logs a warning while `PASSWORD_SECRET` is still the public default. |
+| Forged login tokens through the public fallback JWT secret | Production logs a `SECURITY WARNING` on every start while `JWT_SECRET` is missing, the public default or shorter than 32 characters, and while `PASSWORD_SECRET` is the public default. It does not refuse to start: that took the API down while Catalyst's secret was unsafe. Set a private `JWT_SECRET` in Catalyst. |
 | Self-credit through `/wallet/credit` | Restricted earlier to `spin_wheel` and `chest_reward_*` with per-credit and daily caps (`dto.ClientRewardRules`). Coin packs and IAP reasons are refused. See section 13. |
 
 ## 6. Ads that do not annoy
@@ -239,7 +239,7 @@ Backend (Catalyst AppSail env vars, never `.env`):
 
 | Variable | Required | Notes |
 |---|---|---|
-| `JWT_SECRET` | **yes, in production** | 32+ private characters. The server refuses to start without it, and changing it signs everyone out. |
+| `JWT_SECRET` | **yes, in production** | 32+ private characters. Without it, every start logs a security warning and login tokens can be forged. Changing it signs everyone out. |
 | `GOOGLE_PLAY_PACKAGE_NAME` | | Default `com.skillverse.skillverse_app` |
 | `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_B64` | for billing | Base64 of the service-account key |
 | `BILLING_ACCOUNT_SECRET` | for billing | 32+ characters; keys the purchase-owner HMAC. Do not rotate it while purchases are unfinished. |
@@ -291,7 +291,7 @@ App build:
 
 ## 12. Deploy order and changes in behaviour
 
-1. **Set `JWT_SECRET` in Catalyst first.** Otherwise the new build will not start in production.
+1. **Set a private `JWT_SECRET` in Catalyst.** Until then, every start logs a security warning and login tokens can be forged.
 2. **Apply the schema:** push the migration repo (000010 runs from its CI), then deploy the backend. Older backends ignore the new tables, and the new backend runs without 000010, but its new endpoints fail until it is applied.
 3. **Release the app** with the Gems & Pass tab, the ad chest and server-charged 50:50.
 
