@@ -30,7 +30,7 @@ Tests create their own content via `internal/handlers/content_fixture_test.go` (
 
 The backend never migrates or seeds. Schema, content CSVs and seeds live in `../SkillVerse-SQL_Migration` (see its AGENTS.md); `make migrate-up && make seed` there.
 
-Tables (11, relational, natural keys): `clients` (login + profile + balances + streak counters in one row), `client_activity_days`, `wallet_ledger`, `subjects`, `chapters` (PK `subject, chapter_no`; every content row references it), `mcq_questions`, `sudden_death_questions`, `sort_it_out_questions`, `match_pairs`, `user_question_history`, `leaderboard_game_results`. Game sessions live only in Redis (in-memory fallback).
+Core tables (11, relational, natural keys; billing, ads and power-up tables are listed under Payments below): `clients` (login + profile + balances + streak counters in one row), `client_activity_days`, `wallet_ledger`, `subjects`, `chapters` (PK `subject, chapter_no`; every content row references it), `mcq_questions`, `sudden_death_questions`, `sort_it_out_questions`, `match_pairs`, `user_question_history`, `leaderboard_game_results`. Game sessions live only in Redis (in-memory fallback).
 
 - Content tables are read directly and are read-only for the backend (never write content with GORM). Each row has `question_code` (PK), `subject`, `chapter_no`; models in `internal/models/game_model.go`. `v_content_counts` (subject → chapter → per-mode counts) feeds `GET /subjects` and Match board titles.
 - API `topic_id` / `topic` = `subjects.code` (`accounts`, `economics`, `maths1`, `maths2`). Optional `chapter_no` narrows a session.
@@ -73,11 +73,20 @@ Sessions have a 5-minute inactivity TTL (`services.SessionInactivityTTL`), refre
 
 ## Daily goals
 
-`GET /daily-goals` and `POST /daily-goals/claim` (`docs/daily_goals.md`). Goals live in `services.DailyGoals`; progress is counted from `leaderboard_game_results` for the UTC day (no table of its own). A claim is a `wallet_ledger` row (`daily_goal_reward`, reference `dg:<goal>:<YYYYMMDD>`) written under a per-player advisory lock, so it pays once per day. Wallet credit/debit are separately capped and rate limited per player (`dto.MaxWalletCreditCoins/Gems`, `middleware.RateLimitPerClient`).
+`GET /daily-goals` and `POST /daily-goals/claim` (`docs/daily_goals.md`). Goals live in `services.DailyGoals`; progress is counted from `leaderboard_game_results` for the UTC day (no table of its own). A claim is a `wallet_ledger` row (`daily_goal_reward`, reference `dg:<goal>:<YYYYMMDD>`) written under a per-player advisory lock, so it pays once per day. Wallet credit accepts only the app-reported rewards in `dto.ClientRewardRules` (`spin_wheel`, `chest_reward_*`), each with a per-credit and a daily cap enforced in SQL; debit and credit are rate limited per player (`middleware.RateLimitPerClient`).
 
 ## Streak rewards
 
 `GET /streak` and `POST /streak/claim` (`docs/streak_rewards.md`): bonuses at 3/7/14/30 days (`services.StreakMilestones`), once per streak, as `streak_bonus` ledger rows. Daily goals and streak rewards share `repo.claimReward` (one transaction, per-player advisory lock). The streak itself still counts days the profile was loaded (app opened), not days a game was finished. Streak freezes (`POST /streak/freeze`, `bridgeMissedDays` in `streak_service.go`) need `clients.streak_freezes` from migration 000007 in the migration repo: apply it before deploying. The column is deliberately not on `models.Profile`; only `repo/streak_freeze_repo.go` touches it.
+
+## Payments, rewarded ads and power-ups (`docs/monetization.md`)
+
+- **Only the server grants value.** Google Play purchases (gem packs, topic packs, the Quiz Pass) are verified with the Play Developer API (`internal/services/playstore`, `billing_service.go`) and granted once per purchase token; rewarded ads pay only for AdMob SSV callbacks with a valid Google ECDSA signature (`internal/services/admob`, `ads_service.go`); power-ups (`fifty_fifty`, `add_time`, `skip`) are charged inside the power-up endpoints (`power_up_service.go`, `ws/turns.go`, `ws/session_handlers.go`). Never add an endpoint that lets the app credit itself.
+- **Every value movement is one `wallet_ledger` row in the same transaction** as the balance change (coins, gems and the token currencies). Every ad reward is one `ad_rewards` row. Server-issued events use a unique reference (`uq_wallet_ledger_server_event`), so retries never pay or charge twice.
+- Tables come from migrations 000009 (billing) and 000010 (topic packs, `client_power_ups`, `power_up_uses`, `ad_rewards`) in the migration repo; the repo reads them with plain SQL (`repo/billing_repo.go`, `repo/monetization_repo.go`). SQLite test stand-ins: `testutil.AddBillingTables`, `testutil.FundedPlayer`.
+- Exception to the latency rules: a power-up use, a purchase and an ad reward each run one short PostgreSQL transaction (they move value; answers stay Redis-only).
+- Topic packs: `CheckTopicAccess` at game start and on `/topics/:id/questions` (402 when locked). Quiz Pass: `services.IsPremium` (never trust the app).
+- Production refuses to start without a private `JWT_SECRET` (`config.ProductionSecretProblems`).
 
 ## Analytics
 
