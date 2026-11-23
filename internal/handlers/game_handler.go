@@ -55,6 +55,16 @@ func GetTopicQuestionsHandler(c *gin.Context) {
 		limit = 10
 	}
 
+	clientID, ok := middleware.GetAuthenticatedClientID(c)
+	if !ok {
+		response.Error(c, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	if err := services.CheckTopicAccess(c.Request.Context(), clientID, topicID); err != nil {
+		response.Error(c, services.TopicAccessStatus(err), err.Error())
+		return
+	}
+
 	res, status, err := services.GetTopicQuestions(c.Request.Context(), topicID, limit)
 	if err != nil {
 		response.Error(c, status, err.Error())
@@ -70,6 +80,14 @@ func GetSubjectsHandler(c *gin.Context) {
 	if err != nil {
 		response.Error(c, status, err.Error())
 		return
+	}
+	// Mark topic-pack subjects this player has not unlocked (the list is built
+	// per request, so annotating it is safe).
+	if clientID, ok := middleware.GetAuthenticatedClientID(c); ok {
+		if err := services.AnnotateSubjectAccess(c.Request.Context(), clientID, res); err != nil {
+			response.Error(c, http.StatusServiceUnavailable, "could not check topic packs")
+			return
+		}
 	}
 	response.Success(c, status, "Subjects fetched successfully", res)
 }

@@ -64,6 +64,19 @@ func (f *fakePlay) ConsumeProduct(_ context.Context, _, token string) error {
 	return nil
 }
 
+func (f *fakePlay) AcknowledgeProduct(_ context.Context, _, token string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.consumeErr != nil {
+		return f.consumeErr
+	}
+	f.acks++
+	if p, ok := f.products[token]; ok {
+		p.Acknowledged = true
+	}
+	return nil
+}
+
 func (f *fakePlay) GetSubscription(_ context.Context, token string) (*playstore.SubscriptionPurchase, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -352,7 +365,7 @@ func TestVerifyConsumable_RetiredProductStillHonoured(t *testing.T) {
 	if _, status, err := verify(f.alice, "old_pack", "tok-old"); err != nil || status != http.StatusOK {
 		t.Fatalf("a paid purchase of a retired product must be granted: %d %v", status, err)
 	}
-	products, _, err := ListBillingProducts(context.Background())
+	products, _, err := ListBillingProducts(context.Background(), f.alice)
 	if err != nil {
 		t.Fatal(err)
 	}

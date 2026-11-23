@@ -48,6 +48,10 @@ type BillingProductDTO struct {
 	Title     string `json:"title"`
 	Coins     int    `json:"coins"`
 	Gems      int    `json:"gems"`
+	// Subjects a topic pack (kind non_consumable) unlocks.
+	Subjects []string `json:"subjects,omitempty"`
+	// Owned is true for a topic pack the player already has.
+	Owned bool `json:"owned,omitempty"`
 }
 
 // BillingAccountDTO carries the opaque id the app passes to Google Play at
@@ -82,4 +86,6 @@ type VerifyPurchaseResponseDTO struct {
 	GemsAdded    int                    `json:"gems_added"`
 	Balance      *WalletBalanceDTO      `json:"balance,omitempty"`
 	Subscription *SubscriptionStatusDTO `json:"subscription,omitempty"`
+	// UnlockedSubjects lists what a topic pack opened.
+	UnlockedSubjects []string `json:"unlocked_subjects,omitempty"`
 }

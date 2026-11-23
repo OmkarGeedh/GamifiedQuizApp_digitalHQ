@@ -67,6 +67,7 @@ func setupTestEngine() *gin.Engine {
 	routes.RegisterAnalyticsRoutes(r)
 	routes.RegisterLeaderboardRoutes(r)
 	routes.RegisterBillingRoutes(r)
+	routes.RegisterMonetizationRoutes(r)
 
 	r.NoMethod(func(c *gin.Context) {
 		c.JSON(http.StatusMethodNotAllowed, gin.H{
@@ -164,7 +165,7 @@ func TestRouteRegistrationBothPrefixes(t *testing.T) {
 	}
 
 	// Authenticated GET endpoints exist under both prefixes and reject anonymous calls with 401
-	for _, path := range []string{"/leaderboard", "/api/v1/leaderboard", "/subjects", "/api/v1/subjects", "/daily-goals", "/api/v1/daily-goals", "/streak", "/api/v1/streak", "/billing/products", "/api/v1/billing/products", "/billing/account-id", "/api/v1/billing/account-id", "/billing/subscription", "/api/v1/billing/subscription"} {
+	for _, path := range []string{"/leaderboard", "/api/v1/leaderboard", "/subjects", "/api/v1/subjects", "/daily-goals", "/api/v1/daily-goals", "/streak", "/api/v1/streak", "/billing/products", "/api/v1/billing/products", "/billing/account-id", "/api/v1/billing/account-id", "/billing/subscription", "/api/v1/billing/subscription", "/billing/entitlements", "/api/v1/billing/entitlements", "/ads/config", "/api/v1/ads/config", "/power-ups", "/api/v1/power-ups", "/ads/rewards/00000000-0000-0000-0000-000000000000", "/api/v1/ads/rewards/00000000-0000-0000-0000-000000000000"} {
 		req, _ := http.NewRequest(http.MethodGet, path, nil)
 		req.Header.Set("Origin", "http://localhost:3000")
 		w := httptest.NewRecorder()
@@ -179,8 +180,19 @@ func TestRouteRegistrationBothPrefixes(t *testing.T) {
 		}
 	}
 
-	// Purchase verification needs a signed-in player under both prefixes.
-	for _, path := range []string{"/billing/verify", "/api/v1/billing/verify"} {
+	// AdMob's signed callback has no player session: it exists under both
+	// prefixes and refuses unsigned requests (400/503, never 404 or 200).
+	for _, path := range []string{"/ads/ssv", "/api/v1/ads/ssv"} {
+		req, _ := http.NewRequest(http.MethodGet, path+"?transaction_id=x", nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code == http.StatusNotFound || w.Code == http.StatusOK {
+			t.Errorf("unsigned SSV callback to %s: got %d", path, w.Code)
+		}
+	}
+
+	// Purchase verification, ad rewards and Pass claims need a signed-in player under both prefixes.
+	for _, path := range []string{"/billing/verify", "/api/v1/billing/verify", "/ads/rewards", "/api/v1/ads/rewards", "/pass/monthly-gems", "/api/v1/pass/monthly-gems"} {
 		req, _ := http.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()

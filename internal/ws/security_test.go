@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/models"
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/testutil"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/ws"
 	"github.com/gorilla/websocket"
 )
@@ -81,6 +82,7 @@ func TestSecurity_NoAnswerLeakage(t *testing.T) {
 func TestSecurity_PowerUpIntegrity(t *testing.T) {
 	sessionID := "sec-test-powerup"
 	clientID := 888
+	testutil.FundedPlayer(t, clientID, 1000) // power-ups are paid on the server
 	gameSession := &models.GameSession{
 		ID:             sessionID,
 		ClientID:       clientID,

@@ -60,6 +60,9 @@ type ConsumableGrant struct {
 	IsTest        bool
 	PurchasedAt   time.Time
 	LedgerRef     string // wallet_ledger.reference_id (≤ 64 chars)
+	// Audit is written in the same transaction as a new grant, so a grant is
+	// never committed without its audit row.
+	Audit *BillingAudit
 }
 
 // ConsumableGrantResult reports what GrantConsumable did.
@@ -143,6 +146,11 @@ func GrantConsumable(ctx context.Context, g ConsumableGrant) (*ConsumableGrantRe
 				return err
 			}
 		}
+		if g.Audit != nil {
+			if err := insertAuditTx(tx, *g.Audit, now); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -192,6 +200,7 @@ type UnconsumedPurchase struct {
 	ClientID      int
 	ProductID     string
 	PurchaseToken string
+	Kind          string // consumable (consume with Google) or non_consumable (acknowledge)
 }
 
 // ListUnconsumedPurchases returns granted, unconsumed purchases created before
@@ -199,9 +208,10 @@ type UnconsumedPurchase struct {
 func ListUnconsumedPurchases(ctx context.Context, olderThan time.Time, limit int) ([]UnconsumedPurchase, error) {
 	var rows []UnconsumedPurchase
 	err := GetDB().WithContext(ctx).Raw(
-		`SELECT client_id, product_id, purchase_token FROM play_purchases
-		  WHERE consumed = ? AND state = 'granted' AND created_at < ?
-		  ORDER BY created_at LIMIT ?`, false, olderThan.UTC(), limit).Scan(&rows).Error
+		`SELECT pp.client_id, pp.product_id, pp.purchase_token, bp.kind
+		   FROM play_purchases pp JOIN billing_products bp ON bp.product_id = pp.product_id
+		  WHERE pp.consumed = ? AND pp.state = 'granted' AND pp.created_at < ?
+		  ORDER BY pp.created_at LIMIT ?`, false, olderThan.UTC(), limit).Scan(&rows).Error
 	return rows, err
 }
 
@@ -219,7 +229,7 @@ type RevokeResult struct {
 
 // RevokeConsumable takes back a refunded pack: marks it revoked and debits what
 // it gave, never below zero. Safe to repeat: only the first call takes anything.
-func RevokeConsumable(ctx context.Context, token string) (*RevokeResult, error) {
+func RevokeConsumable(ctx context.Context, token, tokenHash, source string) (*RevokeResult, error) {
 	out := &RevokeResult{}
 	now := time.Now().UTC()
 
@@ -263,6 +273,17 @@ func RevokeConsumable(ctx context.Context, token string) (*RevokeResult, error) 
 		out.GemsTaken = min(p.Gems, r.Gems)
 		out.CoinsShort = r.Coins - out.CoinsTaken
 		out.GemsShort = r.Gems - out.GemsTaken
+		if err := insertAuditTx(tx, BillingAudit{ClientID: r.ClientID, TokenHash: tokenHash, ProductID: r.ProductID,
+			Action: "refund", Result: "ok", Reason: fmt.Sprintf("%s: took coins=%d gems=%d", source, out.CoinsTaken, out.GemsTaken)}, now); err != nil {
+			return err
+		}
+		if out.CoinsShort > 0 || out.GemsShort > 0 {
+			// Flags the account for review: the player spent refunded currency.
+			if err := insertAuditTx(tx, BillingAudit{ClientID: r.ClientID, TokenHash: tokenHash, ProductID: r.ProductID,
+				Action: "refund", Result: "shortfall", Reason: fmt.Sprintf("could not take back coins=%d gems=%d", out.CoinsShort, out.GemsShort)}, now); err != nil {
+				return err
+			}
+		}
 		if out.CoinsTaken == 0 && out.GemsTaken == 0 {
 			return nil
 		}
@@ -413,6 +434,22 @@ type BillingAudit struct {
 	Action    string
 	Result    string
 	Reason    string
+}
+
+// insertAuditTx appends an audit row inside a transaction.
+func insertAuditTx(tx *gorm.DB, a BillingAudit, at time.Time) error {
+	var clientID any
+	if a.ClientID > 0 {
+		clientID = a.ClientID
+	}
+	if err := tx.Exec(
+		`INSERT INTO billing_audit (client_id, purchase_token_hash, product_id, action, result, reason, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		clientID, a.TokenHash, truncate(a.ProductID, 64), truncate(a.Action, 20), truncate(a.Result, 20),
+		truncate(a.Reason, 200), at).Error; err != nil {
+		return fmt.Errorf("record billing audit: %w", err)
+	}
+	return nil
 }
 
 // InsertBillingAudit appends an audit row.

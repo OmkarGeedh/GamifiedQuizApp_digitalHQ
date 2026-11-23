@@ -143,8 +143,10 @@ func audit(ctx context.Context, a repo.BillingAudit) {
 
 // ---- Catalog and account ----------------------------------------------------
 
-// ListBillingProducts returns what the app may sell.
-func ListBillingProducts(ctx context.Context) ([]dto.BillingProductDTO, int, error) {
+// ListBillingProducts returns what the app may sell to this player. A topic
+// pack is listed only when it unlocks at least one subject, with Owned set
+// when the player already has it.
+func ListBillingProducts(ctx context.Context, clientID int) ([]dto.BillingProductDTO, int, error) {
 	if _, err := getBilling(); err != nil {
 		return nil, http.StatusServiceUnavailable, err
 	}
@@ -152,9 +154,28 @@ func ListBillingProducts(ctx context.Context) ([]dto.BillingProductDTO, int, err
 	if err != nil {
 		return nil, http.StatusInternalServerError, fmt.Errorf("failed to load products: %w", err)
 	}
+	var owned map[string]bool
 	out := make([]dto.BillingProductDTO, 0, len(rows))
 	for _, p := range rows {
-		out = append(out, dto.BillingProductDTO{ProductID: p.ProductID, Kind: p.Kind, Title: p.Title, Coins: p.Coins, Gems: p.Gems})
+		item := dto.BillingProductDTO{ProductID: p.ProductID, Kind: p.Kind, Title: p.Title, Coins: p.Coins, Gems: p.Gems}
+		if p.Kind == models.BillingKindNonConsumable {
+			item.Subjects = packSubjects(ctx, p.ProductID)
+			if len(item.Subjects) == 0 {
+				continue // never sell an empty pack
+			}
+			if owned == nil {
+				owned = map[string]bool{}
+				ids, err := repo.OwnedProductIDs(ctx, clientID)
+				if err != nil {
+					return nil, http.StatusInternalServerError, fmt.Errorf("failed to load purchases: %w", err)
+				}
+				for _, id := range ids {
+					owned[id] = true
+				}
+			}
+			item.Owned = owned[p.ProductID]
+		}
+		out = append(out, item)
 	}
 	return out, http.StatusOK, nil
 }
@@ -194,6 +215,7 @@ func VerifyPurchase(ctx context.Context, clientID int, req *dto.VerifyPurchaseRe
 	if product.Kind == models.BillingKindSubscription {
 		return verifySubscription(ctx, rt, clientID, product, req.PurchaseToken, th)
 	}
+	// Gem packs (consumable) and topic packs (non-consumable) are one-time purchases.
 	return verifyConsumable(ctx, rt, clientID, product, req.PurchaseToken, th)
 }
 
@@ -227,6 +249,8 @@ func checkOwner(ctx context.Context, rt *billingRuntime, clientID int, th, produ
 }
 
 func verifyConsumable(ctx context.Context, rt *billingRuntime, clientID int, product *models.BillingProduct, token, th string) (*dto.VerifyPurchaseResponseDTO, int, error) {
+	// A topic pack is kept for good: acknowledged with Google, never consumed.
+	isPack := product.Kind == models.BillingKindNonConsumable
 	p, err := rt.play.GetProduct(ctx, product.ProductID, token)
 	if err != nil {
 		return playLookupFailed(ctx, clientID, th, product.ProductID, err)
@@ -248,9 +272,9 @@ func verifyConsumable(ctx context.Context, rt *billingRuntime, clientID int, pro
 	if p.IsTest && !rt.allowTest {
 		return reject(ctx, clientID, th, product.ProductID, "rejected", "test purchase", http.StatusForbidden, "test purchases are not accepted")
 	}
-	if p.Consumed {
-		// Only this backend consumes. Consumed but never recorded means it was
-		// redeemed some other way; never pay it out.
+	if p.Consumed || (isPack && p.Acknowledged) {
+		// Only this backend consumes or acknowledges. Done at Google but never
+		// recorded here means it was redeemed some other way; never pay it out.
 		if _, found, err := repo.PurchaseOwner(ctx, token); err != nil {
 			return nil, http.StatusInternalServerError, fmt.Errorf("failed to check purchase: %w", err)
 		} else if !found {
@@ -262,7 +286,7 @@ func verifyConsumable(ctx context.Context, rt *billingRuntime, clientID int, pro
 	if qty < 1 {
 		qty = 1
 	}
-	if qty > maxPurchaseQuantity {
+	if qty > maxPurchaseQuantity || (isPack && qty != 1) {
 		return reject(ctx, clientID, th, product.ProductID, "rejected", fmt.Sprintf("quantity %d", qty), http.StatusBadRequest, "purchase quantity is not supported")
 	}
 	ref := p.OrderID
@@ -274,6 +298,8 @@ func verifyConsumable(ctx context.Context, rt *billingRuntime, clientID int, pro
 		Quantity: qty, Coins: product.Coins * qty, Gems: product.Gems * qty, IsTest: p.IsTest,
 		PurchasedAt: p.PurchaseTime, LedgerRef: ref,
 	}
+	grant.Audit = &repo.BillingAudit{ClientID: clientID, TokenHash: th, ProductID: product.ProductID, Action: "grant", Result: "ok",
+		Reason: fmt.Sprintf("kind=%s coins=%d gems=%d qty=%d test=%v order=%s", product.Kind, grant.Coins, grant.Gems, qty, p.IsTest, truncateStr(p.OrderID, 40))}
 	res, err := repo.GrantConsumable(ctx, grant)
 	if errors.Is(err, repo.ErrProfileNotFound) {
 		if _, pErr := GetOrCreateProfile(ctx, clientID); pErr == nil {
@@ -292,12 +318,15 @@ func verifyConsumable(ctx context.Context, rt *billingRuntime, clientID int, pro
 	// Consume with Google only after the grant is committed. If this fails the
 	// grant stands and the sweeper retries (Play refunds unconsumed purchases
 	// after 3 days, so it must eventually succeed).
+	// "consumed" on our row means "completed with Google": consumed for a pack
+	// of gems, acknowledged for a topic pack.
+	doneAtGoogle := p.Consumed || (isPack && p.Acknowledged)
 	if !res.Revoked {
 		switch {
-		case p.Consumed && !res.Consumed:
+		case doneAtGoogle && !res.Consumed:
 			_ = repo.MarkPurchaseConsumed(ctx, token)
-		case !p.Consumed && !res.Consumed:
-			if err := rt.play.ConsumeProduct(ctx, product.ProductID, token); err != nil {
+		case !doneAtGoogle && !res.Consumed:
+			if err := completeWithGoogle(ctx, rt, isPack, product.ProductID, token); err != nil {
 				audit(ctx, repo.BillingAudit{ClientID: clientID, TokenHash: th, ProductID: product.ProductID, Action: "consume", Result: "error", Reason: err.Error()})
 			} else if err := repo.MarkPurchaseConsumed(ctx, token); err != nil {
 				log.Printf("[Billing] mark consumed failed token=%.8s: %v", th, err)
@@ -309,15 +338,24 @@ func verifyConsumable(ctx context.Context, rt *billingRuntime, clientID int, pro
 		Status: dto.VerifyStatusGranted, ProductID: product.ProductID, Kind: product.Kind,
 		Balance: &dto.WalletBalanceDTO{Coins: res.Coins, Gems: res.Gems},
 	}
+	if isPack && !res.Revoked {
+		out.UnlockedSubjects = packSubjects(ctx, product.ProductID)
+	}
 	if res.AlreadyGranted {
 		out.Status = dto.VerifyStatusAlreadyGranted
 		audit(ctx, repo.BillingAudit{ClientID: clientID, TokenHash: th, ProductID: product.ProductID, Action: "verify", Result: "already_granted"})
 	} else {
 		out.CoinsAdded, out.GemsAdded = grant.Coins, grant.Gems
-		audit(ctx, repo.BillingAudit{ClientID: clientID, TokenHash: th, ProductID: product.ProductID, Action: "grant", Result: "ok",
-			Reason: fmt.Sprintf("coins=%d gems=%d qty=%d test=%v", grant.Coins, grant.Gems, qty, p.IsTest)})
 	}
 	return out, http.StatusOK, nil
+}
+
+// completeWithGoogle consumes a gem pack or acknowledges a topic pack.
+func completeWithGoogle(ctx context.Context, rt *billingRuntime, isPack bool, productID, token string) error {
+	if isPack {
+		return rt.play.AcknowledgeProduct(ctx, productID, token)
+	}
+	return rt.play.ConsumeProduct(ctx, productID, token)
 }
 
 // mapSubscriptionState turns Google's state into ours. Unknown states map to
@@ -677,17 +715,15 @@ func revokePurchase(ctx context.Context, token, source string) error {
 		return nil
 	}
 	th := tokenHash(token)
-	r, err := repo.RevokeConsumable(ctx, token)
+	// Gem packs lose what they gave and topic packs their access; the refund
+	// and any shortfall are audited in the same transaction.
+	r, err := repo.RevokeConsumable(ctx, token, th, source)
 	if err != nil {
 		return err
 	}
 	if r.Found {
-		audit(ctx, repo.BillingAudit{ClientID: r.ClientID, TokenHash: th, ProductID: r.ProductID, Action: "refund", Result: "ok",
-			Reason: fmt.Sprintf("%s: took coins=%d gems=%d", source, r.CoinsTaken, r.GemsTaken)})
 		if r.CoinsShort > 0 || r.GemsShort > 0 {
-			// Flags the account for review: the player spent refunded currency.
-			audit(ctx, repo.BillingAudit{ClientID: r.ClientID, TokenHash: th, ProductID: r.ProductID, Action: "refund", Result: "shortfall",
-				Reason: fmt.Sprintf("could not take back coins=%d gems=%d", r.CoinsShort, r.GemsShort)})
+			log.Printf("[Billing] refund shortfall client=%d product=%s coins=%d gems=%d", r.ClientID, r.ProductID, r.CoinsShort, r.GemsShort)
 		}
 		return nil
 	}
@@ -747,9 +783,10 @@ func RunBillingSweep(ctx context.Context) {
 	} else {
 		for _, p := range pending {
 			th := tokenHash(p.PurchaseToken)
-			if err := rt.play.ConsumeProduct(ctx, p.ProductID, p.PurchaseToken); err != nil {
-				// Maybe it was consumed already; ask Google.
-				if gp, gerr := rt.play.GetProduct(ctx, p.ProductID, p.PurchaseToken); gerr == nil && gp.Consumed {
+			isPack := p.Kind == models.BillingKindNonConsumable
+			if err := completeWithGoogle(ctx, rt, isPack, p.ProductID, p.PurchaseToken); err != nil {
+				// Maybe it was completed already; ask Google.
+				if gp, gerr := rt.play.GetProduct(ctx, p.ProductID, p.PurchaseToken); gerr == nil && (gp.Consumed || (isPack && gp.Acknowledged)) {
 					_ = repo.MarkPurchaseConsumed(ctx, p.PurchaseToken)
 					continue
 				}

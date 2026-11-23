@@ -46,6 +46,7 @@ type turn struct {
 	clientID  int
 	now       time.Time
 	events    []OutboundMessage
+	charge    paidCharge
 }
 
 func loadTurn(ctx context.Context, clientID int, sessionID string, now time.Time) (*turn, error) {
@@ -228,6 +229,10 @@ func SubmitTurn(ctx context.Context, clientID int, sessionID string, data Submit
 		t.fail(ErrCodeStaleAnswer, "question has not been served yet; fetch the current question first")
 	case question != q.QuestionCode:
 		t.fail(ErrCodeStaleAnswer, fmt.Sprintf("stale answer: current question is %s", q.QuestionCode))
+	case strings.EqualFold(option, "skip") && t.s.SkippedCount >= maxSkipsPerRun:
+		t.fail(ErrCodePowerUpAlreadyUsed, "skip has already been used in this run")
+	case strings.EqualFold(option, "skip") && !t.expired() && !t.pay(ctx, models.PowerUpSkip, q.QuestionCode, data.PayWith):
+		// pay emitted the error; nothing changed and the question is still live
 	case !cache.AcquireAnswerLock(ctx, t.s.ID, q.QuestionCode):
 		t.fail(ErrCodeStaleAnswer, "answer for this question is already being processed")
 	case strings.EqualFold(option, "timeout") || t.expired():
@@ -285,17 +290,67 @@ func UseTurnPowerUp(ctx context.Context, clientID int, sessionID string, data Us
 		t.fail(ErrCodeUnsupportedPowerUp, "only add_time is supported for sudden_death")
 	case t.s.AddTimeUsed:
 		t.fail(ErrCodePowerUpAlreadyUsed, "add_time power-up has already been used in this session")
+	case !t.pay(ctx, models.PowerUpAddTime, q.QuestionCode, data.PayWith):
+		// pay emitted the error; the deadline is unchanged
 	default:
 		d := t.s.QuestionDeadline.Add(addTimeDuration)
 		t.s.QuestionDeadline = &d
 		t.s.AddTimeUsed = true
-		t.emit(MsgTypePowerUpResult, PowerUpResultPayload{
+		payload := PowerUpResultPayload{
 			Question:          q.QuestionCode,
 			PowerUp:           powerUp,
 			AddedTimeMs:       int(addTimeDuration.Milliseconds()),
 			RemainingTimeMs:   t.remainingMs(),
 			ServerTimestampMs: now.UnixMilli(),
-		})
+		}
+		t.charge.fill(&payload)
+		t.emit(MsgTypePowerUpResult, payload)
 	}
 	return t.finish(ctx, nil)
+}
+
+// maxSkipsPerRun: Skip is a paid power-up allowed once per Sudden Death run.
+const maxSkipsPerRun = 1
+
+// paidCharge remembers how the last power-up of this turn was paid.
+type paidCharge struct{ res *repo.PowerUpChargeResult }
+
+func (c paidCharge) fill(p *PowerUpResultPayload) {
+	if c.res == nil {
+		return
+	}
+	p.PaidWith, p.Cost, p.CoinsBalance, p.TokensLeft = c.res.PaidWith, c.res.Amount, c.res.CoinsAfter, c.res.TokensAfter
+}
+
+// pay charges a power-up on the server (once per run for Sudden Death
+// power-ups; a retried request is not charged again). On failure it emits an
+// error event and returns false, leaving the game unchanged.
+func (t *turn) pay(ctx context.Context, powerUp, questionCode, payWith string) bool {
+	payWith, ok := normalizePayWith(payWith)
+	if !ok {
+		t.fail(ErrCodeInvalidPayload, "pay_with must be 'coins' or 'token'")
+		return false
+	}
+	res, err := services.PayForPowerUp(ctx, t.clientID, t.s.ID, questionCode, powerUp, payWith, "")
+	if err != nil {
+		if errors.Is(err, services.ErrPowerUpInsufficientFunds) || errors.Is(err, services.ErrPowerUpNoToken) {
+			t.fail(services.PowerUpErrorCode(err), err.Error())
+		} else {
+			log.Printf("[sudden-death] charge %s failed for session %s: %v", powerUp, t.s.ID, err)
+			t.fail(services.PowerUpErrorCode(err), "could not pay for the power-up, please try again")
+		}
+		return false
+	}
+	t.charge = paidCharge{res: res}
+	return true
+}
+
+// normalizePayWith accepts "", "coins" or "token".
+func normalizePayWith(s string) (string, bool) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	switch s {
+	case "", models.PayWithCoins, models.PayWithToken:
+		return s, true
+	}
+	return "", false
 }

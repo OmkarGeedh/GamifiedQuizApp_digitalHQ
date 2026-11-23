@@ -7,10 +7,12 @@ import (
 	"time"
 
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/models"
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/testutil"
 )
 
 func newDeadlineTestSession(t *testing.T, deadline time.Time) (*GameSession, *time.Timer, *time.Timer) {
 	t.Helper()
+	testutil.FundedPlayer(t, 42, 1000) // power-ups are paid on the server
 	session := &models.GameSession{
 		ID:             "deadline-test",
 		ClientID:       42,

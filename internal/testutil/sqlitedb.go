@@ -3,6 +3,7 @@
 package testutil
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -87,8 +88,9 @@ func SeedClient(t *testing.T, db *gorm.DB, username string) int {
 	return id
 }
 
-// AddBillingTables creates SQLite stand-ins for wallet_ledger and the billing
-// tables of migration 000009_play_billing (same columns and UNIQUE keys).
+// AddBillingTables creates SQLite stand-ins for wallet_ledger, the billing
+// tables of migration 000009_play_billing and the monetization tables of
+// 000010_monetization (same columns, CHECKs that matter and UNIQUE keys).
 func AddBillingTables(t *testing.T, db *gorm.DB) {
 	t.Helper()
 	stmts := []string{
@@ -117,10 +119,45 @@ func AddBillingTables(t *testing.T, db *gorm.DB) {
 			product_id TEXT NOT NULL DEFAULT '', action TEXT NOT NULL, result TEXT NOT NULL,
 			reason TEXT NOT NULL DEFAULT '', created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
 		`CREATE TABLE billing_rtdn_messages (message_id TEXT PRIMARY KEY, received_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+		// Migration 000010_monetization.
+		`CREATE TABLE billing_product_subjects (product_id TEXT NOT NULL, subject TEXT NOT NULL, PRIMARY KEY (product_id, subject))`,
+		`CREATE TABLE client_power_ups (
+			client_id INTEGER NOT NULL, power_up TEXT NOT NULL, quantity INTEGER NOT NULL DEFAULT 0 CHECK (quantity >= 0 AND quantity <= 99),
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (client_id, power_up))`,
+		`CREATE TABLE power_up_uses (
+			session_id TEXT NOT NULL, question_code TEXT NOT NULL, power_up TEXT NOT NULL, client_id INTEGER NOT NULL,
+			paid_with TEXT NOT NULL, amount INTEGER NOT NULL CHECK (amount > 0), result TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (session_id, question_code, power_up))`,
+		`CREATE TABLE ad_rewards (
+			id TEXT PRIMARY KEY, client_id INTEGER NOT NULL, placement TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'ad',
+			status TEXT NOT NULL DEFAULT 'pending', reward_currency TEXT, reward_amount INTEGER CHECK (reward_amount > 0),
+			ad_network TEXT, ad_unit TEXT, ssv_transaction_id TEXT, ssv_key_id INTEGER, ssv_rewarded_at DATETIME,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, expires_at DATETIME NOT NULL, fulfilled_at DATETIME,
+			CHECK (status <> 'fulfilled' OR (reward_currency IS NOT NULL AND reward_amount IS NOT NULL AND fulfilled_at IS NOT NULL)),
+			CHECK (source <> 'ad' OR status <> 'fulfilled' OR ssv_transaction_id IS NOT NULL))`,
+		`CREATE UNIQUE INDEX uq_ad_rewards_ssv_transaction ON ad_rewards (ssv_transaction_id) WHERE ssv_transaction_id IS NOT NULL`,
+		`CREATE UNIQUE INDEX uq_wallet_ledger_server_event ON wallet_ledger (client_id, transaction_type, currency, reference_id)
+			WHERE transaction_type IN ('ad_reward', 'pass_reward', 'power_up_charge', 'power_up_token_use') AND reference_id IS NOT NULL`,
 	}
 	for _, s := range stmts {
 		if err := db.Exec(s).Error; err != nil {
 			t.Fatalf("create billing tables: %v", err)
 		}
 	}
+}
+
+// FundedPlayer installs a fresh SQLite database with the billing and
+// monetization tables and a player with the given id and coins, so game tests
+// can use power-ups (which are charged on the server).
+func FundedPlayer(t *testing.T, clientID, coins int) *gorm.DB {
+	t.Helper()
+	db := NewDB(t)
+	AddBillingTables(t, db)
+	if err := db.Exec(
+		`INSERT INTO clients (id, username, email, password, status, full_name, coins, created_at, updated_at)
+		 VALUES (?, ?, ?, 'x', 'active', 'Player', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+		clientID, fmt.Sprintf("player%d", clientID), fmt.Sprintf("player%d@example.com", clientID), coins).Error; err != nil {
+		t.Fatalf("seed funded player %d: %v", clientID, err)
+	}
+	return db
 }

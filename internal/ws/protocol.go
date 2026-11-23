@@ -22,6 +22,8 @@ type SubmitAnswerData struct {
 	Option       string `json:"option"`
 	SelectedText string `json:"selected_text,omitempty"`
 	TimeTakenMs  int    `json:"time_taken_ms"`
+	// PayWith pays for a "skip": "coins", "token", or empty (token if held, else coins).
+	PayWith string `json:"pay_with,omitempty"`
 }
 
 // UsePowerUpData is the payload for "use_power_up" messages.
@@ -29,6 +31,8 @@ type UsePowerUpData struct {
 	Session  string `json:"session,omitempty"`
 	Question string `json:"question"`
 	PowerUp  string `json:"power_up"`
+	// PayWith is "coins", "token", or empty (token if held, else coins).
+	PayWith string `json:"pay_with,omitempty"`
 }
 
 // --- Outbound Messages (Server → Client) ---
@@ -111,6 +115,11 @@ type PowerUpResultPayload struct {
 	AddedTimeMs       int      `json:"added_time_ms,omitempty"`
 	RemainingTimeMs   int      `json:"remaining_time_ms,omitempty"`
 	ServerTimestampMs int64    `json:"server_timestamp_ms,omitempty"`
+	// How the power-up was paid, and the balances after when charged now.
+	PaidWith     string `json:"paid_with,omitempty"`
+	Cost         int    `json:"cost,omitempty"`
+	CoinsBalance *int   `json:"coins_balance,omitempty"`
+	TokensLeft   *int   `json:"tokens_left,omitempty"`
 }
 
 // GameOverPayload is the final summary sent when the quiz ends.

@@ -14,11 +14,12 @@ import (
 // GetBillingProductsHandler lists the products the app may sell.
 // GET /api/v1/billing/products
 func GetBillingProductsHandler(c *gin.Context) {
-	if _, ok := middleware.GetAuthenticatedClientID(c); !ok {
+	clientID, ok := middleware.GetAuthenticatedClientID(c)
+	if !ok {
 		response.Error(c, http.StatusUnauthorized, "Unauthorized")
 		return
 	}
-	res, status, err := services.ListBillingProducts(c.Request.Context())
+	res, status, err := services.ListBillingProducts(c.Request.Context(), clientID)
 	if err != nil {
 		response.Error(c, status, err.Error())
 		return

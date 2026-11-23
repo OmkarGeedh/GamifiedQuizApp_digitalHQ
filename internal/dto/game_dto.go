@@ -127,6 +127,8 @@ func (r *SubmitAnswerRequestDTO) Validate() error {
 type FiftyFiftyRequestDTO struct {
 	Session  string `json:"session" binding:"required"`
 	Question string `json:"question" binding:"required"`
+	// PayWith is "coins", "token", or empty (a token if the player has one, else coins).
+	PayWith string `json:"pay_with,omitempty"`
 }
 
 // Validate ensures the fields are non-empty.
@@ -134,6 +136,10 @@ func (r *FiftyFiftyRequestDTO) Validate() error {
 	r.Session = strings.TrimSpace(r.Session)
 	if r.Session == "" {
 		return errors.New("session is required")
+	}
+	r.PayWith = strings.ToLower(strings.TrimSpace(r.PayWith))
+	if r.PayWith != "" && r.PayWith != "coins" && r.PayWith != "token" {
+		return errors.New("pay_with must be 'coins' or 'token'")
 	}
 	r.Question = strings.TrimSpace(r.Question)
 	if r.Question == "" {
@@ -242,6 +248,12 @@ type AnswerResultDTO struct {
 type FiftyFiftyResponseDTO struct {
 	Question      string   `json:"question"`
 	HiddenOptions []string `json:"hidden_options"`
+	// How it was paid ("coins" or "token") and the balances after, when charged now.
+	PaidWith       string `json:"paid_with"`
+	Cost           int    `json:"cost"`
+	AlreadyApplied bool   `json:"already_applied"`
+	CoinsBalance   *int   `json:"coins_balance,omitempty"`
+	TokensLeft     *int   `json:"tokens_left,omitempty"`
 }
 
 // LevelInfoDTO contains level/XP progression data.
@@ -469,6 +481,10 @@ type SubjectDTO struct {
 	Name     string       `json:"name"`
 	Grade    int          `json:"grade"`
 	Chapters []ChapterDTO `json:"chapters"`
+	// Locked is true for a topic-pack subject the player does not own;
+	// PackProductIDs are the packs that unlock it.
+	Locked         bool     `json:"locked"`
+	PackProductIDs []string `json:"pack_product_ids,omitempty"`
 }
 
 type ChapterDTO struct {

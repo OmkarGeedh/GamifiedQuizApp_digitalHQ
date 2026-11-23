@@ -26,6 +26,16 @@ func main() {
 	if err := config.LoadEnv(); err != nil {
 		log.Printf("Warning loading .env: %v\n", err)
 	}
+	// Production must not run with the public fallback secrets from this repo.
+	if config.AppConfig.IsProduction() {
+		fatal, warnings := config.AppConfig.ProductionSecretProblems()
+		for _, w := range warnings {
+			log.Printf("SECURITY WARNING: %s", w)
+		}
+		if len(fatal) > 0 {
+			log.Fatalf("Refusing to start in production: %s", strings.Join(fatal, "; "))
+		}
+	}
 	ws.InitPlatformTiming()
 	log.Printf("WebSocket timings initialized for platform '%s' (PingInterval: %v, PongWait: %v, TCPKeepAlive: %v)\n",
 		ws.CurrentPlatform, ws.PingInterval, ws.PongWait, ws.TCPKeepAlive)
@@ -126,6 +136,7 @@ func main() {
 	routes.RegisterAnalyticsRoutes(r)
 	routes.RegisterLeaderboardRoutes(r)
 	routes.RegisterBillingRoutes(r)
+	routes.RegisterMonetizationRoutes(r)
 
 	// 5b. Start background session inactivity sweeper (TTL: 5 minutes, sweeps every 1 minute)
 	services.StartSessionTTLSweeper(context.Background(), 1*time.Minute)
@@ -134,6 +145,8 @@ func main() {
 	// reconciliation sweeper (no-op while billing is not configured).
 	services.LogBillingStatus()
 	services.StartBillingSweeper(context.Background(), time.Hour)
+	// 5d. Rewarded ads: expire unfinished ad rewards every 15 minutes.
+	services.StartMonetizationSweeper(context.Background(), 15*time.Minute)
 
 	// Fallback 404 handler with JSON response
 	r.NoRoute(func(c *gin.Context) {

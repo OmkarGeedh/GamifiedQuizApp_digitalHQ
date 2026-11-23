@@ -56,7 +56,9 @@ func bridgeMissedDays(ctx context.Context, profile *models.Profile, todayDate ti
 	y, m, d := profile.LastActiveDate.Date()
 	last := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
 	missed := int(todayDate.Sub(last).Hours()/24) - 1
-	if missed < 1 || missed > MaxStreakFreezes {
+	// The most anyone can hold (a Quiz Pass adds a slot); spending still needs
+	// that many freezes, so players without the Pass are not affected.
+	if missed < 1 || missed > MaxStreakFreezes+PassExtraFreezeSlots {
 		return false, nil
 	}
 
@@ -147,7 +149,7 @@ func GetStreakStatus(ctx context.Context, clientID int) (*dto.StreakStatusDTO, i
 	} else {
 		status.FreezesEnabled = true
 		status.Freezes = freezes
-		status.MaxFreezes = MaxStreakFreezes
+		status.MaxFreezes = maxStreakFreezesFor(ctx, clientID)
 		status.FreezePriceGems = StreakFreezePriceGems
 	}
 	return &status, http.StatusOK, nil
@@ -156,7 +158,7 @@ func GetStreakStatus(ctx context.Context, clientID int) (*dto.StreakStatusDTO, i
 // BuyStreakFreeze sells the player one streak freeze for gems.
 // 400 not enough gems, 409 already holding the maximum.
 func BuyStreakFreeze(ctx context.Context, clientID int) (*dto.StreakFreezeBuyResponseDTO, int, error) {
-	out, err := repo.BuyStreakFreeze(ctx, clientID, StreakFreezePriceGems, MaxStreakFreezes)
+	out, err := repo.BuyStreakFreeze(ctx, clientID, StreakFreezePriceGems, maxStreakFreezesFor(ctx, clientID))
 	switch {
 	case errors.Is(err, repo.ErrInsufficientFunds):
 		return nil, http.StatusBadRequest, fmt.Errorf("not enough gems: a streak freeze costs %d", StreakFreezePriceGems)

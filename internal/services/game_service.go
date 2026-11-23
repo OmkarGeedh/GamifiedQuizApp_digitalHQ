@@ -8,6 +8,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -124,6 +125,12 @@ func StartSessionTTLSweeper(ctx context.Context, interval time.Duration) {
 // CreateSession initializes a new quiz session, picks random questions from the DB,
 // and returns the session ID + sanitized questions (no correct answers exposed).
 func CreateSession(ctx context.Context, clientID int, req *dto.CreateSessionRequestDTO) (*dto.SessionCreatedResponseDTO, int, error) {
+	// Topic packs: a pack subject is playable only by its owners. Checked on the
+	// server at every game start; free subjects cost no query (cached index).
+	if err := CheckTopicAccess(ctx, clientID, req.TopicID); err != nil {
+		return nil, TopicAccessStatus(err), err
+	}
+
 	// Check for existing active session
 	existing, err := repo.GetActiveSessionByClientID(ctx, clientID)
 	if err == nil && existing != nil {
@@ -651,8 +658,8 @@ func ApplyFiftyFifty(ctx context.Context, clientID int, req *dto.FiftyFiftyReque
 	if session.Status != models.SessionStatusInProgress {
 		return nil, http.StatusConflict, errors.New("session is not active")
 	}
-	if session.IsSuddenDeath() {
-		return nil, http.StatusBadRequest, errors.New("fifty_fifty is not supported for sudden_death")
+	if session.IsSuddenDeath() || session.GameMode != models.GameModeMCQ {
+		return nil, http.StatusBadRequest, errors.New("fifty_fifty is only available in MCQ games")
 	}
 
 	// Check if session has expired due to 5 minutes of inactivity
@@ -662,45 +669,60 @@ func ApplyFiftyFifty(ctx context.Context, clientID int, req *dto.FiftyFiftyReque
 
 	RefreshSessionTTL(ctx, session.ID)
 
-	// Fetch question from session state (or DB fallback) to identify correct option
-	var correct string
+	// Only a question of this session (no lookup of arbitrary questions).
 	sessionQuestions, _ := session.GetQuestions()
 	var matchedSQ *models.SessionQuestion
-	for _, sq := range sessionQuestions {
-		if sq.QuestionCode == req.Question {
-			matchedSQ = &sq
+	for i := range sessionQuestions {
+		if sessionQuestions[i].QuestionCode == req.Question {
+			matchedSQ = &sessionQuestions[i]
 			break
 		}
 	}
-	if matchedSQ != nil {
-		correct = strings.ToLower(strings.TrimSpace(matchedSQ.CorrectOption))
-	} else {
-		question, err := repo.GetQuestionByCode(ctx, req.Question)
-		if err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil, http.StatusNotFound, errors.New("question not found")
-			}
-			return nil, http.StatusInternalServerError, fmt.Errorf("failed to fetch question: %w", err)
-		}
-		correct = strings.ToLower(strings.TrimSpace(question.CorrectOption))
+	if matchedSQ == nil {
+		return nil, http.StatusNotFound, errors.New("question is not part of this session")
 	}
+	correct := strings.ToLower(strings.TrimSpace(matchedSQ.CorrectOption))
 
 	// Pick 2 wrong options to hide (guaranteeing correct option is never hidden)
 	wrongOptions := make([]string, 0, 3)
+	options := map[string]string{"a": matchedSQ.OptionA, "b": matchedSQ.OptionB, "c": matchedSQ.OptionC, "d": matchedSQ.OptionD}
 	for _, opt := range []string{"a", "b", "c", "d"} {
-		if !strings.EqualFold(opt, correct) {
+		if !strings.EqualFold(opt, correct) && strings.TrimSpace(options[opt]) != "" {
 			wrongOptions = append(wrongOptions, opt)
 		}
 	}
-	// Shuffle and pick 2 to hide
+	if len(wrongOptions) < 2 {
+		return nil, http.StatusBadRequest, errors.New("this question has too few options for 50:50")
+	}
 	rand.Shuffle(len(wrongOptions), func(i, j int) {
 		wrongOptions[i], wrongOptions[j] = wrongOptions[j], wrongOptions[i]
 	})
 	hidden := wrongOptions[:2]
+	sort.Strings(hidden)
+
+	// Charge on the server (coins or a token), once per question: a retry gets
+	// the same hidden options back and is not charged again.
+	charge, err := PayForPowerUp(ctx, clientID, session.ID, req.Question, models.PowerUpFiftyFifty, req.PayWith, strings.Join(hidden, ","))
+	switch {
+	case errors.Is(err, ErrPowerUpInsufficientFunds):
+		return nil, http.StatusPaymentRequired, err
+	case errors.Is(err, ErrPowerUpNoToken):
+		return nil, http.StatusPaymentRequired, err
+	case err != nil:
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to pay for 50:50: %w", err)
+	}
+	if charge.AlreadyPaid && charge.Result != "" {
+		hidden = strings.Split(charge.Result, ",")
+	}
 
 	return &dto.FiftyFiftyResponseDTO{
-		Question:      req.Question,
-		HiddenOptions: hidden,
+		Question:       req.Question,
+		HiddenOptions:  hidden,
+		PaidWith:       charge.PaidWith,
+		Cost:           charge.Amount,
+		AlreadyApplied: charge.AlreadyPaid,
+		CoinsBalance:   charge.CoinsAfter,
+		TokensLeft:     charge.TokensAfter,
 	}, http.StatusOK, nil
 }
 

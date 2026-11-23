@@ -197,6 +197,10 @@ func (gs *GameSession) handleUsePowerUp(ctx context.Context, rawData json.RawMes
 			gs.sendError(ErrCodePowerUpAlreadyUsed, "add_time power-up has already been used in this session")
 			return
 		}
+		charge, ok := gs.payPowerUp(ctx, models.PowerUpAddTime, q.QuestionCode, data.PayWith, "")
+		if !ok {
+			return
+		}
 
 		now := time.Now()
 		gs.questionDeadline = gs.questionDeadline.Add(addTimeDuration)
@@ -205,16 +209,15 @@ func (gs *GameSession) handleUsePowerUp(ctx context.Context, rawData json.RawMes
 		gs.addTimeUsed = true
 		resetTimer(qTimer, remaining)
 
-		gs.sendToPlayer(OutboundMessage{
-			Type: MsgTypePowerUpResult,
-			Data: PowerUpResultPayload{
-				Question:          q.QuestionCode,
-				PowerUp:           powerUp,
-				AddedTimeMs:       int(addTimeDuration.Milliseconds()),
-				RemainingTimeMs:   int(remaining.Milliseconds()),
-				ServerTimestampMs: time.Now().UnixMilli(),
-			},
-		})
+		payload := PowerUpResultPayload{
+			Question:          q.QuestionCode,
+			PowerUp:           powerUp,
+			AddedTimeMs:       int(addTimeDuration.Milliseconds()),
+			RemainingTimeMs:   int(remaining.Milliseconds()),
+			ServerTimestampMs: time.Now().UnixMilli(),
+		}
+		paidCharge{res: charge}.fill(&payload)
+		gs.sendToPlayer(OutboundMessage{Type: MsgTypePowerUpResult, Data: payload})
 
 	case "fifty_fifty":
 		if gs.Session.IsSuddenDeath() {
@@ -225,7 +228,6 @@ func (gs *GameSession) handleUsePowerUp(ctx context.Context, rawData json.RawMes
 			gs.sendError(ErrCodePowerUpAlreadyUsed, "fifty_fifty power-up has already been used in this session")
 			return
 		}
-		gs.fiftyFiftyUsed = true
 
 		correct := strings.ToLower(strings.TrimSpace(q.CorrectOption))
 		wrongOptions := make([]string, 0, 3)
@@ -242,16 +244,23 @@ func (gs *GameSession) handleUsePowerUp(ctx context.Context, rawData json.RawMes
 		if len(wrongOptions) >= 2 {
 			hidden = wrongOptions[:2]
 		}
+		charge, ok := gs.payPowerUp(ctx, models.PowerUpFiftyFifty, q.QuestionCode, data.PayWith, strings.Join(hidden, ","))
+		if !ok {
+			return
+		}
+		if charge.AlreadyPaid && charge.Result != "" {
+			hidden = strings.Split(charge.Result, ",")
+		}
+		gs.fiftyFiftyUsed = true
 
-		gs.sendToPlayer(OutboundMessage{
-			Type: MsgTypePowerUpResult,
-			Data: PowerUpResultPayload{
-				Question:          q.QuestionCode,
-				PowerUp:           powerUp,
-				HiddenOptions:     hidden,
-				ServerTimestampMs: time.Now().UnixMilli(),
-			},
-		})
+		payload := PowerUpResultPayload{
+			Question:          q.QuestionCode,
+			PowerUp:           powerUp,
+			HiddenOptions:     hidden,
+			ServerTimestampMs: time.Now().UnixMilli(),
+		}
+		paidCharge{res: charge}.fill(&payload)
+		gs.sendToPlayer(OutboundMessage{Type: MsgTypePowerUpResult, Data: payload})
 
 	default:
 		gs.sendError(ErrCodeUnsupportedPowerUp, "unsupported power_up")
@@ -304,6 +313,17 @@ func (gs *GameSession) handleAnswer(ctx context.Context, rawData json.RawMessage
 	if cleanOption == "" {
 		gs.sendError(ErrCodeMissingOption, "submit_answer sent without an option")
 		return
+	}
+
+	// Sudden Death Skip is a paid power-up, once per run, charged on the server.
+	if gs.Session.IsSuddenDeath() && strings.EqualFold(cleanOption, "skip") {
+		if gs.Session.SkippedCount >= maxSkipsPerRun {
+			gs.sendError(ErrCodePowerUpAlreadyUsed, "skip has already been used in this run")
+			return
+		}
+		if _, ok := gs.payPowerUp(ctx, models.PowerUpSkip, q.QuestionCode, data.PayWith, ""); !ok {
+			return
+		}
 	}
 
 	// Stop question timer immediately upon answer receipt
@@ -666,6 +686,27 @@ func (gs *GameSession) sendError(code, message string) {
 			Message: message,
 		},
 	})
+}
+
+// payPowerUp charges a power-up for the socket game (same rules and records as
+// the HTTP game). On failure it sends an error frame and returns false.
+func (gs *GameSession) payPowerUp(ctx context.Context, powerUp, questionCode, payWith, result string) (*repo.PowerUpChargeResult, bool) {
+	payWith, ok := normalizePayWith(payWith)
+	if !ok {
+		gs.sendError(ErrCodeInvalidPayload, "pay_with must be 'coins' or 'token'")
+		return nil, false
+	}
+	res, err := services.PayForPowerUp(ctx, gs.Session.ClientID, gs.ID, questionCode, powerUp, payWith, result)
+	if err != nil {
+		if errors.Is(err, services.ErrPowerUpInsufficientFunds) || errors.Is(err, services.ErrPowerUpNoToken) {
+			gs.sendError(services.PowerUpErrorCode(err), err.Error())
+		} else {
+			log.Printf("[ws] charge %s failed for session %s: %v", powerUp, gs.ID, err)
+			gs.sendError(services.PowerUpErrorCode(err), "could not pay for the power-up, please try again")
+		}
+		return nil, false
+	}
+	return res, true
 }
 
 // scoreAnswer grades option for q and applies streak/score/skip bookkeeping to s.

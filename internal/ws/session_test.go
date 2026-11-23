@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/models"
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/testutil"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/ws"
 	"github.com/gorilla/websocket"
 )
@@ -197,6 +198,7 @@ func TestGameSession_BasicQuizFlow(t *testing.T) {
 func TestGameSession_5050PowerUp(t *testing.T) {
 	sessionID := "test-session-powerup"
 	clientID := 101
+	testutil.FundedPlayer(t, clientID, 1000) // power-ups are paid on the server
 	gameSession := &models.GameSession{
 		ID:             sessionID,
 		ClientID:       clientID,

@@ -26,6 +26,7 @@ func RegisterBillingRoutes(router *gin.Engine) {
 		player.GET("/products", handlers.GetBillingProductsHandler)
 		player.GET("/account-id", handlers.GetBillingAccountHandler)
 		player.GET("/subscription", handlers.GetSubscriptionStatusHandler)
+		player.GET("/entitlements", handlers.GetEntitlementsHandler)
 		player.POST("/verify", middleware.MaxBodyBytes(billingVerifyMaxBody), verifyLimit, handlers.VerifyPurchaseHandler)
 
 		// Google Pub/Sub push: no player session; authenticated in the handler.

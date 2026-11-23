@@ -74,6 +74,8 @@ type VoidedPurchase struct {
 type Client interface {
 	GetProduct(ctx context.Context, productID, token string) (*ProductPurchase, error)
 	ConsumeProduct(ctx context.Context, productID, token string) error
+	// AcknowledgeProduct confirms a non-consumable (topic pack) purchase.
+	AcknowledgeProduct(ctx context.Context, productID, token string) error
 	GetSubscription(ctx context.Context, token string) (*SubscriptionPurchase, error)
 	AcknowledgeSubscription(ctx context.Context, productID, token string) error
 	ListVoided(ctx context.Context, since time.Time) ([]VoidedPurchase, error)
@@ -162,6 +164,13 @@ func (c *apiClient) ConsumeProduct(ctx context.Context, productID, token string)
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
 	return mapErr(c.svc.Purchases.Products.Consume(c.packageName, productID, token).Context(ctx).Do())
+}
+
+func (c *apiClient) AcknowledgeProduct(ctx context.Context, productID, token string) error {
+	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
+	return mapErr(c.svc.Purchases.Products.Acknowledge(c.packageName, productID, token,
+		&androidpublisher.ProductPurchasesAcknowledgeRequest{}).Context(ctx).Do())
 }
 
 func (c *apiClient) GetSubscription(ctx context.Context, token string) (*SubscriptionPurchase, error) {

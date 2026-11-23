@@ -8,7 +8,9 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/config"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/models"
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/testutil"
 	ws "github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/ws"
 )
 
@@ -172,6 +174,7 @@ func TestSuddenDeath_ClearingAllQuestionsReportsCleared(t *testing.T) {
 
 // A skip is a purchased power-up, not a mistake, so it must not eliminate.
 func TestSuddenDeath_SkipDoesNotEliminate(t *testing.T) {
+	db := testutil.FundedPlayer(t, 77, 1000) // power-ups are paid on the server
 	client := startSuddenDeath(t, "sd-skip", models.GameModeSuddenDeath, 2)
 
 	submitOption(t, client, "ACC001", "skip")
@@ -180,6 +183,14 @@ func TestSuddenDeath_SkipDoesNotEliminate(t *testing.T) {
 	if !res.IsSkipped {
 		t.Fatalf("expected a skipped result, got %+v", res)
 	}
+	var coins int
+	db.Raw(`SELECT coins FROM clients WHERE id = 77`).Scan(&coins)
+	if coins != 1000-35 {
+		t.Fatalf("skip was not charged on the server: coins = %d, want %d", coins, 1000-35)
+	}
+	// The rest of the run ends in finalization, which is PostgreSQL-only SQL;
+	// detach the test database like the other socket tests run.
+	config.DB = nil
 
 	// The run continues to question 2 rather than ending.
 	msg := readNextMessage(t, client, 3*time.Second)
@@ -261,6 +272,7 @@ func TestMCQMode_CompletionIsNotReportedAsElimination(t *testing.T) {
 }
 
 func TestSuddenDeath_AddTimeExtendsAuthoritativeTimerAndResync(t *testing.T) {
+	testutil.FundedPlayer(t, 77, 1000) // power-ups are paid on the server
 	client := startSuddenDeath(t, "sd-add-time", models.GameModeSuddenDeath, 2)
 
 	powerUp, _ := json.Marshal(ws.UsePowerUpData{
