@@ -188,7 +188,7 @@ func ClientAuthMiddleware(c *gin.Context) {
 		go func() {
 			defer wg.Done()
 			ctx := c.Request.Context()
-			cacheKey := fmt.Sprintf("quiz:auth:client:%d", clientID)
+			cacheKey := cache.AuthClientKey(clientID)
 			if cache.GetJSON(ctx, cacheKey, &client) {
 				return
 			}

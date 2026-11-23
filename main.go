@@ -13,6 +13,7 @@ import (
 
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/config"
 	db "github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/database"
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/pages"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/routes"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/services"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/ws"
@@ -140,6 +141,7 @@ func main() {
 	routes.RegisterLeaderboardRoutes(r)
 	routes.RegisterBillingRoutes(r)
 	routes.RegisterMonetizationRoutes(r)
+	pages.Register(r) // privacy policy and account deletion pages for the Play listing
 
 	// 5b. Start background session inactivity sweeper (TTL: 5 minutes, sweeps every 1 minute)
 	services.StartSessionTTLSweeper(context.Background(), 1*time.Minute)

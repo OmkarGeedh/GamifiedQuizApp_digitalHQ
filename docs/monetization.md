@@ -224,7 +224,7 @@ All routes exist at the root and under `/api/v1`.
 | `GET /billing/entitlements` | player | Pass status, owned topic packs, perks |
 | `POST /billing/rtdn` | Pub/Sub OIDC + `?token=` | Google Play notifications |
 | `POST /pass/monthly-gems` | player | Claim monthly gems (402 without the Pass, 409 already claimed) |
-| `GET /ads/config` | player | Ad units, request policy, placements and what is left today |
+| `GET /ads/config` | player | Ad units, request policy, placements, what is left today, and the ad chest odds (`chest_odds`) |
 | `POST /ads/rewards` | player | Start an ad reward (Pass: paid now). 429 caps or cooldown, 409 token cap, 503 ads off |
 | `GET /ads/rewards/:id` | player | Poll a reward |
 | `POST /ads/rewards/:id/dev-complete` | player | Local testing only. 404 unless `ADS_DEV_AUTO_FULFILL=true` outside production |
@@ -232,6 +232,8 @@ All routes exist at the root and under `/api/v1`.
 | `GET /power-ups` | player | Prices, tokens held, coins |
 | `POST /quiz/power-ups/fifty-fifty` | player | Now charges (`pay_with`); 402 when the player cannot pay |
 | `POST /quiz/sudden-death/power-up` and `/answer` (skip) | player | Now charge (`pay_with`); error events `insufficient_funds` and `no_power_up_token` |
+| `POST /profile/delete` | player | Delete the account and all its data (password confirmed; 403 wrong password; rate limited) |
+| `GET /privacy`, `GET /account-deletion` | public | Privacy policy and how to delete an account without the app (URLs for Play Console) |
 
 ## 10. Configuration
 
@@ -252,6 +254,7 @@ Backend (Catalyst AppSail env vars, never `.env`):
 | `ADS_MAX_CONTENT_RATING` | | Default `G` |
 | `ADS_AGE_TREATMENT` | | `teen` (default), `child`, `unspecified` |
 | `ADS_DEV_AUTO_FULFILL` | | Local testing with test ads; ignored in production |
+| `SUPPORT_EMAIL` | for the Play listing | Contact shown on `/privacy` and `/account-deletion`; without it the pages point to the Play listing's contact |
 
 App build:
 
@@ -322,3 +325,44 @@ What changes for players on **older app versions**:
   - The billing controller: it finishes a purchase only after the server grants it, leaves a rejected one unfinished, keeps an offline one for retry, and ignores duplicate events.
   - The ad runner: Pass path, early close, caps, slow callback.
   - The datasource parsing, the 402 mapping, and the store widget.
+
+## 15. Google Play compliance
+
+**In the app and backend:**
+
+| Play requirement | How it is met |
+|---|---|
+| Digital goods use Google Play Billing | Gem packs, topic packs and the Quiz Pass are sold only through Play Billing (Billing Library 9.1.0). There are no outside payment links in the app. |
+| Purchases acknowledged within 3 days; refunds respected | The server consumes or acknowledges every purchase after granting it. The hourly sweeper retries, and voided purchases take back what they gave. |
+| Subscription terms clear before purchase; easy to cancel | The Quiz Pass card shows the price per period, says it renews automatically until cancelled and how to cancel, and has a **Manage or cancel in Google Play** button that opens Play's subscription centre. |
+| Odds disclosed for randomised rewards | The ad chest shows its odds before opening (`chest_odds` from `/ads/config`). Coins can't be bought, so the coin-priced Chest Box chests are not paid loot boxes. |
+| Rewarded ads opt-in, reward stated, not disruptive | Rewarded ads only, each started from a tap that names the reward. Never shown during a game; daily caps; no banners, interstitials or app-open ads. |
+| Families policy: no advertising ID from children or unknown ages | Everyone is treated as under 18 until age is verified: non-personalised ads, G rating, teen treatment. The `AD_ID` permission is removed from the manifest (`tools:node="remove"`). |
+| EEA/UK consent can be changed | Google UMP consent is requested before the first ad. An **Ad privacy choices** button appears where Google says it is required. |
+| Account deletion in the app and on the web | Profile › **Delete account** (password confirmed) deletes the account and all its data (`POST /profile/delete`). The public page `/account-deletion` explains how to delete without the app. |
+| Privacy policy in the listing and in the app | `/privacy` is served by the backend; the app links to it from Shop › Gems & Pass. **The text is a draft written from what the app actually does: have it reviewed, and set `SUPPORT_EMAIL`.** |
+| Target API level | targetSdk 36 (Flutter default). |
+
+**In Play Console (not code):**
+
+- **Store presence › Privacy policy:** `https://<api host>/privacy`.
+- **App content › Ads:** "Yes, my app contains ads".
+- **App content › Advertising ID:** "No" (the permission is removed).
+- **App content › Target audience and content:** choose the age groups honestly.
+  - If they include children under 13, the app falls under the Families policy: set `ADS_AGE_TREATMENT=child`, and use only Families-certified ad settings.
+  - Children under 13 are also why `AD_ID` stays removed.
+- **App content › Data safety:** declare these data types:
+  - Personal info: email, name.
+  - App activity: in-app interactions, in-app purchase history.
+  - Financial info: purchase history (via Google Play).
+  - App info and performance, and device or other IDs, collected by the Mobile Ads SDK.
+  - Encrypted in transit: yes. Deletion: yes, with the `/account-deletion` URL.
+- **App content › Account deletion:** the `/account-deletion` URL.
+- **Monetize:**
+  - Create the products and the `quiz_pass` base plans (section 3), with clear names and descriptions.
+  - For Indian users, set prices in INR.
+- **AdMob:**
+  - Blocking controls for sensitive categories.
+  - Privacy and messaging (UMP) forms for GDPR.
+  - SSV callback URL (section 11).
+- **Content rating questionnaire:** declare in-app purchases, rewarded ads, and that random rewards (the chests and the spin wheel) cannot be bought with real money.

@@ -32,6 +32,13 @@ type AdPlacementDTO struct {
 	Reason         string `json:"reason,omitempty"` // why not available
 }
 
+// ChestOddsDTO is one ad chest prize and its chance, shown before opening.
+type ChestOddsDTO struct {
+	Currency string  `json:"currency"`
+	Amount   int     `json:"amount"`
+	Percent  float64 `json:"percent"`
+}
+
 // AdsConfigDTO is GET /ads/config.
 type AdsConfigDTO struct {
 	RewardedAdsEnabled bool               `json:"rewarded_ads_enabled"`
@@ -43,6 +50,8 @@ type AdsConfigDTO struct {
 	TotalDailyCap      int                `json:"total_daily_cap"`
 	RemainingToday     int                `json:"remaining_today"`
 	CooldownSeconds    int                `json:"cooldown_seconds"`
+	// ChestOdds are the ad chest's prizes and chances, disclosed before opening.
+	ChestOdds []ChestOddsDTO `json:"chest_odds"`
 }
 
 var adPlacementPattern = regexp.MustCompile(`^[a-z_]{1,32}$`)

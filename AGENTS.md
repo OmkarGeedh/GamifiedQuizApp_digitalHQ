@@ -87,6 +87,7 @@ Sessions have a 5-minute inactivity TTL (`services.SessionInactivityTTL`), refre
 - Exception to the latency rules: a power-up use, a purchase and an ad reward each run one short PostgreSQL transaction (they move value; answers stay Redis-only).
 - Topic packs: `CheckTopicAccess` at game start and on `/topics/:id/questions` (402 when locked). Quiz Pass: `services.IsPremium` (never trust the app).
 - Production logs a `SECURITY WARNING` on start while `JWT_SECRET` is missing, short or the public default (`config.ProductionSecretProblems`). It must not refuse to start: that took the API down.
+- Google Play compliance (`docs/monetization.md` §15): `POST /profile/delete` (password-confirmed account deletion; every table cascades, `billing_audit` keeps anonymised rows) and the public pages `/privacy` and `/account-deletion` (`internal/pages`, embedded templates, `SUPPORT_EMAIL`).
 
 ## Analytics
 

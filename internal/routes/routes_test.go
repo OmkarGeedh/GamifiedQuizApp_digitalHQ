@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/pages"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/routes"
 	"github.com/gin-gonic/gin"
 )
@@ -68,6 +69,7 @@ func setupTestEngine() *gin.Engine {
 	routes.RegisterLeaderboardRoutes(r)
 	routes.RegisterBillingRoutes(r)
 	routes.RegisterMonetizationRoutes(r)
+	pages.Register(r) // privacy policy and account deletion pages for the Play listing
 
 	r.NoMethod(func(c *gin.Context) {
 		c.JSON(http.StatusMethodNotAllowed, gin.H{
@@ -177,6 +179,27 @@ func TestRouteRegistrationBothPrefixes(t *testing.T) {
 		// Since it requires authentication, it should respond with 401 Unauthorized
 		if w.Code != http.StatusUnauthorized {
 			t.Errorf("expected status 401 Unauthorized for unauthenticated %s, got %d", path, w.Code)
+		}
+	}
+
+	// Public pages for the Play listing (privacy policy, account deletion).
+	for _, path := range []string{"/privacy", "/api/v1/privacy", "/account-deletion", "/api/v1/account-deletion"} {
+		req, _ := http.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Errorf("expected public page %s to return 200, got %d", path, w.Code)
+		}
+	}
+
+	// Account deletion needs a signed-in player under both prefixes.
+	for _, path := range []string{"/profile/delete", "/api/v1/profile/delete"} {
+		req, _ := http.NewRequest(http.MethodPost, path, strings.NewReader(`{"password":"x"}`))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("expected 401 for unauthenticated %s, got %d", path, w.Code)
 		}
 	}
 

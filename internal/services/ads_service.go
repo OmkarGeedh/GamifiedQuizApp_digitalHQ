@@ -221,6 +221,9 @@ func GetAdsConfig(ctx context.Context, clientID int) (*dto.AdsConfigDTO, int, er
 	if ready {
 		out.SSVUserID, _ = AdsUserID(clientID)
 	}
+	for _, p := range AdChestPrizes {
+		out.ChestOdds = append(out.ChestOdds, dto.ChestOddsDTO{Currency: p.Currency, Amount: p.Amount, Percent: float64(p.WeightPPM) / 10_000})
+	}
 	for _, p := range AdPlacementRules {
 		left := max(0, p.DailyCap-counts[p.ID])
 		pl := dto.AdPlacementDTO{ID: p.ID, Reward: p.Reward, DailyCap: p.DailyCap, RemainingToday: left, Available: true}

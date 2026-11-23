@@ -52,6 +52,17 @@ func IsRedisAvailable() bool {
 
 // GetJSON decodes the Redis value at key into dst. It reports false on a miss, a
 // decode error, or when Redis is unavailable (all caching lives in Redis only).
+// AuthClientKey is the cached active-client check of the auth middleware.
+func AuthClientKey(clientID int) string { return fmt.Sprintf("quiz:auth:client:%d", clientID) }
+
+// Delete removes a cached key. It is a no-op when Redis is unavailable.
+func Delete(ctx context.Context, key string) error {
+	if config.RedisClient == nil {
+		return nil
+	}
+	return config.RedisClient.Del(ctx, key).Err()
+}
+
 func GetJSON(ctx context.Context, key string, dst any) bool {
 	if config.RedisClient == nil {
 		return false

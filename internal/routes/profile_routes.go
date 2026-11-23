@@ -1,6 +1,8 @@
 package routes
 
 import (
+	"time"
+
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/handlers"
 	"github.com/OmkarGeedh/GamifiedQuizApp_digitalHQ/internal/middleware"
 	"github.com/gin-gonic/gin"
@@ -14,7 +16,13 @@ func RegisterProfileRoutes(router *gin.Engine) {
 	router.GET("/api/v1/profile/options", handlers.GetProfileOptionsHandler)
 	router.GET("/api/v1/profile/setup-options", handlers.GetProfileOptionsHandler)
 
+	// Account deletion attempts per player per minute (password guessing guard).
+	deleteLimit := middleware.RateLimitPerClient("account_delete", 5, time.Minute)
+
 	registerAuthRoutes := func(grp *gin.RouterGroup) {
+		// Google Play requires in-app account deletion; the password is confirmed.
+		grp.POST("/delete", middleware.MaxBodyBytes(2<<10), deleteLimit, handlers.DeleteAccountHandler)
+
 		// 4-step onboarding submission
 		grp.POST("/setup", handlers.SetupProfileHandler)
 
